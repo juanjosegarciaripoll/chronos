@@ -1,7 +1,62 @@
 [project]
 name = "chronos"
 version = "0.1.0"
-description = "Add your description here"
+description = "Terminal-first calendar client with CalDAV synchronisation."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "caldav>=1.3",
+    "icalendar>=5.0",
+    "python-dateutil>=2.9",
+    "textual>=0.80",
+    "mcp>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chronos"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "basedpyright>=1.17",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pyinstrument>=5.0",
+    "types-python-dateutil>=2.9",
+]
+build = [
+    "pyinstaller>=6.0",
+]
+docs = [
+    "mkdocs-material>=9.6",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "ARG", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "src"
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+include = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

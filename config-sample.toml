@@ -1,0 +1,25 @@
+# chronos configuration sample. Copy to config.toml and edit to taste.
+#
+# Path values support ~, $VAR, and %VAR% expansion.
+
+config_version = 1
+
+# Show Unicode glyphs in the TUI. Off by default so terminals without a
+# suitable font fall back cleanly.
+use_utf8 = false
+
+# External editor invoked for long-form event editing.
+# editor = "vim"
+
+# [[accounts]]
+# name = "personal"
+# url = "https://caldav.example.com/dav/principals/user@example.com/"
+# username = "user@example.com"
+# credential = { backend = "env", variable = "CHRONOS_PERSONAL_PASSWORD" }
+# mirror_path = "~/.local/share/chronos/mirror/personal"
+# trash_retention_days = 30
+#
+# # Calendar display names to sync (Python re.fullmatch).
+# include = [".*"]
+# exclude = []
+# read_only = []
