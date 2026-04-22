@@ -414,3 +414,311 @@ class ConfigLoadErrorTest(unittest.TestCase):
             sys.stderr = original
         self.assertEqual(code, 2)
         self.assertIn("config error", stderr.getvalue())
+
+
+class ConfigEditingCliTestCase(unittest.TestCase):
+    """Harness for the config-editing subcommands.
+
+    These commands don't need a mirror/index/session — just a config path
+    and captured streams.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config_path = self.tmp / "config.toml"
+        self.stdout = io.StringIO()
+        self.stderr = io.StringIO()
+
+    def _run(
+        self,
+        argv: list[str],
+        *,
+        open_editor: cli.EditorFn | None = None,
+    ) -> int:
+        return cli.main(
+            ["--config", str(self.config_path), *argv],
+            open_editor=open_editor,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+
+class InitCommandTest(ConfigEditingCliTestCase):
+    def test_init_writes_minimal_config(self) -> None:
+        code = self._run(["init"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self.config_path.exists())
+        self.assertIn("Wrote", self.stdout.getvalue())
+        # File is loadable.
+        from chronos.config import load
+
+        config = load(self.config_path)
+        self.assertEqual(config.config_version, 1)
+        self.assertEqual(config.accounts, ())
+
+    def test_init_refuses_when_file_exists(self) -> None:
+        self.config_path.write_text("config_version = 1\n", encoding="utf-8")
+        code = self._run(["init"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", self.stderr.getvalue())
+
+
+class AccountAddCommandTest(ConfigEditingCliTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._run(["init"])
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+
+    def test_add_plaintext_account(self) -> None:
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://caldav.example.com/dav/",
+                "--username",
+                "user@example.com",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "s3cret",
+                "--mirror-path",
+                "/tmp/chronos/personal",
+            ]
+        )
+        self.assertEqual(code, 0)
+        from chronos.config import load
+
+        config = load(self.config_path)
+        self.assertEqual(len(config.accounts), 1)
+        from chronos.domain import PlaintextCredential
+
+        cred = config.accounts[0].credential
+        assert isinstance(cred, PlaintextCredential)
+        self.assertEqual(cred.password, "s3cret")
+
+    def test_add_env_account(self) -> None:
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://caldav.example.com/dav/",
+                "--username",
+                "user@example.com",
+                "--credential-backend",
+                "env",
+                "--credential-value",
+                "CHRONOS_PW",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.assertEqual(code, 0)
+        from chronos.config import load
+        from chronos.domain import EnvCredential
+
+        config = load(self.config_path)
+        cred = config.accounts[0].credential
+        assert isinstance(cred, EnvCredential)
+        self.assertEqual(cred.variable, "CHRONOS_PW")
+
+    def test_add_command_account_splits_value(self) -> None:
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://x/",
+                "--username",
+                "u@example.com",
+                "--credential-backend",
+                "command",
+                "--credential-value",
+                "pass show chronos",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.assertEqual(code, 0)
+        from chronos.config import load
+        from chronos.domain import CommandCredential
+
+        config = load(self.config_path)
+        cred = config.accounts[0].credential
+        assert isinstance(cred, CommandCredential)
+        self.assertEqual(cred.command, ("pass", "show", "chronos"))
+
+    def test_add_rejects_duplicate_name(self) -> None:
+        self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://x/",
+                "--username",
+                "u@example.com",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "p",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://x/",
+                "--username",
+                "u@example.com",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "p",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", self.stderr.getvalue())
+
+
+class AccountListCommandTest(ConfigEditingCliTestCase):
+    def test_list_no_accounts(self) -> None:
+        self._run(["init"])
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(["account", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("no accounts", self.stdout.getvalue())
+
+    def test_list_shows_accounts_without_passwords(self) -> None:
+        self._run(["init"])
+        self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://caldav.example.com/dav/",
+                "--username",
+                "user@example.com",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "SUPER_SECRET_DO_NOT_LEAK",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(["account", "list"])
+        self.assertEqual(code, 0)
+        output = self.stdout.getvalue()
+        self.assertIn("personal", output)
+        self.assertIn("user@example.com", output)
+        self.assertIn("backend=plaintext", output)
+        self.assertNotIn("SUPER_SECRET_DO_NOT_LEAK", output)
+
+
+class AccountRmCommandTest(ConfigEditingCliTestCase):
+    def test_rm_existing_account(self) -> None:
+        self._run(["init"])
+        self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "gone",
+                "--url",
+                "https://x/",
+                "--username",
+                "u@example.com",
+                "--credential-backend",
+                "env",
+                "--credential-value",
+                "X",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(["account", "rm", "gone"])
+        self.assertEqual(code, 0)
+        from chronos.config import load
+
+        config = load(self.config_path)
+        self.assertEqual(config.accounts, ())
+
+    def test_rm_missing_account(self) -> None:
+        self._run(["init"])
+        code = self._run(["account", "rm", "never-existed"])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", self.stderr.getvalue())
+
+
+class ConfigEditCommandTest(ConfigEditingCliTestCase):
+    def test_edit_applies_user_changes(self) -> None:
+        self._run(["init"])
+
+        def editor(path: Path) -> None:
+            path.write_text("config_version = 1\nuse_utf8 = true\n", encoding="utf-8")
+
+        code = self._run(["config", "edit"], open_editor=editor)
+        self.assertEqual(code, 0)
+        from chronos.config import load
+
+        self.assertTrue(load(self.config_path).use_utf8)
+
+    def test_edit_rejects_invalid_toml_keeps_original(self) -> None:
+        self._run(["init"])
+        original_bytes = self.config_path.read_bytes()
+
+        def editor(path: Path) -> None:
+            path.write_text("this is = = not valid", encoding="utf-8")
+
+        code = self._run(["config", "edit"], open_editor=editor)
+        self.assertEqual(code, 1)
+        self.assertIn("parse error", self.stderr.getvalue())
+        # Original file untouched.
+        self.assertEqual(self.config_path.read_bytes(), original_bytes)
+
+    def test_edit_handles_missing_config(self) -> None:
+        code = self._run(["config", "edit"], open_editor=lambda _: None)
+        self.assertEqual(code, 1)
+        self.assertIn("not found", self.stderr.getvalue())
+
+    def test_edit_leaves_no_tempfile_behind(self) -> None:
+        self._run(["init"])
+
+        def editor(path: Path) -> None:
+            path.write_text("config_version = 1\n", encoding="utf-8")
+
+        self._run(["config", "edit"], open_editor=editor)
+        leftovers = [
+            p
+            for p in self.config_path.parent.iterdir()
+            if p.name.startswith("chronos-edit-")
+        ]
+        self.assertEqual(leftovers, [])

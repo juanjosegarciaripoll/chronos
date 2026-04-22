@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 
-from chronos.config import ConfigError, load, parse
+from chronos.config import ConfigError, dump, load, parse, save
 from chronos.domain import (
+    AccountConfig,
+    AppConfig,
     CommandCredential,
     EnvCredential,
     KeyringCredential,
@@ -211,3 +215,123 @@ class ParseCredentialTest(unittest.TestCase):
                     ],
                 }
             )
+
+
+def _sample_config(**overrides: object) -> AppConfig:
+    account = AccountConfig(
+        name=str(overrides.get("name", "personal")),
+        url="https://caldav.example.com/dav/",
+        username="user@example.com",
+        credential=EnvCredential(variable="CHRONOS_PERSONAL_PW"),
+        mirror_path=Path("/tmp/chronos/personal"),
+        trash_retention_days=30,
+        include=(re.compile(".*"),),
+        exclude=(),
+        read_only=(),
+    )
+    return AppConfig(
+        config_version=1,
+        use_utf8=False,
+        editor=None,
+        accounts=(account,),
+    )
+
+
+class DumpTest(unittest.TestCase):
+    def test_dump_produces_valid_toml(self) -> None:
+        import tomli_w  # noqa: PLC0415 — local to keep deps explicit
+
+        config = _sample_config()
+        data = dump(config)
+        rendered = tomli_w.dumps(data)
+        # Round-trip through tomllib to prove the output is valid TOML.
+        reparsed = tomllib.loads(rendered)
+        self.assertEqual(reparsed["config_version"], 1)
+        self.assertEqual(len(reparsed["accounts"]), 1)
+        self.assertEqual(reparsed["accounts"][0]["name"], "personal")
+
+    def test_dump_omits_none_editor(self) -> None:
+        data = dump(_sample_config())
+        self.assertNotIn("editor", data)
+
+    def test_dump_includes_editor_when_set(self) -> None:
+        config = _sample_config()
+        config = AppConfig(
+            config_version=config.config_version,
+            use_utf8=config.use_utf8,
+            editor="nvim",
+            accounts=config.accounts,
+        )
+        data = dump(config)
+        self.assertEqual(data["editor"], "nvim")
+
+    def test_credential_roundtrip(self) -> None:
+        for cred in (
+            PlaintextCredential(password="s3cret"),
+            EnvCredential(variable="MY_VAR"),
+            CommandCredential(command=("pass", "show", "chronos")),
+            KeyringCredential(service="chronos", username="u@example.com"),
+        ):
+            with self.subTest(backend=type(cred).__name__):
+                config = _sample_config()
+                config = AppConfig(
+                    config_version=config.config_version,
+                    use_utf8=config.use_utf8,
+                    editor=None,
+                    accounts=(
+                        AccountConfig(
+                            name=config.accounts[0].name,
+                            url=config.accounts[0].url,
+                            username=config.accounts[0].username,
+                            credential=cred,
+                            mirror_path=config.accounts[0].mirror_path,
+                            trash_retention_days=config.accounts[
+                                0
+                            ].trash_retention_days,
+                            include=config.accounts[0].include,
+                            exclude=config.accounts[0].exclude,
+                            read_only=config.accounts[0].read_only,
+                        ),
+                    ),
+                )
+                reparsed = parse(dump(config))
+                self.assertEqual(reparsed.accounts[0].credential, cred)
+
+
+class SaveRoundTripTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def test_save_then_load_produces_equal_config(self) -> None:
+        original = _sample_config()
+        path = self.tmp / "config.toml"
+        save(original, path)
+        self.assertTrue(path.exists())
+        loaded = load(path)
+        # Regex patterns aren't directly comparable -- check .pattern.
+        self.assertEqual(loaded.config_version, original.config_version)
+        self.assertEqual(loaded.use_utf8, original.use_utf8)
+        self.assertEqual(loaded.editor, original.editor)
+        self.assertEqual(len(loaded.accounts), 1)
+        orig_a = original.accounts[0]
+        load_a = loaded.accounts[0]
+        self.assertEqual(load_a.name, orig_a.name)
+        self.assertEqual(load_a.url, orig_a.url)
+        self.assertEqual(load_a.username, orig_a.username)
+        self.assertEqual(load_a.credential, orig_a.credential)
+        self.assertEqual(load_a.trash_retention_days, orig_a.trash_retention_days)
+        self.assertEqual(
+            [p.pattern for p in load_a.include],
+            [p.pattern for p in orig_a.include],
+        )
+
+    def test_save_creates_parent_directory(self) -> None:
+        path = self.tmp / "nested" / "deep" / "config.toml"
+        save(_sample_config(), path)
+        self.assertTrue(path.exists())
+
+    def test_save_is_atomic_no_tempfile_leftovers(self) -> None:
+        path = self.tmp / "config.toml"
+        save(_sample_config(), path)
+        leftovers = [p for p in self.tmp.iterdir() if p.name.startswith(".tmp-")]
+        self.assertEqual(leftovers, [])

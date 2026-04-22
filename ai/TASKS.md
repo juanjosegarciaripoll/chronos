@@ -4,7 +4,7 @@ Actionable backlog. Top of file is next up; bottom is later. Each milestone is a
 
 ## Current state
 
-Skeleton only. Source beyond `main.py` does not exist yet. The `ai/` documents have landed (this file is one of them). Next work is Milestone 0.
+Milestones 0–5 shipped. Next up is **Milestone 6 — End-to-end CLI usability** (reprioritised from the original TUI milestone; the TUI can't do useful work until a user can set up accounts and sync real data).
 
 ## Milestone 0 — Project scaffolding
 
@@ -67,7 +67,28 @@ Skeleton only. Source beyond `main.py` does not exist yet. The `ai/` documents h
 
 **Acceptance:** every command usable offline against a seeded mirror+index; doctor reports real issues on a deliberately-corrupted fixture.
 
-## Milestone 6 — TUI
+## Milestone 6 — End-to-end CLI usability
+
+Reprioritised from the original "TUI" milestone. Before the TUI makes sense, a user has to be able to configure chronos and sync against a real server from the command line.
+
+**Config-editing CLI** (via `tomli-w`, now approved in `CONVENTIONS.md §7`):
+
+- `chronos init` — write a minimal `config.toml` at the default path (if missing).
+- `chronos account add --name ... --url ... --username ... --credential-backend {plaintext|env|command} --credential-value ... --mirror-path ...` — append an account.
+- `chronos account list` — show configured accounts; never prints passwords.
+- `chronos account rm NAME` — remove by name.
+- `chronos config edit` — open `config.toml` in `$EDITOR`; on save, reparse + validate; offer to re-edit or discard on validation failure.
+- `config.dump()` / `config.save()` helpers round-trip `AppConfig` through TOML.
+
+**Real CalDAV HTTP client** — replace every `NotImplementedError` in `caldav_client.py` with a call into the `caldav` library:
+
+- `discover_principal`, `list_calendars`, `get_ctag`, `calendar_query`, `calendar_multiget`, `put`, `delete`.
+- Translate `caldav.lib.error` exceptions into the `CalDAVError` hierarchy.
+- Integration tests guarded by `CHRONOS_INTEGRATION=1` env var (hit a local Radicale/Baikal; skipped by default).
+
+**Acceptance:** `chronos init && chronos account add ... && chronos sync && chronos list` works end-to-end against a real CalDAV server with no hand-editing of `config.toml`.
+
+## Milestone 7 — TUI
 
 - `tui/app.py` + `tui/bindings.py` + the screen / widget files in `ARCHITECTURE.md §1`.
 - Day, week, month, agenda, todo-list views.
@@ -76,14 +97,14 @@ Skeleton only. Source beyond `main.py` does not exist yet. The `ai/` documents h
 
 **Acceptance:** all five views navigable; create / edit / trash flows work end-to-end against a seeded repo; TUI tests green.
 
-## Milestone 7 — MCP server
+## Milestone 8 — MCP server
 
 - `mcp_server.py` — read-only tools: `list_calendars`, `query_range(start, end)`, `search(query)`, `get_event(uid)`, `get_todo(uid)`.
 - MCP tests that stand up a server in-process and exercise each tool.
 
 **Acceptance:** MCP server starts cleanly; each tool returns expected payloads against a seeded index; no write tools present.
 
-## Milestone 8 — Packaging and release
+## Milestone 9 — Packaging and release
 
 - `chronos.spec` — PyInstaller spec.
 - `scripts/build.py` — orchestrates tests + docs + binary + archive + installer.

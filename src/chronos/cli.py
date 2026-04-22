@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import shlex
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,13 +15,18 @@ from typing import TextIO
 
 from chronos.config import ConfigError
 from chronos.config import load as load_config
+from chronos.config import save as save_config
 from chronos.credentials import CredentialResolutionError, DefaultCredentialsProvider
 from chronos.domain import (
     AccountConfig,
     AppConfig,
     CalendarRef,
+    CommandCredential,
     ComponentRef,
+    CredentialSpec,
+    EnvCredential,
     LocalStatus,
+    PlaintextCredential,
     ResourceRef,
     StoredComponent,
     VEvent,
@@ -37,6 +46,7 @@ from chronos.sync import sync_account
 
 SessionFactory = Callable[[AccountConfig, str], CalDAVSession]
 ContextFactory = Callable[[Path | None], "CliContext"]
+EditorFn = Callable[[Path], None]
 
 
 @dataclass
@@ -55,17 +65,34 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     context_factory: ContextFactory | None = None,
+    open_editor: EditorFn | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
 ) -> int:
+    out = stdout if stdout is not None else sys.stdout
+    err = stderr if stderr is not None else sys.stderr
     parser = _build_parser()
     args = parser.parse_args(argv)
-    # Only close the index when main() built the context itself — callers
-    # that inject a factory own the lifecycle of their context.
+    config_path: Path = args.config or default_config_path()
+
+    # Config-editing commands operate on the TOML file without needing the
+    # mirror / index / credential plumbing.
+    if args.command == "init":
+        return cmd_init(out, err, config_path=config_path)
+    if args.command == "account":
+        return _dispatch_account(args, out, err, config_path=config_path)
+    if args.command == "config":
+        return _dispatch_config(
+            args, out, err, config_path=config_path, open_editor=open_editor
+        )
+
+    # Data commands need a full context.
     owns_context = context_factory is None
     factory = context_factory or _default_context_factory
     try:
         ctx = factory(args.config)
     except ConfigError as exc:
-        sys.stderr.write(f"config error: {exc}\n")
+        err.write(f"config error: {exc}\n")
         return 2
     try:
         return _dispatch(args, ctx)
@@ -133,6 +160,46 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="Run diagnostics on the local state.")
 
+    sub.add_parser(
+        "init",
+        help="Write a minimal config.toml if none exists at the target path.",
+    )
+
+    account_p = sub.add_parser("account", help="Manage accounts in config.toml.")
+    account_sub = account_p.add_subparsers(dest="account_cmd", required=True)
+
+    account_add = account_sub.add_parser("add", help="Append a new account.")
+    account_add.add_argument("--name", required=True)
+    account_add.add_argument("--url", required=True)
+    account_add.add_argument("--username", required=True)
+    account_add.add_argument(
+        "--credential-backend",
+        choices=("plaintext", "env", "command"),
+        required=True,
+    )
+    account_add.add_argument(
+        "--credential-value",
+        required=True,
+        help=(
+            "For plaintext: the password. For env: the variable name. "
+            "For command: the command line (shlex-split)."
+        ),
+    )
+    account_add.add_argument("--mirror-path", type=Path, required=True)
+    account_add.add_argument("--trash-retention-days", type=int, default=30)
+
+    account_sub.add_parser("list", help="Show configured accounts.")
+
+    account_rm = account_sub.add_parser("rm", help="Remove an account by name.")
+    account_rm.add_argument("name")
+
+    config_p = sub.add_parser("config", help="Manage config.toml.")
+    config_sub = config_p.add_subparsers(dest="config_cmd", required=True)
+    config_sub.add_parser(
+        "edit",
+        help="Open config.toml in $EDITOR; validate and save on close.",
+    )
+
     return parser
 
 
@@ -174,6 +241,55 @@ def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
     if command == "doctor":
         return cmd_doctor(ctx)
     ctx.stderr.write(f"unknown command: {command}\n")
+    return 2
+
+
+def _dispatch_account(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+) -> int:
+    sub = str(args.account_cmd)
+    if sub == "add":
+        return cmd_account_add(
+            stdout,
+            stderr,
+            config_path=config_path,
+            name=args.name,
+            url=args.url,
+            username=args.username,
+            backend=args.credential_backend,
+            value=args.credential_value,
+            mirror_path=args.mirror_path,
+            trash_retention_days=args.trash_retention_days,
+        )
+    if sub == "list":
+        return cmd_account_list(stdout, stderr, config_path=config_path)
+    if sub == "rm":
+        return cmd_account_rm(stdout, stderr, config_path=config_path, name=args.name)
+    stderr.write(f"unknown account subcommand: {sub}\n")
+    return 2
+
+
+def _dispatch_config(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+    open_editor: EditorFn | None,
+) -> int:
+    sub = str(args.config_cmd)
+    if sub == "edit":
+        return cmd_config_edit(
+            stdout,
+            stderr,
+            config_path=config_path,
+            open_editor=open_editor or _default_open_editor,
+        )
+    stderr.write(f"unknown config subcommand: {sub}\n")
     return 2
 
 
@@ -368,7 +484,189 @@ def cmd_doctor(ctx: CliContext) -> int:
     return report.exit_code
 
 
+def cmd_init(stdout: TextIO, stderr: TextIO, *, config_path: Path) -> int:
+    if config_path.exists():
+        stderr.write(
+            f"config already exists at {config_path}. "
+            "Use `chronos config edit` to modify it.\n"
+        )
+        return 1
+    minimal = AppConfig(
+        config_version=1,
+        use_utf8=False,
+        editor=None,
+        accounts=(),
+    )
+    save_config(minimal, config_path)
+    stdout.write(f"Wrote {config_path}\n")
+    return 0
+
+
+def cmd_account_add(
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+    name: str,
+    url: str,
+    username: str,
+    backend: str,
+    value: str,
+    mirror_path: Path,
+    trash_retention_days: int,
+) -> int:
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        stderr.write(f"{exc}\n")
+        return 2
+    if any(a.name == name for a in config.accounts):
+        stderr.write(f"account already exists: {name}\n")
+        return 1
+    credential = _build_credential(backend, value)
+    import re  # local import: avoid module-level coupling for one-shot CLI
+
+    new_account = AccountConfig(
+        name=name,
+        url=url,
+        username=username,
+        credential=credential,
+        mirror_path=mirror_path,
+        trash_retention_days=trash_retention_days,
+        include=(re.compile(".*"),),
+        exclude=(),
+        read_only=(),
+    )
+    updated = AppConfig(
+        config_version=config.config_version,
+        use_utf8=config.use_utf8,
+        editor=config.editor,
+        accounts=(*config.accounts, new_account),
+    )
+    save_config(updated, config_path)
+    stdout.write(f"Added account {name} to {config_path}\n")
+    return 0
+
+
+def cmd_account_list(stdout: TextIO, stderr: TextIO, *, config_path: Path) -> int:
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        stderr.write(f"{exc}\n")
+        return 2
+    if not config.accounts:
+        stdout.write("(no accounts configured)\n")
+        return 0
+    for account in config.accounts:
+        backend = _credential_backend(account.credential)
+        stdout.write(
+            f"{account.name}\t{account.url}\t{account.username}\tbackend={backend}\n"
+        )
+    return 0
+
+
+def cmd_account_rm(
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+    name: str,
+) -> int:
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        stderr.write(f"{exc}\n")
+        return 2
+    remaining = tuple(a for a in config.accounts if a.name != name)
+    if len(remaining) == len(config.accounts):
+        stderr.write(f"account not found: {name}\n")
+        return 1
+    updated = AppConfig(
+        config_version=config.config_version,
+        use_utf8=config.use_utf8,
+        editor=config.editor,
+        accounts=remaining,
+    )
+    save_config(updated, config_path)
+    stdout.write(f"Removed account {name} from {config_path}\n")
+    return 0
+
+
+def cmd_config_edit(
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+    open_editor: EditorFn,
+) -> int:
+    if not config_path.exists():
+        stderr.write(f"config not found: {config_path}. Run `chronos init` first.\n")
+        return 1
+    # Copy the current contents into a temp file; the user edits there.
+    # On validation success we atomically replace the original; on failure
+    # the original is untouched.
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix="chronos-edit-",
+        suffix=".toml",
+        dir=config_path.parent,
+        delete=False,
+    ) as tmp:
+        tmp.write(config_path.read_bytes())
+        tmp_path = Path(tmp.name)
+    try:
+        try:
+            open_editor(tmp_path)
+        except subprocess.CalledProcessError:
+            stderr.write("editor exited non-zero; config unchanged.\n")
+            return 1
+        except FileNotFoundError as exc:
+            stderr.write(f"editor not found: {exc}\n")
+            return 1
+        try:
+            config = load_config(tmp_path)
+        except ConfigError as exc:
+            stderr.write(f"config parse error: {exc}\n")
+            stderr.write("Original config left unchanged.\n")
+            return 1
+        save_config(config, config_path)
+        stdout.write(f"Saved {config_path}\n")
+        return 0
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 # Helpers ---------------------------------------------------------------------
+
+
+def _default_open_editor(path: Path) -> None:
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if not editor:
+        raise FileNotFoundError(
+            "Neither $EDITOR nor $VISUAL is set; cannot launch an editor."
+        )
+    cmd = [*shlex.split(editor), str(path)]
+    subprocess.run(cmd, check=True)
+
+
+def _build_credential(backend: str, value: str) -> CredentialSpec:
+    if backend == "plaintext":
+        return PlaintextCredential(password=value)
+    if backend == "env":
+        return EnvCredential(variable=value)
+    if backend == "command":
+        return CommandCredential(command=tuple(shlex.split(value)))
+    raise ValueError(f"unknown credential backend: {backend}")
+
+
+def _credential_backend(spec: CredentialSpec) -> str:
+    if isinstance(spec, PlaintextCredential):
+        return "plaintext"
+    if isinstance(spec, EnvCredential):
+        return "env"
+    if isinstance(spec, CommandCredential):
+        return "command"
+    return "encrypted"
 
 
 def _default_session_factory(account: AccountConfig, password: str) -> CalDAVSession:

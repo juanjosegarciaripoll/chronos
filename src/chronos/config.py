@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import re
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import cast
+
+import tomli_w
 
 from chronos.domain import (
     AccountConfig,
@@ -203,3 +208,66 @@ def _optional_int(
             f"'{field}' must be an integer, got {type(value).__name__}", key
         )
     return value
+
+
+def dump(config: AppConfig) -> dict[str, object]:
+    """Serialise AppConfig to a TOML-writeable dict.
+
+    Round-trip invariant: `parse(dump(c)) == c` for any valid config
+    (regex patterns round-trip through their source strings; paths round-trip
+    through `str(path)` + re-expansion).
+    """
+    data: dict[str, object] = {
+        "config_version": config.config_version,
+        "use_utf8": config.use_utf8,
+    }
+    if config.editor is not None:
+        data["editor"] = config.editor
+    data["accounts"] = [_dump_account(a) for a in config.accounts]
+    return data
+
+
+def save(config: AppConfig, path: Path) -> None:
+    """Write `config` to `path` atomically (temp-file + rename)."""
+    payload = tomli_w.dumps(dump(config)).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".toml", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name)
+        raise
+
+
+def _dump_account(account: AccountConfig) -> dict[str, object]:
+    return {
+        "name": account.name,
+        "url": account.url,
+        "username": account.username,
+        "credential": _dump_credential(account.credential),
+        "mirror_path": str(account.mirror_path),
+        "trash_retention_days": account.trash_retention_days,
+        "include": [p.pattern for p in account.include],
+        "exclude": [p.pattern for p in account.exclude],
+        "read_only": [p.pattern for p in account.read_only],
+    }
+
+
+def _dump_credential(spec: CredentialSpec) -> dict[str, object]:
+    if isinstance(spec, PlaintextCredential):
+        return {"backend": "plaintext", "password": spec.password}
+    if isinstance(spec, EnvCredential):
+        return {"backend": "env", "variable": spec.variable}
+    if isinstance(spec, CommandCredential):
+        return {"backend": "command", "command": list(spec.command)}
+    # spec narrows to KeyringCredential by elimination on the union.
+    return {
+        "backend": "encrypted",
+        "service": spec.service,
+        "username": spec.username,
+    }

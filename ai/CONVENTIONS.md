@@ -75,6 +75,7 @@ Only these. Anything else needs explicit approval before `uv add`.
 | `python-dateutil` | RRULE expansion, timezone-aware datetime arithmetic. |
 | `textual` | Terminal UI framework. |
 | `mcp` | Model Context Protocol server SDK. |
+| `tomli-w` | Writing `config.toml` from the config-editing CLI. Python 3.13 has `tomllib` for reading only. |
 
 **Note on `caldav` vs raw `httpx` + XML.** Default to `caldav` for v1. Revisit only if it blocks a specific reliability property (idempotent PUT with `If-Match` semantics, conditional REPORT behaviour) that we cannot get through it.
 
