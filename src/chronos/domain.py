@@ -80,6 +80,17 @@ class CalendarRef:
 
 
 @dataclass(frozen=True)
+class ResourceRef:
+    account_name: str
+    calendar_name: str
+    uid: str
+
+    @property
+    def calendar(self) -> CalendarRef:
+        return CalendarRef(self.account_name, self.calendar_name)
+
+
+@dataclass(frozen=True)
 class ComponentRef:
     account_name: str
     calendar_name: str
@@ -90,6 +101,10 @@ class ComponentRef:
     def calendar(self) -> CalendarRef:
         return CalendarRef(self.account_name, self.calendar_name)
 
+    @property
+    def resource(self) -> ResourceRef:
+        return ResourceRef(self.account_name, self.calendar_name, self.uid)
+
 
 @dataclass(frozen=True, kw_only=True)
 class VEvent:
@@ -98,6 +113,8 @@ class VEvent:
     etag: str | None
     raw_ics: bytes
     summary: str | None
+    description: str | None
+    location: str | None
     dtstart: datetime | None
     dtend: datetime | None
     status: str | None
@@ -115,6 +132,8 @@ class VTodo:
     etag: str | None
     raw_ics: bytes
     summary: str | None
+    description: str | None
+    location: str | None
     dtstart: datetime | None
     due: datetime | None
     status: str | None
