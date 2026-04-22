@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
+from chronos.caldav_client import CalDAVError, CalDAVHttpSession
 from chronos.config import ConfigError
 from chronos.config import load as load_config
 from chronos.config import save as save_config
@@ -312,13 +313,18 @@ def cmd_sync(ctx: CliContext) -> int:
             ctx.stderr.write(f"[{account.name}] {exc}\n")
             fails += 1
             continue
-        result = sync_account(
-            account=account,
-            session=session,
-            mirror=ctx.mirror,
-            index=ctx.index,
-            now=ctx.now,
-        )
+        try:
+            result = sync_account(
+                account=account,
+                session=session,
+                mirror=ctx.mirror,
+                index=ctx.index,
+                now=ctx.now,
+            )
+        except CalDAVError as exc:
+            ctx.stderr.write(f"[{account.name}] CalDAV error: {exc}\n")
+            fails += 1
+            continue
         ctx.stdout.write(
             f"{account.name}: {result.calendars_synced} calendars "
             f"(+{result.components_added} "
@@ -670,10 +676,8 @@ def _credential_backend(spec: CredentialSpec) -> str:
 
 
 def _default_session_factory(account: AccountConfig, password: str) -> CalDAVSession:
-    del account, password
-    raise NotImplementedError(
-        "sync: real CalDAV HTTP client is deferred. Inject a session_factory "
-        "into cli.main() or use FakeCalDAVSession via the Python API."
+    return CalDAVHttpSession(
+        url=account.url, username=account.username, password=password
     )
 
 

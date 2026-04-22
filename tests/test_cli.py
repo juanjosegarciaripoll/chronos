@@ -133,11 +133,32 @@ class SyncCommandTest(CliTestCase):
         self.assertEqual(code, 1)
         self.assertIn("UNSET_FOR_TEST", self.stderr.getvalue())
 
-    def test_sync_without_factory_reports_deferred_http(self) -> None:
-        ctx = self._ctx(session_factory=None)
+    def test_sync_without_factory_builds_caldav_http_session(self) -> None:
+        from chronos.caldav_client import CalDAVHttpSession
+        from chronos.cli import _default_session_factory
+
+        session = _default_session_factory(_account(), "pw")
+        self.assertIsInstance(session, CalDAVHttpSession)
+
+    def test_sync_reports_caldav_error_from_session(self) -> None:
+        from chronos.caldav_client import CalDAVError
+
+        def broken_factory(
+            _account: AccountConfig, _password: str
+        ) -> FakeCalDAVSession:
+            session = FakeCalDAVSession()
+
+            def _raise_principal() -> str:
+                raise CalDAVError("simulated network failure")
+
+            session.discover_principal = _raise_principal  # type: ignore[method-assign]
+            return session
+
+        ctx = self._ctx(session_factory=broken_factory)
         code = self._run(["sync"], context=ctx)
         self.assertEqual(code, 1)
-        self.assertIn("deferred", self.stderr.getvalue())
+        self.assertIn("CalDAV error", self.stderr.getvalue())
+        self.assertIn("simulated network failure", self.stderr.getvalue())
 
 
 class ListCommandTest(CliTestCase):
