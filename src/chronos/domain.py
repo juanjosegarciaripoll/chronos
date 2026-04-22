@@ -66,6 +66,13 @@ class CalendarConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
+class RemoteCalendar:
+    name: str
+    url: str
+    supported_components: frozenset[ComponentKind]
+
+
+@dataclass(frozen=True, kw_only=True)
 class AppConfig:
     config_version: int
     use_utf8: bool

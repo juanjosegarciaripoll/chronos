@@ -84,7 +84,7 @@ def _project_resource(
 ) -> list[StoredComponent]:
     if not parsed:
         return []
-    fallback_uid = _synthetic_uid(resource.account_name, resource.calendar_name, raw)
+    fallback_uid = synthetic_uid(resource.account_name, resource.calendar_name, raw)
     now = datetime.now(UTC)
     out: list[StoredComponent] = []
     for component in parsed:
@@ -142,6 +142,6 @@ def _build_stored(
     )
 
 
-def _synthetic_uid(account: str, calendar: str, raw: bytes) -> str:
+def synthetic_uid(account: str, calendar: str, raw: bytes) -> str:
     digest = hashlib.sha256(f"{account}|{calendar}|".encode() + raw).hexdigest()[:32]
     return f"chronos-syn-{digest}"

@@ -8,11 +8,11 @@ from typing import Protocol
 
 from chronos.domain import (
     AccountConfig,
-    CalendarConfig,
     CalendarRef,
     ComponentRef,
     CredentialSpec,
     Occurrence,
+    RemoteCalendar,
     ResourceRef,
     StoredComponent,
     SyncResult,
@@ -23,7 +23,7 @@ from chronos.domain import (
 class CalDAVSession(Protocol):
     def discover_principal(self) -> str: ...
 
-    def list_calendars(self, principal_url: str) -> Sequence[CalendarConfig]: ...
+    def list_calendars(self, principal_url: str) -> Sequence[RemoteCalendar]: ...
 
     def get_ctag(self, calendar_url: str) -> str | None: ...
 
