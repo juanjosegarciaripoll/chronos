@@ -175,6 +175,19 @@ END:VTODO
     )
 
 
+def zero_duration_event() -> bytes:
+    return _vcalendar(
+        """
+BEGIN:VEVENT
+UID:zero-duration-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+SUMMARY:Point-in-time event (no DTEND)
+END:VEVENT
+"""
+    )
+
+
 def malformed_missing_uid() -> bytes:
     return _vcalendar(
         """
@@ -222,6 +235,7 @@ ALL_SINGLE_FIXTURES: tuple[tuple[str, bytes], ...] = (
     ("recurring_with_exceptions", recurring_with_exceptions()),
     ("recurring_count", recurring_count()),
     ("recurring_until", recurring_until()),
+    ("zero_duration_event", zero_duration_event()),
     ("simple_todo", simple_todo()),
     ("completed_todo", completed_todo()),
     ("malformed_missing_uid", malformed_missing_uid()),

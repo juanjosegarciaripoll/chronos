@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Protocol
 
 from chronos.domain import (
@@ -11,6 +12,7 @@ from chronos.domain import (
     CalendarRef,
     ComponentRef,
     CredentialSpec,
+    Occurrence,
     ResourceRef,
     StoredComponent,
     SyncResult,
@@ -76,6 +78,17 @@ class IndexRepository(Protocol):
     def get_sync_state(self, calendar: CalendarRef) -> SyncState | None: ...
 
     def set_sync_state(self, state: SyncState) -> None: ...
+
+    def set_occurrences(
+        self, ref: ComponentRef, occurrences: Sequence[Occurrence]
+    ) -> None: ...
+
+    def query_occurrences(
+        self,
+        calendar: CalendarRef,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> Sequence[Occurrence]: ...
 
     def close(self) -> None: ...
 

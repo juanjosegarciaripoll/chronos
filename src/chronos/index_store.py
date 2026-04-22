@@ -13,6 +13,7 @@ from chronos.domain import (
     ComponentKind,
     ComponentRef,
     LocalStatus,
+    Occurrence,
     StoredComponent,
     SyncState,
     VEvent,
@@ -175,6 +176,7 @@ class SqliteIndexRepository:
                     f"UPDATE components SET {assignments} WHERE id = ?",
                     (*(row[c] for c in _COMPONENT_COLUMNS), existing_id),
                 )
+            _invalidate_master_occurrences(conn, component.ref)
 
     def get_component(self, ref: ComponentRef) -> StoredComponent | None:
         with self.connection() as conn:
@@ -207,6 +209,58 @@ class SqliteIndexRepository:
                     ref.recurrence_id,
                 ),
             )
+            _invalidate_master_occurrences(conn, ref)
+
+    def set_occurrences(
+        self, ref: ComponentRef, occurrences: Sequence[Occurrence]
+    ) -> None:
+        with self.connection() as conn:
+            component_id = _find_component_id(conn, ref)
+            if component_id is None:
+                return
+            conn.execute(
+                "DELETE FROM occurrences WHERE component_id = ?",
+                (component_id,),
+            )
+            for occ in occurrences:
+                conn.execute(
+                    "INSERT INTO occurrences "
+                    "(component_id, occurrence_start, occurrence_end, is_override) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        component_id,
+                        _datetime_to_sql(occ.start),
+                        _datetime_to_sql(occ.end),
+                        1 if occ.is_override else 0,
+                    ),
+                )
+
+    def query_occurrences(
+        self,
+        calendar: CalendarRef,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> tuple[Occurrence, ...]:
+        start_sql = _datetime_to_sql(window_start)
+        end_sql = _datetime_to_sql(window_end)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT c.account_name, c.calendar_name, c.uid, c.recurrence_id, "
+                "o.occurrence_start, o.occurrence_end, o.is_override "
+                "FROM occurrences o "
+                "JOIN components c ON c.id = o.component_id "
+                "WHERE c.account_name = ? AND c.calendar_name = ? "
+                "AND o.occurrence_start >= ? AND o.occurrence_start < ? "
+                "ORDER BY o.occurrence_start",
+                (
+                    calendar.account_name,
+                    calendar.calendar_name,
+                    start_sql,
+                    end_sql,
+                ),
+            )
+            rows = cursor.fetchall()
+        return tuple(_row_to_occurrence(r) for r in rows)
 
     def list_pending_pushes(self, calendar: CalendarRef) -> tuple[StoredComponent, ...]:
         with self.connection() as conn:
@@ -303,6 +357,47 @@ def _find_component_id(conn: sqlite3.Connection, ref: ComponentRef) -> int | Non
     if row is None:
         return None
     return cast(int, row[0])
+
+
+def _invalidate_master_occurrences(conn: sqlite3.Connection, ref: ComponentRef) -> None:
+    cursor = conn.execute(
+        "SELECT id FROM components "
+        "WHERE account_name = ? AND calendar_name = ? AND uid = ? "
+        "AND recurrence_id IS NULL",
+        (ref.account_name, ref.calendar_name, ref.uid),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return
+    conn.execute("DELETE FROM occurrences WHERE component_id = ?", (cast(int, row[0]),))
+
+
+def _row_to_occurrence(row: tuple[object, ...]) -> Occurrence:
+    (
+        account_name,
+        calendar_name,
+        uid,
+        recurrence_id,
+        occurrence_start,
+        occurrence_end,
+        is_override,
+    ) = row
+    ref = ComponentRef(
+        account_name=cast(str, account_name),
+        calendar_name=cast(str, calendar_name),
+        uid=cast(str, uid),
+        recurrence_id=_opt_str(recurrence_id),
+    )
+    start = _sql_to_datetime(_opt_str(occurrence_start))
+    if start is None:
+        raise AssertionError("occurrence_start must be non-null in DB")
+    return Occurrence(
+        ref=ref,
+        start=start,
+        end=_sql_to_datetime(_opt_str(occurrence_end)),
+        recurrence_id=_opt_str(recurrence_id),
+        is_override=bool(is_override),
+    )
 
 
 def _component_to_row(component: StoredComponent) -> dict[str, object]:
