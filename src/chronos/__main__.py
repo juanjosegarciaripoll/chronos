@@ -1,6 +1,6 @@
-def main() -> None:
-    pass
+import sys
 
+from chronos.cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))
