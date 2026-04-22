@@ -6,11 +6,11 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol
 
+from chronos.authorization import Authorization
 from chronos.domain import (
     AccountConfig,
     CalendarRef,
     ComponentRef,
-    CredentialSpec,
     Occurrence,
     RemoteCalendar,
     ResourceRef,
@@ -94,7 +94,7 @@ class IndexRepository(Protocol):
 
 
 class CredentialsProvider(Protocol):
-    def resolve(self, account_name: str, spec: CredentialSpec) -> str: ...
+    def build_auth(self, account: AccountConfig) -> Authorization: ...
 
 
 class SyncService(Protocol):

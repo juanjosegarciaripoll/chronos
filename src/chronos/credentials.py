@@ -4,7 +4,9 @@ import os
 import subprocess
 from collections.abc import Mapping
 
+from chronos.authorization import Authorization
 from chronos.domain import (
+    AccountConfig,
     CommandCredential,
     CredentialSpec,
     EnvCredential,
@@ -19,20 +21,26 @@ class CredentialResolutionError(RuntimeError):
 
 
 class DefaultCredentialsProvider:
-    """Resolve CredentialSpec into a plaintext password.
+    """Build an `Authorization` for one account from its credential spec.
 
     Backends:
-      - PlaintextCredential: returns the stored string as-is.
+      - PlaintextCredential: returns the stored string as a basic-auth
+        password.
       - EnvCredential: reads the named environment variable.
-      - CommandCredential: runs the command and returns stdout (stripped).
-      - KeyringCredential: not wired in v1 (deferred; requires the
-        `keyring` package).
+      - CommandCredential: runs the command and uses stdout (stripped)
+        as the basic-auth password.
+      - KeyringCredential: deferred in v1 (requires the `keyring`
+        package).
     """
 
     def __init__(self, env: Mapping[str, str] | None = None) -> None:
         self._env = env if env is not None else os.environ
 
-    def resolve(self, account_name: str, spec: CredentialSpec) -> str:
+    def build_auth(self, account: AccountConfig) -> Authorization:
+        password = self._resolve_password(account.name, account.credential)
+        return Authorization(basic=(account.username, password))
+
+    def _resolve_password(self, account_name: str, spec: CredentialSpec) -> str:
         if isinstance(spec, PlaintextCredential):
             return spec.password
         if isinstance(spec, EnvCredential):

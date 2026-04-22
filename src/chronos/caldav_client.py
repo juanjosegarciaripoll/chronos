@@ -35,6 +35,7 @@ from caldav.lib.error import (
     PutError,
 )
 
+from chronos.authorization import Authorization
 from chronos.domain import ComponentKind, RemoteCalendar
 
 _DAV_NS = "DAV:"
@@ -65,13 +66,11 @@ class CalDAVAuthError(CalDAVError):
 
 
 class CalDAVHttpSession:
-    def __init__(self, *, url: str, username: str, password: str) -> None:
+    def __init__(self, *, url: str, authorization: Authorization) -> None:
         # `caldav.DAVClient` has partial type stubs; keep the library's
         # object behind `Any` inside this module and translate at the
         # Protocol boundary.
-        self._client: Any = caldav.DAVClient(  # type: ignore[operator]
-            url=url, username=username, password=password
-        )
+        self._client: Any = _build_client(url, authorization)
         self._principal: Any = None
         self._calendar_cache: dict[str, Any] = {}
 
@@ -325,6 +324,19 @@ def _opt_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _build_client(url: str, authorization: Authorization) -> Any:
+    if authorization.basic is not None:
+        username, password = authorization.basic
+        return caldav.DAVClient(  # type: ignore[operator]
+            url=url, username=username, password=password
+        )
+    if authorization.http_auth is not None:
+        return caldav.DAVClient(  # type: ignore[operator]
+            url=url, auth=authorization.http_auth
+        )
+    raise CalDAVError("Authorization has neither `basic` nor `http_auth` set")
 
 
 __all__ = [

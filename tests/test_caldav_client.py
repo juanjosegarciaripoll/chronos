@@ -20,6 +20,7 @@ from caldav.lib.error import (
     PutError,
 )
 
+from chronos.authorization import Authorization
 from chronos.caldav_client import (
     CalDAVAuthError,
     CalDAVConflictError,
@@ -76,8 +77,7 @@ class CalDAVHttpSessionTestCase(unittest.TestCase):
         with patch("chronos.caldav_client.caldav.DAVClient", return_value=client):
             return CalDAVHttpSession(
                 url="https://caldav.example.com/",
-                username="user@example.com",
-                password="pw",
+                authorization=Authorization(basic=("user@example.com", "pw")),
             )
 
 

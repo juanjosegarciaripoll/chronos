@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
+from chronos.authorization import Authorization
 from chronos.caldav_client import CalDAVError, CalDAVHttpSession
 from chronos.config import ConfigError
 from chronos.config import load as load_config
@@ -45,7 +46,7 @@ from chronos.services import format_report, run_doctor
 from chronos.storage import VdirMirrorRepository
 from chronos.sync import sync_account
 
-SessionFactory = Callable[[AccountConfig, str], CalDAVSession]
+SessionFactory = Callable[[AccountConfig, Authorization], CalDAVSession]
 ContextFactory = Callable[[Path | None], "CliContext"]
 EditorFn = Callable[[Path], None]
 
@@ -302,13 +303,13 @@ def cmd_sync(ctx: CliContext) -> int:
     fails = 0
     for account in ctx.config.accounts:
         try:
-            password = ctx.creds.resolve(account.name, account.credential)
+            auth = ctx.creds.build_auth(account)
         except CredentialResolutionError as exc:
             ctx.stderr.write(f"[{account.name}] {exc}\n")
             fails += 1
             continue
         try:
-            session = factory(account, password)
+            session = factory(account, auth)
         except NotImplementedError as exc:
             ctx.stderr.write(f"[{account.name}] {exc}\n")
             fails += 1
@@ -325,6 +326,11 @@ def cmd_sync(ctx: CliContext) -> int:
             ctx.stderr.write(f"[{account.name}] CalDAV error: {exc}\n")
             fails += 1
             continue
+        # Give the auth strategy a chance to persist rotated state
+        # (OAuth access tokens refreshed during sync). Basic auth
+        # leaves this unset.
+        if auth.on_commit is not None:
+            auth.on_commit()
         ctx.stdout.write(
             f"{account.name}: {result.calendars_synced} calendars "
             f"(+{result.components_added} "
@@ -675,10 +681,10 @@ def _credential_backend(spec: CredentialSpec) -> str:
     return "encrypted"
 
 
-def _default_session_factory(account: AccountConfig, password: str) -> CalDAVSession:
-    return CalDAVHttpSession(
-        url=account.url, username=account.username, password=password
-    )
+def _default_session_factory(
+    account: AccountConfig, authorization: Authorization
+) -> CalDAVSession:
+    return CalDAVHttpSession(url=account.url, authorization=authorization)
 
 
 def _collect_components(

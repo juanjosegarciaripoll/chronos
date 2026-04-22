@@ -114,8 +114,9 @@ class SyncCommandTest(CliTestCase):
 
     def test_sync_happy_path(self) -> None:
         self._seed_server()
+        from chronos.authorization import Authorization
 
-        def factory(_account: AccountConfig, _password: str) -> FakeCalDAVSession:
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
             return self.session
 
         ctx = self._ctx(session_factory=factory)
@@ -134,17 +135,21 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("UNSET_FOR_TEST", self.stderr.getvalue())
 
     def test_sync_without_factory_builds_caldav_http_session(self) -> None:
+        from chronos.authorization import Authorization
         from chronos.caldav_client import CalDAVHttpSession
         from chronos.cli import _default_session_factory
 
-        session = _default_session_factory(_account(), "pw")
+        session = _default_session_factory(
+            _account(), Authorization(basic=("user@example.com", "pw"))
+        )
         self.assertIsInstance(session, CalDAVHttpSession)
 
     def test_sync_reports_caldav_error_from_session(self) -> None:
+        from chronos.authorization import Authorization
         from chronos.caldav_client import CalDAVError
 
         def broken_factory(
-            _account: AccountConfig, _password: str
+            _account: AccountConfig, _auth: Authorization
         ) -> FakeCalDAVSession:
             session = FakeCalDAVSession()
 

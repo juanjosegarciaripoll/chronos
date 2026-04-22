@@ -60,7 +60,7 @@ def _check_credentials(
     account: AccountConfig, creds: CredentialsProvider
 ) -> DiagnosticResult:
     try:
-        creds.resolve(account.name, account.credential)
+        creds.build_auth(account)
     except CredentialResolutionError as exc:
         return DiagnosticResult(
             check="credentials",
