@@ -1,0 +1,107 @@
+# ARCHITECTURE.md
+
+Authoritative layout and subsystem boundaries for chronos. When a module's responsibilities move, update this file in the same change.
+
+## 1. Package layout
+
+```
+src/chronos/
+  __init__.py
+  __main__.py                # python -m chronos entrypoint
+  version.py                 # __version__ (release workflow owns this)
+  cli.py                     # argparse command dispatch
+  config.py                  # TOML -> domain objects
+  domain.py                  # Frozen dataclasses (AccountConfig, CalendarConfig,
+                             #   CalendarRef, ComponentRef, VEvent, VTodo,
+                             #   Occurrence, ...)
+  protocols.py               # Repository/service Protocol interfaces
+  paths.py                   # XDG + Windows dir resolution, bundled_docs_path()
+  storage.py                 # vdir-style .ics mirror repository
+  index_store.py             # SQLite index: components, occurrences,
+                             #   calendar_sync_state, FTS5
+  storage_indexing.py        # Mirror -> index projection pipeline
+  ical_parser.py             # RFC 5545 parse/serialize; thin wrapper over `icalendar`
+  recurrence.py              # RRULE/RDATE/EXDATE expansion; override application
+  caldav_client.py           # CalDAV session: PROPFIND, REPORT (sync-collection,
+                             #   calendar-query, calendar-multiget), GET/PUT/DELETE
+  sync.py                    # Two-phase CalDAV sync engine (plan / execute)
+  credentials.py             # Plaintext / env / command / encrypted backends
+  services.py                # Doctor diagnostics, mirror integrity scan
+  fixture_flow.py            # Deterministic dev ingest (for local testing)
+  mcp_server.py              # Read-only MCP tools (list_calendars, query_range,
+                             #   search, get_event, get_todo)
+  tui/
+    app.py                   # ChronosApp
+    bindings.py              # Global keybinding constants
+    screens/
+      main_screen.py         # Owns view-switch bindings (day/week/month/agenda/todo)
+      day_view_screen.py
+      week_view_screen.py
+      month_view_screen.py
+      agenda_screen.py
+      todo_list_screen.py
+      event_detail_screen.py
+      event_edit_screen.py
+      sync_confirm_screen.py
+      search_dialog_screen.py
+      confirm_screen.py
+    widgets/
+      calendar_panel.py      # Collapsible per-account calendar tree
+      event_list.py          # Sortable DataTable for events/todos
+      event_view.py          # Read-only event/todo detail
+      date_picker.py
+```
+
+All modules above are described in `TASKS.md` milestones; don't treat their existence as a given before the corresponding milestone is complete.
+
+## 2. Subsystems
+
+**Domain layer** (`domain.py`, `protocols.py`). Frozen `@dataclass` types for configuration and content; `Protocol` classes for every repository and service. Domain types are framework-agnostic — no Textual, SQLite, or CalDAV imports leak in here.
+
+**Configuration** (`config.py`, `paths.py`). A single TOML file is parsed directly into domain objects, with no intermediate DTO layer. Path values support `~`, `$VAR`, and `%VAR%` expansion. `paths.py` handles XDG on Linux/macOS and the Windows equivalents, plus `bundled_docs_path()` to detect PyInstaller-frozen execution.
+
+**Storage mirror** (`storage.py`). One `.ics` file per calendar resource, laid out as `<mirror>/<account>/<calendar>/<uid>.ics` (vdirsyncer-compatible). Raw bytes are the authoritative content; the index is derived. The `MirrorRepository` protocol exposes write-new, overwrite, move, and delete operations that are crash-safe (temp-file + rename).
+
+**Index** (`index_store.py`, `storage_indexing.py`). SQLite with:
+- `components` — unified table for VEVENT + VTODO, discriminated by `component_kind`.
+- `occurrences` — expansion cache (see `RECURRENCE.md`).
+- `calendar_sync_state` — CTag, sync-token, etag bookkeeping per calendar.
+- FTS5 virtual table over `components.summary`, `description`, `location`.
+
+All writes go through a single `connection()` context manager that batches within a transaction. Readers use short connections; no long-lived cursors.
+
+**Recurrence** (`recurrence.py`). RRULE / RDATE / EXDATE expansion within a bounded window; RECURRENCE-ID overrides are applied as concrete rows that replace the expanded occurrence at the matching instant. The `occurrences` cache is invalidated on any write to a master or override. Details live in `RECURRENCE.md`.
+
+**Sync** (`sync.py`, `caldav_client.py`). Two-phase (plan, then execute). CTag-gated path selection: fast path (zero-I/O beyond PROPFIND), medium path (sync-collection REPORT), slow path (full calendar-query REPORT + etag compare). `href IS NULL` is the only local-mutation signal. Conflict taxonomy lives in `SYNCHRONIZATION.md §10`.
+
+**TUI** (`tui/`). Textual. Each screen owns its `BINDINGS` list; the footer shows only the current screen's bindings. Screens use the public Textual API exclusively — `self.app.push_screen`, `self.app.notify`. Screens never call `self.app._private_method`. Views are pure projections of `IndexRepository` queries.
+
+**CLI** (`cli.py`). `argparse` dispatch to subcommands. Same repositories as the TUI; nothing TUI-specific leaks in.
+
+**MCP** (`mcp_server.py`). Read-only tools backed by the same `IndexRepository`. No write or mutating tools without explicit approval.
+
+## 3. Data flow
+
+```
+  config.toml ── config.py ──► AccountConfig(s)
+                                   │
+                                   ▼
+    caldav_client.py ◄──── sync.py ────► storage.py (mirror .ics files)
+                                   │                 │
+                                   ▼                 ▼
+                         index_store.py (components, occurrences, sync_state)
+                                   │
+                  ┌────────────────┼────────────────┐
+                  ▼                ▼                ▼
+                tui/             cli.py         mcp_server.py
+```
+
+`sync.py` is the only writer on the inbound (server → local) path. The TUI and CLI are the only writers on the outbound (user → local) path. The MCP server reads only.
+
+## 4. Dependencies
+
+**Runtime:** `caldav`, `icalendar`, `python-dateutil`, `textual`, `mcp`. (`httpx` may appear as a transitive dep via `caldav`; not used directly unless `caldav` proves insufficient.)
+
+**Dev:** `ruff`, `mypy`, `basedpyright`, `pytest`, `pytest-asyncio`, `pyinstaller`, `mkdocs-material`.
+
+The authoritative approved-deps list lives in `CONVENTIONS.md §7`. If the list here and there disagree, `CONVENTIONS.md` wins.
