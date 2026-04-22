@@ -17,6 +17,7 @@ from chronos.domain import (
     CredentialSpec,
     EnvCredential,
     KeyringCredential,
+    OAuthCredential,
     PlaintextCredential,
 )
 from chronos.paths import expand_path
@@ -128,9 +129,25 @@ def _parse_credential(data: object, key: str) -> CredentialSpec:
             service=_require_str(spec, "service", key),
             username=_require_str(spec, "username", key),
         )
+    if backend == "oauth":
+        token_path_raw = _optional_str(spec, "token_path", key, default=None)
+        return OAuthCredential(
+            client_id=_require_str(spec, "client_id", key),
+            client_secret=_require_str(spec, "client_secret", key),
+            scope=_optional_str(
+                spec,
+                "scope",
+                key,
+                default="https://www.googleapis.com/auth/calendar",
+            )
+            or "https://www.googleapis.com/auth/calendar",
+            token_path=expand_path(token_path_raw)
+            if token_path_raw is not None
+            else None,
+        )
     raise ConfigError(
         f"unknown credential backend '{backend}' "
-        "(expected: plaintext, env, command, encrypted)",
+        "(expected: plaintext, env, command, encrypted, oauth)",
         key,
     )
 
@@ -265,9 +282,19 @@ def _dump_credential(spec: CredentialSpec) -> dict[str, object]:
         return {"backend": "env", "variable": spec.variable}
     if isinstance(spec, CommandCredential):
         return {"backend": "command", "command": list(spec.command)}
-    # spec narrows to KeyringCredential by elimination on the union.
-    return {
-        "backend": "encrypted",
-        "service": spec.service,
-        "username": spec.username,
+    if isinstance(spec, KeyringCredential):
+        return {
+            "backend": "encrypted",
+            "service": spec.service,
+            "username": spec.username,
+        }
+    # spec narrows to OAuthCredential by elimination.
+    out: dict[str, object] = {
+        "backend": "oauth",
+        "client_id": spec.client_id,
+        "client_secret": spec.client_secret,
+        "scope": spec.scope,
     }
+    if spec.token_path is not None:
+        out["token_path"] = str(spec.token_path)
+    return out

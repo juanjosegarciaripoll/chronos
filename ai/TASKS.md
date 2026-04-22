@@ -4,7 +4,7 @@ Actionable backlog. Top of file is next up; bottom is later. Each milestone is a
 
 ## Current state
 
-Milestones 0–5 shipped. Next up is **Milestone 6 — End-to-end CLI usability** (reprioritised from the original TUI milestone; the TUI can't do useful work until a user can set up accounts and sync real data).
+Milestones 0–7 shipped. `chronos init && account add && oauth authorize && sync && list` works end-to-end against Nextcloud/Radicale/Apple (basic auth) and against Google Calendar (OAuth 2.0 device flow). Next up is **Milestone 8 — TUI**.
 
 ## Milestone 0 — Project scaffolding
 
@@ -88,7 +88,22 @@ Reprioritised from the original "TUI" milestone. Before the TUI makes sense, a u
 
 **Acceptance:** `chronos init && chronos account add ... && chronos sync && chronos list` works end-to-end against a real CalDAV server with no hand-editing of `config.toml`.
 
-## Milestone 7 — TUI
+## Milestone 7 — OAuth 2.0 for Google and Microsoft
+
+Reprioritised from the original "TUI" slot. Google and Microsoft dropped basic-auth support for CalDAV; without OAuth, chronos can't talk to the two largest calendar providers.
+
+- `src/chronos/oauth.py`: device flow (`request_device_code` / `poll_for_tokens`), token store (`save_tokens` / `load_tokens` under `paths.oauth_token_dir()`), bearer-token HTTP auth (`BearerTokenAuth` subclass of `niquests.auth.AuthBase`) with automatic refresh-grant on expiry.
+- `src/chronos/authorization.py`: `Authorization` carrying either basic (username, password) or `http_auth` (AuthBase) plus an `on_commit` callback for token rotation.
+- `src/chronos/domain.py`: `OAuthCredential` (client_id, client_secret, scope, optional token_path) added to the `CredentialSpec` union.
+- `src/chronos/credentials.py`: `build_auth(account)` returns `Authorization`; OAuth accounts wire through `oauth.build_bearer_auth`.
+- `src/chronos/caldav_client.py`: `CalDAVHttpSession` accepts `Authorization`; basic goes via `DAVClient(username, password)`, bearer goes via `DAVClient(auth=...)` (niquests AuthBase).
+- `src/chronos/cli.py`: `account add --credential-backend oauth --oauth-client-id ... --oauth-client-secret ... --oauth-scope ...`; new `chronos oauth authorize --account NAME` runs the device flow.
+
+**Not depended on:** `google-auth` — its transport layer requires `requests`, which we don't otherwise ship. Refresh grant is ~40 lines of straightforward HTTP against `niquests` (transitive via `caldav`).
+
+**Acceptance:** a user who has created a Google Cloud OAuth client can `chronos account add --credential-backend oauth`, `chronos oauth authorize`, `chronos sync` against Google Calendar with no hand-editing of `config.toml`.
+
+## Milestone 8 — TUI
 
 - `tui/app.py` + `tui/bindings.py` + the screen / widget files in `ARCHITECTURE.md §1`.
 - Day, week, month, agenda, todo-list views.
@@ -97,14 +112,14 @@ Reprioritised from the original "TUI" milestone. Before the TUI makes sense, a u
 
 **Acceptance:** all five views navigable; create / edit / trash flows work end-to-end against a seeded repo; TUI tests green.
 
-## Milestone 8 — MCP server
+## Milestone 9 — MCP server
 
 - `mcp_server.py` — read-only tools: `list_calendars`, `query_range(start, end)`, `search(query)`, `get_event(uid)`, `get_todo(uid)`.
 - MCP tests that stand up a server in-process and exercise each tool.
 
 **Acceptance:** MCP server starts cleanly; each tool returns expected payloads against a seeded index; no write tools present.
 
-## Milestone 9 — Packaging and release
+## Milestone 10 — Packaging and release
 
 - `chronos.spec` — PyInstaller spec.
 - `scripts/build.py` — orchestrates tests + docs + binary + archive + installer.
@@ -116,6 +131,8 @@ Reprioritised from the original "TUI" milestone. Before the TUI makes sense, a u
 
 ## Followups / open questions
 
+- **Keyring-backed OAuth token storage** — M7 writes refresh tokens as plain JSON under `paths.oauth_token_dir()` with a best-effort 0600 chmod on POSIX (no-op on Windows). When the `keyring` dep is approved, migrate tokens to the system keyring for defence-in-depth.
+- **Conditional DELETE with If-Match** — caldav 3.1 doesn't expose headers on `DAVClient.delete()`. Not a correctness issue (sync engine's etag reconciliation catches server-side races on next pass) but revisit when caldav grows the API.
 - **iTIP / iMIP** — meeting requests and RSVPs. Needs an SMTP send path; touches `caldav_client` (schedule-outbox) and compose flows. Deferred (`SPECIFICATIONS.md §4`).
 - **Free/busy** — CalDAV `free-busy-query` REPORT. Deferred.
 - **OAuth** — Google/Microsoft token flows. Deferred; revisit when a user demand case lands.

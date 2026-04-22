@@ -23,3 +23,13 @@ use_utf8 = false
 # include = [".*"]
 # exclude = []
 # read_only = []
+
+# [[accounts]]
+# name = "google"
+# url = "https://apidata.googleusercontent.com/caldav/v2/you@gmail.com/events/"
+# username = "you@gmail.com"
+# credential = { backend = "oauth", client_id = "12345.apps.googleusercontent.com", client_secret = "GOCSPX-..." }
+# mirror_path = "~/.local/share/chronos/mirror/google"
+# # Run `chronos oauth authorize --account google` once to obtain
+# # access/refresh tokens. They are stored under the OS-standard user
+# # data directory (tokens/<account>.json), not in this file.

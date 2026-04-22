@@ -10,8 +10,12 @@ from chronos.domain import (
     CommandCredential,
     CredentialSpec,
     EnvCredential,
+    KeyringCredential,
+    OAuthCredential,
     PlaintextCredential,
 )
+from chronos.oauth import OAuthError, build_bearer_auth
+from chronos.paths import oauth_token_path
 
 _COMMAND_TIMEOUT_SECONDS = 30
 
@@ -37,7 +41,10 @@ class DefaultCredentialsProvider:
         self._env = env if env is not None else os.environ
 
     def build_auth(self, account: AccountConfig) -> Authorization:
-        password = self._resolve_password(account.name, account.credential)
+        spec = account.credential
+        if isinstance(spec, OAuthCredential):
+            return _build_oauth_authorization(account.name, spec)
+        password = self._resolve_password(account.name, spec)
         return Authorization(basic=(account.username, password))
 
     def _resolve_password(self, account_name: str, spec: CredentialSpec) -> str:
@@ -52,13 +59,36 @@ class DefaultCredentialsProvider:
             return value
         if isinstance(spec, CommandCredential):
             return _resolve_command(account_name, spec)
-        # spec narrows to KeyringCredential by elimination on the union.
+        if isinstance(spec, KeyringCredential):
+            raise CredentialResolutionError(
+                f"{account_name}: the 'encrypted' credential backend "
+                f"(service={spec.service}, username={spec.username}) "
+                "is not available in v1. It requires the `keyring` "
+                "package; approve adding it as a runtime dependency to "
+                "enable this."
+            )
+        # spec narrows to OAuthCredential by elimination, but OAuth is
+        # handled in build_auth() before this function is called.
         raise CredentialResolutionError(
-            f"{account_name}: the 'encrypted' credential backend "
-            f"(service={spec.service}, username={spec.username}) "
-            "is not available in v1. It requires the `keyring` package; "
-            "approve adding it as a runtime dependency to enable this."
+            f"{account_name}: OAuth credentials must not be resolved as a "
+            "password; this is an internal routing bug."
         )
+
+
+def _build_oauth_authorization(
+    account_name: str, spec: OAuthCredential
+) -> Authorization:
+    token_path = spec.token_path or oauth_token_path(account_name)
+    try:
+        bearer = build_bearer_auth(
+            client_id=spec.client_id,
+            client_secret=spec.client_secret,
+            scope=spec.scope,
+            token_path=token_path,
+        )
+    except OAuthError as exc:
+        raise CredentialResolutionError(f"{account_name}: {exc}") from exc
+    return Authorization(http_auth=bearer, on_commit=bearer.persist)
 
 
 def _resolve_command(account_name: str, spec: CommandCredential) -> str:

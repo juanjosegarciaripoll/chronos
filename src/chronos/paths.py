@@ -79,6 +79,19 @@ def default_index_path() -> Path:
     return user_data_dir() / "index.sqlite3"
 
 
+def oauth_token_dir() -> Path:
+    """Directory holding OAuth access/refresh tokens per account.
+
+    Uses the platform-standard user data directory (APPDATA on Windows,
+    Library/Application Support on macOS, XDG_DATA_HOME on Linux).
+    """
+    return user_data_dir() / "tokens"
+
+
+def oauth_token_path(account_name: str) -> Path:
+    return oauth_token_dir() / f"{account_name}.json"
+
+
 def bundled_docs_path() -> Path | None:
     if not getattr(sys, "frozen", False):
         return None

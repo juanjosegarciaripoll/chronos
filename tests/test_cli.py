@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from chronos import cli
 from chronos.credentials import DefaultCredentialsProvider
@@ -702,6 +703,201 @@ class AccountRmCommandTest(ConfigEditingCliTestCase):
         code = self._run(["account", "rm", "never-existed"])
         self.assertEqual(code, 1)
         self.assertIn("not found", self.stderr.getvalue())
+
+
+class AccountAddOAuthTest(ConfigEditingCliTestCase):
+    def test_add_oauth_account(self) -> None:
+        self._run(["init"])
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "google",
+                "--url",
+                "https://apidata.googleusercontent.com/caldav/v2/me@gmail.com/events/",
+                "--username",
+                "me@gmail.com",
+                "--credential-backend",
+                "oauth",
+                "--oauth-client-id",
+                "1234.apps.googleusercontent.com",
+                "--oauth-client-secret",
+                "GOCSPX-secret",
+                "--mirror-path",
+                "/tmp/chronos/google",
+            ]
+        )
+        self.assertEqual(code, 0)
+        from chronos.config import load
+        from chronos.domain import OAuthCredential
+
+        config = load(self.config_path)
+        cred = config.accounts[0].credential
+        assert isinstance(cred, OAuthCredential)
+        self.assertEqual(cred.client_id, "1234.apps.googleusercontent.com")
+        self.assertEqual(cred.client_secret, "GOCSPX-secret")
+
+    def test_oauth_missing_client_id_rejected(self) -> None:
+        self._run(["init"])
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "google",
+                "--url",
+                "https://x/",
+                "--username",
+                "me@example.com",
+                "--credential-backend",
+                "oauth",
+                "--oauth-client-secret",
+                "s",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--oauth-client-id", self.stderr.getvalue())
+
+
+class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
+    def _add_oauth_account(self, name: str = "google") -> None:
+        self._run(["init"])
+        self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                name,
+                "--url",
+                "https://x/",
+                "--username",
+                "me@example.com",
+                "--credential-backend",
+                "oauth",
+                "--oauth-client-id",
+                "cid",
+                "--oauth-client-secret",
+                "cs",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+
+    def test_authorize_runs_device_flow_and_saves_tokens(self) -> None:
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import StoredTokens
+
+        self._add_oauth_account()
+        token_path = self.tmp / "tokens.json"
+
+        captured: dict[str, Any] = {}
+
+        def fake_flow(credential: OAuthCredential, stdout: Any) -> StoredTokens:
+            captured["credential"] = credential
+            stdout.write("would have printed URL + code\n")
+            return StoredTokens(
+                access_token="at",
+                refresh_token="rt",
+                expiry_unix=12345.0,
+                scope=credential.scope,
+            )
+
+        # Override the token store location by editing the saved config
+        # to point at our tmp path.
+        from chronos.config import load, save
+
+        config = load(self.config_path)
+        account = config.accounts[0]
+        credential = account.credential
+        from chronos.domain import AccountConfig, AppConfig
+
+        assert isinstance(credential, OAuthCredential)
+        updated_account = AccountConfig(
+            name=account.name,
+            url=account.url,
+            username=account.username,
+            credential=OAuthCredential(
+                client_id=credential.client_id,
+                client_secret=credential.client_secret,
+                scope=credential.scope,
+                token_path=token_path,
+            ),
+            mirror_path=account.mirror_path,
+            trash_retention_days=account.trash_retention_days,
+            include=account.include,
+            exclude=account.exclude,
+            read_only=account.read_only,
+        )
+        save(
+            AppConfig(
+                config_version=config.config_version,
+                use_utf8=config.use_utf8,
+                editor=config.editor,
+                accounts=(updated_account,),
+            ),
+            self.config_path,
+        )
+
+        # cmd_oauth_authorize supports an injected device_flow; call
+        # it directly for the cleanest test.
+        from chronos import cli
+
+        code = cli.cmd_oauth_authorize(
+            self.stdout,
+            self.stderr,
+            config_path=self.config_path,
+            account_name="google",
+            device_flow=fake_flow,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("would have printed", self.stdout.getvalue())
+        self.assertTrue(token_path.exists())
+        self.assertIn("cid", captured["credential"].client_id)
+
+    def test_authorize_rejects_non_oauth_account(self) -> None:
+        self._run(["init"])
+        self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "basic",
+                "--url",
+                "https://x/",
+                "--username",
+                "u",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "pw",
+                "--mirror-path",
+                "/tmp/m",
+            ]
+        )
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(["oauth", "authorize", "--account", "basic"])
+        self.assertEqual(code, 2)
+        self.assertIn("does not use the oauth backend", self.stderr.getvalue())
+
+    def test_authorize_unknown_account(self) -> None:
+        self._run(["init"])
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(["oauth", "authorize", "--account", "nobody"])
+        self.assertEqual(code, 1)
+        self.assertIn("account not found", self.stderr.getvalue())
 
 
 class ConfigEditCommandTest(ConfigEditingCliTestCase):

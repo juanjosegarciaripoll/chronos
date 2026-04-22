@@ -28,6 +28,7 @@ from chronos.domain import (
     CredentialSpec,
     EnvCredential,
     LocalStatus,
+    OAuthCredential,
     PlaintextCredential,
     ResourceRef,
     StoredComponent,
@@ -35,7 +36,19 @@ from chronos.domain import (
     VTodo,
 )
 from chronos.index_store import SqliteIndexRepository
-from chronos.paths import default_config_path, default_index_path, user_data_dir
+from chronos.oauth import (
+    OAuthError,
+    StoredTokens,
+    poll_for_tokens,
+    request_device_code,
+    save_tokens,
+)
+from chronos.paths import (
+    default_config_path,
+    default_index_path,
+    oauth_token_path,
+    user_data_dir,
+)
 from chronos.protocols import (
     CalDAVSession,
     CredentialsProvider,
@@ -87,6 +100,8 @@ def main(
         return _dispatch_config(
             args, out, err, config_path=config_path, open_editor=open_editor
         )
+    if args.command == "oauth":
+        return _dispatch_oauth(args, out, err, config_path=config_path)
 
     # Data commands need a full context.
     owns_context = context_factory is None
@@ -176,16 +191,33 @@ def _build_parser() -> argparse.ArgumentParser:
     account_add.add_argument("--username", required=True)
     account_add.add_argument(
         "--credential-backend",
-        choices=("plaintext", "env", "command"),
+        choices=("plaintext", "env", "command", "oauth"),
         required=True,
     )
     account_add.add_argument(
         "--credential-value",
-        required=True,
+        default=None,
         help=(
             "For plaintext: the password. For env: the variable name. "
-            "For command: the command line (shlex-split)."
+            "For command: the command line (shlex-split). Unused for "
+            "the oauth backend — use --oauth-client-id + "
+            "--oauth-client-secret instead."
         ),
+    )
+    account_add.add_argument(
+        "--oauth-client-id",
+        default=None,
+        help="OAuth 2.0 client ID (required when --credential-backend=oauth).",
+    )
+    account_add.add_argument(
+        "--oauth-client-secret",
+        default=None,
+        help="OAuth 2.0 client secret (required when --credential-backend=oauth).",
+    )
+    account_add.add_argument(
+        "--oauth-scope",
+        default="https://www.googleapis.com/auth/calendar",
+        help="OAuth scope; defaults to Google Calendar read+write.",
     )
     account_add.add_argument("--mirror-path", type=Path, required=True)
     account_add.add_argument("--trash-retention-days", type=int, default=30)
@@ -201,6 +233,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "edit",
         help="Open config.toml in $EDITOR; validate and save on close.",
     )
+
+    oauth_p = sub.add_parser(
+        "oauth",
+        help="OAuth 2.0 authorisation flows for accounts.",
+    )
+    oauth_sub = oauth_p.add_subparsers(dest="oauth_cmd", required=True)
+    oauth_authorize = oauth_sub.add_parser(
+        "authorize",
+        help="Run the OAuth device flow for an account and save tokens.",
+    )
+    oauth_authorize.add_argument("--account", required=True)
 
     return parser
 
@@ -264,6 +307,9 @@ def _dispatch_account(
             username=args.username,
             backend=args.credential_backend,
             value=args.credential_value,
+            oauth_client_id=args.oauth_client_id,
+            oauth_client_secret=args.oauth_client_secret,
+            oauth_scope=args.oauth_scope,
             mirror_path=args.mirror_path,
             trash_retention_days=args.trash_retention_days,
         )
@@ -292,6 +338,22 @@ def _dispatch_config(
             open_editor=open_editor or _default_open_editor,
         )
     stderr.write(f"unknown config subcommand: {sub}\n")
+    return 2
+
+
+def _dispatch_oauth(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+) -> int:
+    sub = str(args.oauth_cmd)
+    if sub == "authorize":
+        return cmd_oauth_authorize(
+            stdout, stderr, config_path=config_path, account_name=args.account
+        )
+    stderr.write(f"unknown oauth subcommand: {sub}\n")
     return 2
 
 
@@ -523,7 +585,10 @@ def cmd_account_add(
     url: str,
     username: str,
     backend: str,
-    value: str,
+    value: str | None,
+    oauth_client_id: str | None,
+    oauth_client_secret: str | None,
+    oauth_scope: str,
     mirror_path: Path,
     trash_retention_days: int,
 ) -> int:
@@ -535,7 +600,17 @@ def cmd_account_add(
     if any(a.name == name for a in config.accounts):
         stderr.write(f"account already exists: {name}\n")
         return 1
-    credential = _build_credential(backend, value)
+    try:
+        credential = _build_credential(
+            backend,
+            value=value,
+            oauth_client_id=oauth_client_id,
+            oauth_client_secret=oauth_client_secret,
+            oauth_scope=oauth_scope,
+        )
+    except ValueError as exc:
+        stderr.write(f"{exc}\n")
+        return 2
     import re  # local import: avoid module-level coupling for one-shot CLI
 
     new_account = AccountConfig(
@@ -648,6 +723,43 @@ def cmd_config_edit(
         tmp_path.unlink(missing_ok=True)
 
 
+def cmd_oauth_authorize(
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+    account_name: str,
+    device_flow: Callable[[OAuthCredential, TextIO], StoredTokens] | None = None,
+) -> int:
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        stderr.write(f"{exc}\n")
+        return 2
+    account = next((a for a in config.accounts if a.name == account_name), None)
+    if account is None:
+        stderr.write(f"account not found: {account_name}\n")
+        return 1
+    credential = account.credential
+    if not isinstance(credential, OAuthCredential):
+        stderr.write(
+            f"account {account_name!r} does not use the oauth backend "
+            f"(has {type(credential).__name__}). `oauth authorize` is "
+            "only meaningful for oauth accounts.\n"
+        )
+        return 2
+    flow = device_flow or _default_device_flow
+    try:
+        tokens = flow(credential, stdout)
+    except OAuthError as exc:
+        stderr.write(f"{exc}\n")
+        return 1
+    token_path = credential.token_path or oauth_token_path(account_name)
+    save_tokens(token_path, tokens)
+    stdout.write(f"Tokens saved to {token_path}\n")
+    return 0
+
+
 # Helpers ---------------------------------------------------------------------
 
 
@@ -661,7 +773,26 @@ def _default_open_editor(path: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _build_credential(backend: str, value: str) -> CredentialSpec:
+def _build_credential(
+    backend: str,
+    *,
+    value: str | None,
+    oauth_client_id: str | None,
+    oauth_client_secret: str | None,
+    oauth_scope: str,
+) -> CredentialSpec:
+    if backend == "oauth":
+        if not oauth_client_id or not oauth_client_secret:
+            raise ValueError(
+                "oauth backend requires --oauth-client-id and --oauth-client-secret"
+            )
+        return OAuthCredential(
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
+            scope=oauth_scope,
+        )
+    if value is None:
+        raise ValueError(f"backend {backend!r} requires --credential-value")
     if backend == "plaintext":
         return PlaintextCredential(password=value)
     if backend == "env":
@@ -678,7 +809,25 @@ def _credential_backend(spec: CredentialSpec) -> str:
         return "env"
     if isinstance(spec, CommandCredential):
         return "command"
+    if isinstance(spec, OAuthCredential):
+        return "oauth"
     return "encrypted"
+
+
+def _default_device_flow(credential: OAuthCredential, stdout: TextIO) -> StoredTokens:
+    grant = request_device_code(client_id=credential.client_id, scope=credential.scope)
+    stdout.write(
+        f"\nOpen {grant.verification_url} on any device and enter this code:\n"
+        f"\n    {grant.user_code}\n\n"
+        "Waiting for authorisation...\n"
+    )
+    stdout.flush()
+    return poll_for_tokens(
+        client_id=credential.client_id,
+        client_secret=credential.client_secret,
+        grant=grant,
+        scope=credential.scope,
+    )
 
 
 def _default_session_factory(

@@ -195,9 +195,52 @@ class ParseCredentialTest(unittest.TestCase):
         self.assertEqual(cred.service, "chronos")
         self.assertEqual(cred.username, "u")
 
+    def test_oauth_minimal(self) -> None:
+        config = parse(
+            self._wrap(
+                {
+                    "backend": "oauth",
+                    "client_id": "1234.apps.googleusercontent.com",
+                    "client_secret": "secret-value",
+                }
+            )
+        )
+        from chronos.domain import OAuthCredential
+
+        cred = config.accounts[0].credential
+        assert isinstance(cred, OAuthCredential)
+        self.assertEqual(cred.client_id, "1234.apps.googleusercontent.com")
+        self.assertEqual(cred.client_secret, "secret-value")
+        self.assertEqual(cred.scope, "https://www.googleapis.com/auth/calendar")
+        self.assertIsNone(cred.token_path)
+
+    def test_oauth_with_custom_scope_and_token_path(self) -> None:
+        config = parse(
+            self._wrap(
+                {
+                    "backend": "oauth",
+                    "client_id": "cid",
+                    "client_secret": "cs",
+                    "scope": "https://example/scope",
+                    "token_path": "/tmp/mytokens.json",
+                }
+            )
+        )
+        from chronos.domain import OAuthCredential
+
+        cred = config.accounts[0].credential
+        assert isinstance(cred, OAuthCredential)
+        self.assertEqual(cred.scope, "https://example/scope")
+        self.assertEqual(cred.token_path, Path("/tmp/mytokens.json"))
+
+    def test_oauth_missing_client_id_raises(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            parse(self._wrap({"backend": "oauth", "client_secret": "cs"}))
+        self.assertIn("client_id", str(ctx.exception))
+
     def test_unknown_backend(self) -> None:
         with self.assertRaises(ConfigError) as ctx:
-            parse(self._wrap({"backend": "oauth"}))
+            parse(self._wrap({"backend": "saml2"}))
         self.assertIn("unknown credential backend", str(ctx.exception))
 
     def test_missing_credential(self) -> None:
@@ -266,11 +309,24 @@ class DumpTest(unittest.TestCase):
         self.assertEqual(data["editor"], "nvim")
 
     def test_credential_roundtrip(self) -> None:
+        from chronos.domain import OAuthCredential
+
         for cred in (
             PlaintextCredential(password="s3cret"),
             EnvCredential(variable="MY_VAR"),
             CommandCredential(command=("pass", "show", "chronos")),
             KeyringCredential(service="chronos", username="u@example.com"),
+            OAuthCredential(
+                client_id="cid",
+                client_secret="cs",
+                scope="https://example/scope",
+            ),
+            OAuthCredential(
+                client_id="cid2",
+                client_secret="cs2",
+                scope="https://example/scope",
+                token_path=Path("/tmp/t.json"),
+            ),
         ):
             with self.subTest(backend=type(cred).__name__):
                 config = _sample_config()

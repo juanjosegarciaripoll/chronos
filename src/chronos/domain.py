@@ -38,8 +38,32 @@ class KeyringCredential:
     username: str
 
 
+@dataclass(frozen=True)
+class OAuthCredential:
+    """OAuth 2.0 client credentials for an account.
+
+    `client_id` and `client_secret` are inlined in `config.toml` (per
+    project decision); `token_path` is None when the default location
+    under `paths.oauth_token_dir()` should be used, or an absolute
+    path to override it.
+
+    Access/refresh tokens live in a separate JSON file at `token_path`
+    (or the resolved default), not in `config.toml`. `scope` defaults
+    to Google Calendar read+write.
+    """
+
+    client_id: str
+    client_secret: str
+    scope: str = "https://www.googleapis.com/auth/calendar"
+    token_path: Path | None = None
+
+
 CredentialSpec = (
-    PlaintextCredential | EnvCredential | CommandCredential | KeyringCredential
+    PlaintextCredential
+    | EnvCredential
+    | CommandCredential
+    | KeyringCredential
+    | OAuthCredential
 )
 
 
