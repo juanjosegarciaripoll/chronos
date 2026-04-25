@@ -4,7 +4,7 @@ Actionable backlog. Top of file is next up; bottom is later. Each milestone is a
 
 ## Current state
 
-Milestones 0–8 shipped. `chronos tui` opens the Textual UI against the same mirror + index the CLI uses; day / week / month / agenda / todo views, create / edit / trash flows, sync confirm, and search are wired end-to-end. Sync against real Google + CSIC accounts works; per-calendar / per-batch / per-ingest progress is visible at INFO. Next up is **Milestone 9 — Crash safety**, then Milestone 10 (MCP server) and 11 (Packaging).
+Milestones 0–10 shipped. `chronos tui` opens the Textual UI against the same mirror + index the CLI uses; day / week / month / agenda / todo views, create / edit / trash flows, sync confirm, and search are wired end-to-end. Sync against real Google + CSIC accounts works; per-calendar / per-batch / per-ingest progress is visible at INFO. Crash safety is in place (atomic writes everywhere, sync resumability, 412 lost-response recovery, sync.lock against concurrent runs). The read-only MCP server is wired through `chronos mcp` (stdio transport) with five tools: `list_calendars`, `query_range`, `search`, `get_event`, `get_todo`. Next up is **Milestone 11 — Packaging and release**.
 
 ## Milestone 0 — Project scaffolding
 

@@ -372,6 +372,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tui", help="Launch the Textual UI.")
 
     sub.add_parser(
+        "mcp",
+        help="Run the read-only MCP server over stdio.",
+    )
+
+    sub.add_parser(
         "init",
         help="Write a minimal config.toml if none exists at the target path.",
     )
@@ -512,6 +517,8 @@ def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
         return cmd_doctor(ctx)
     if command == "tui":
         return cmd_tui(ctx)
+    if command == "mcp":
+        return cmd_mcp(ctx)
     ctx.stderr.write(f"unknown command: {command}\n")
     return 2
 
@@ -797,6 +804,24 @@ def cmd_doctor(ctx: CliContext) -> int:
     )
     ctx.stdout.write(format_report(report))
     return report.exit_code
+
+
+def cmd_mcp(ctx: CliContext) -> int:
+    """Run the read-only MCP server until the client disconnects.
+
+    Stdio transport: stdin/stdout carry the MCP JSON-RPC stream, so
+    nothing chronos-side may print to stdout (logging is on stderr,
+    which we already configured by the time `_dispatch` runs).
+    """
+    # Imported lazily so the mcp dependency only loads when actually
+    # running the server, keeping `chronos --help` and other commands
+    # snappy.
+    import anyio
+
+    from chronos.mcp_server import serve_stdio
+
+    anyio.run(lambda: serve_stdio(index=ctx.index))
+    return 0
 
 
 def cmd_tui(ctx: CliContext) -> int:

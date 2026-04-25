@@ -287,8 +287,20 @@ class SqliteIndexRepository:
             rows = cursor.fetchall()
         return tuple(_row_to_component(r) for r in rows)
 
+    def list_calendars(self) -> tuple[CalendarRef, ...]:
+        """Distinct (account, calendar) pairs that have at least one
+        component row. Source of truth for the MCP server's
+        list_calendars tool."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT account_name, calendar_name FROM components "
+                "ORDER BY account_name, calendar_name"
+            )
+            rows = cursor.fetchall()
+        return tuple(CalendarRef(r[0], r[1]) for r in rows)
+
     def search(
-        self, query: str, calendar: CalendarRef | None = None, limit: int = 50
+        self, query: str, *, calendar: CalendarRef | None = None, limit: int = 50
     ) -> tuple[StoredComponent, ...]:
         if not query.strip():
             return ()
