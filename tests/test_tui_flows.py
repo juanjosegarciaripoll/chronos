@@ -1164,8 +1164,8 @@ class EditExistingEventTest(TuiFlowTestCase):
         self.assertIn(b"Edited summary", raw)
 
 
-class TrashFlowTest(TuiFlowTestCase):
-    async def test_trash_with_confirmation_marks_trashed(self) -> None:
+class DeleteFlowTest(TuiFlowTestCase):
+    async def test_delete_with_confirmation_marks_trashed(self) -> None:
         services = self.services()
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "simple-event-1@example.com")
         component = services.index.get_component(ref)
@@ -1176,10 +1176,10 @@ class TrashFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            # Trigger trash directly with the component (UI selection
+            # Trigger delete directly with the component (UI selection
             # is exercised by other tests; here we focus on the confirm
             # plumbing).
-            screen.trash_with_confirm(component)
+            screen.delete_with_confirm(component)
             await pilot.pause()
             confirm = pilot.app.screen
             assert isinstance(confirm, ConfirmScreen)
@@ -1188,6 +1188,9 @@ class TrashFlowTest(TuiFlowTestCase):
 
         trashed = services.index.get_component(ref)
         assert trashed is not None
+        # Internal status stays LocalStatus.TRASHED — the UI label is
+        # "Delete" but the on-disk state still goes through the trash
+        # flow so `_push_trashed` issues the server DELETE on next sync.
         self.assertEqual(trashed.local_status, LocalStatus.TRASHED)
 
     async def test_cancel_keeps_event_active(self) -> None:
@@ -1201,7 +1204,7 @@ class TrashFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            screen.trash_with_confirm(component)
+            screen.delete_with_confirm(component)
             await pilot.pause()
             await pilot.press("n")
             await pilot.pause()
@@ -1209,6 +1212,78 @@ class TrashFlowTest(TuiFlowTestCase):
         unchanged = services.index.get_component(ref)
         assert unchanged is not None
         self.assertEqual(unchanged.local_status, LocalStatus.ACTIVE)
+
+    async def test_uppercase_d_key_opens_delete_confirmation(self) -> None:
+        # Wire-up regression: rebinding the trash action from `x` to
+        # `D` (and `shift+d`) must reach the confirm screen with the
+        # currently-highlighted row.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("a")  # agenda has multiple rows
+            await pilot.pause()
+            await pilot.press("D")
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, ConfirmScreen)
+            confirm = pilot.app.screen
+            assert isinstance(confirm, ConfirmScreen)
+            self.assertIn("Delete", confirm._prompt)
+
+
+class HelpScreenTest(TuiFlowTestCase):
+    async def test_f1_opens_help_listing_visible_bindings(self) -> None:
+        from chronos.tui.screens.help_screen import HelpScreen
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("f1")
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, HelpScreen)
+            help_screen = pilot.app.screen
+            assert isinstance(help_screen, HelpScreen)
+            from textual.widgets import Static
+
+            body = help_screen.query_one("#help-body", Static)
+            text = str(body.content)
+            # A handful of public bindings must appear.
+            for fragment in ("Day", "Week", "Month", "Delete", "Help", "Quit"):
+                self.assertIn(fragment, text, fragment)
+            # Hidden aliases (shift+t, shift+n, shift+p, shift+d) must
+            # NOT show up; otherwise the help text is twice as long
+            # and reads as duplicates of the same shortcut.
+            for alias in ("shift+n", "shift+p", "shift+d"):
+                self.assertNotIn(alias, text, alias)
+
+    async def test_escape_dismisses_help_screen(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("f1")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, MainScreen)
+
+
+class CommandPaletteDisabledTest(TuiFlowTestCase):
+    async def test_ctrl_p_does_not_open_command_palette(self) -> None:
+        # Textual binds Ctrl-P to its command palette by default.
+        # `ENABLE_COMMAND_PALETTE = False` on ChronosApp turns that
+        # off; a stray Ctrl-P should leave the user on MainScreen.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, MainScreen)
+            self.assertFalse(app.ENABLE_COMMAND_PALETTE)
 
 
 class SyncFlowTest(TuiFlowTestCase):

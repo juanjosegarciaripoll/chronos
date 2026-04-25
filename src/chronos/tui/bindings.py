@@ -24,18 +24,20 @@ KEY_TODOS = "T"
 KEY_TODOS_ALT = "shift+t"
 KEY_NEW = "n"
 KEY_EDIT = "e"
-KEY_TRASH = "x"
 KEY_SYNC = "s"
 KEY_SEARCH = "/"
 KEY_QUIT = "q"
 KEY_OPEN = "enter"
 KEY_BACK = "escape"
+KEY_HELP = "f1"
 # Same shift-letter caveat as `KEY_TODOS` / `KEY_TODOS_ALT`: some
 # terminals emit the uppercase character, others the modifier form.
 KEY_NEXT = "N"
 KEY_NEXT_ALT = "shift+n"
 KEY_PREV = "P"
 KEY_PREV_ALT = "shift+p"
+KEY_DELETE = "D"
+KEY_DELETE_ALT = "shift+d"
 
 
 def main_bindings() -> list[BindingType]:
@@ -53,13 +55,15 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_NEW, "new_event", "New"),
         Binding(KEY_EDIT, "edit_event", "Edit"),
         Binding(KEY_OPEN, "open_event", "Open", show=False),
-        Binding(KEY_TRASH, "trash_event", "Trash"),
+        Binding(KEY_DELETE, "delete_event", "Delete"),
+        Binding(KEY_DELETE_ALT, "delete_event", "Delete", show=False),
         Binding(KEY_SYNC, "sync", "Sync"),
         Binding(KEY_SEARCH, "search", "Search"),
         Binding(KEY_NEXT, "next_period", "Next"),
         Binding(KEY_NEXT_ALT, "next_period", "Next", show=False),
         Binding(KEY_PREV, "prev_period", "Prev"),
         Binding(KEY_PREV_ALT, "prev_period", "Prev", show=False),
+        Binding(KEY_HELP, "show_help", "Help"),
         Binding(KEY_QUIT, "quit", "Quit"),
     ]
 
@@ -97,7 +101,10 @@ __all__ = [
     "KEY_AGENDA",
     "KEY_BACK",
     "KEY_DAY",
+    "KEY_DELETE",
+    "KEY_DELETE_ALT",
     "KEY_EDIT",
+    "KEY_HELP",
     "KEY_MONTH",
     "KEY_NEW",
     "KEY_NEXT",
@@ -111,7 +118,6 @@ __all__ = [
     "KEY_TODAY",
     "KEY_TODOS",
     "KEY_TODOS_ALT",
-    "KEY_TRASH",
     "KEY_WEEK",
     "BindingType",
     "confirm_bindings",

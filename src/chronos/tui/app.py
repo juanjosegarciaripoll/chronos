@@ -42,6 +42,11 @@ class ChronosApp(App[None]):
     constructor runs synchronously without touching any I/O.
     """
 
+    # Textual binds Ctrl-P to its built-in command palette by default;
+    # chronos's keyboard surface is small and visible from the F1 help
+    # screen, so the palette is more confusing than useful here.
+    ENABLE_COMMAND_PALETTE = False
+
     CSS = """
     #main-body { height: 1fr; }
     CalendarPanel { width: 30; border-right: solid $accent; }

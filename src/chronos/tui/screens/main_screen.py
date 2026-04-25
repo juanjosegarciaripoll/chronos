@@ -34,6 +34,7 @@ from chronos.tui.screens.day_view_screen import (
 )
 from chronos.tui.screens.event_detail_screen import EventDetailScreen
 from chronos.tui.screens.event_edit_screen import EditDraft, EventEditScreen
+from chronos.tui.screens.help_screen import HelpScreen
 from chronos.tui.screens.month_view_screen import (
     rows_for as month_rows,
 )
@@ -196,16 +197,23 @@ class MainScreen(Screen[None]):
             return
         self._open_specific(component)
 
-    def action_trash_event(self) -> None:
+    def action_delete_event(self) -> None:
         component = self._currently_selected_component()
         if component is None:
             return
-        self.trash_with_confirm(component)
+        self.delete_with_confirm(component)
 
-    def trash_with_confirm(self, component: StoredComponent) -> None:
-        prompt = f"Trash {component.summary or component.ref.uid!r}?"
+    def delete_with_confirm(self, component: StoredComponent) -> None:
+        # Confirmation flow flips the component to LocalStatus.TRASHED.
+        # The next sync's `_push_trashed` then issues the server DELETE
+        # and purges the local row, so a user-initiated delete here is
+        # picked up automatically by `chronos sync`.
+        prompt = f"Delete {component.summary or component.ref.uid!r}?"
         confirm = ConfirmScreen(prompt, lambda: self._trash(component))
         self.app.push_screen(confirm)  # pyright: ignore[reportUnknownMemberType]
+
+    def action_show_help(self) -> None:
+        self.app.push_screen(HelpScreen(main_bindings()))  # pyright: ignore[reportUnknownMemberType]
 
     def action_sync(self) -> None:
         services = self._services()
