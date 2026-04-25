@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, cast
 
+from dateutil.relativedelta import relativedelta
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
@@ -172,33 +173,47 @@ class MainScreen(Screen[None]):
 
     def action_today(self) -> None:
         self._viewed_date = self._services().now().date()
-        # Agenda is anchored on the user's actual today, so it gets
-        # the rebind for free. The viewed_date update only matters
-        # in Day / Grid views.
         self.refresh_view()
 
     def action_next_day(self) -> None:
-        self._shift_viewed_date(timedelta(days=+1))
+        self._step_natural(direction=+1)
 
     def action_prev_day(self) -> None:
-        self._shift_viewed_date(timedelta(days=-1))
+        self._step_natural(direction=-1)
 
     def action_next_chunk(self) -> None:
         if self._view != ViewKind.GRID:
             return
-        self._shift_viewed_date(timedelta(days=+self._grid_days))
+        self._viewed_date = self._viewed_date + timedelta(days=self._grid_days)
+        self.refresh_view()
 
     def action_prev_chunk(self) -> None:
         if self._view != ViewKind.GRID:
             return
-        self._shift_viewed_date(timedelta(days=-self._grid_days))
+        self._viewed_date = self._viewed_date - timedelta(days=self._grid_days)
+        self.refresh_view()
 
-    def _shift_viewed_date(self, delta: timedelta) -> None:
-        # Day / Grid views ride the viewed date; Agenda doesn't, so
-        # n/p/N/P are no-ops there.
-        if self._view not in (ViewKind.DAY, ViewKind.GRID):
+    def _step_natural(self, *, direction: int) -> None:
+        """Advance / retreat the viewed date by the natural unit of
+        the current view.
+
+        - Day / Grid: 1 day.
+        - Agenda Day window: 1 day.
+        - Agenda Week window: 7 days.
+        - Agenda Month window: 1 calendar month (`relativedelta`
+          handles month-end clamps — Jan 31 → Feb 28, etc.).
+        """
+        if self._view == ViewKind.AGENDA:
+            if self._agenda_window == AgendaWindow.DAY:
+                self._viewed_date = self._viewed_date + timedelta(days=direction)
+            elif self._agenda_window == AgendaWindow.WEEK:
+                self._viewed_date = self._viewed_date + timedelta(days=7 * direction)
+            else:  # MONTH
+                self._viewed_date = self._viewed_date + relativedelta(months=direction)
+        elif self._view in (ViewKind.DAY, ViewKind.GRID):
+            self._viewed_date = self._viewed_date + timedelta(days=direction)
+        else:
             return
-        self._viewed_date = self._viewed_date + delta
         self.refresh_view()
 
     def action_quit(self) -> None:
@@ -283,12 +298,12 @@ class MainScreen(Screen[None]):
         now = services.now()
         today = now.date()
         if self._view == ViewKind.AGENDA:
-            title_label.update(agenda_title(today, self._agenda_window))
+            title_label.update(agenda_title(self._viewed_date, self._agenda_window))
             rows = agenda_rows(
                 index=services.index,
                 calendars=calendars,
                 selection=self._selection,
-                today=today,
+                viewed=self._viewed_date,
                 mode=self._agenda_window,
             )
         elif self._view == ViewKind.DAY:

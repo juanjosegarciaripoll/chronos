@@ -1025,7 +1025,23 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             self.assertEqual(screen._viewed_date, start)
 
-    async def test_n_in_agenda_view_is_a_noop(self) -> None:
+    async def test_n_in_agenda_day_window_advances_one_day(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+a")  # Agenda
+            await pilot.pause()
+            await pilot.press("d")  # Day sub-window
+            await pilot.pause()
+            start = screen._viewed_date
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertEqual(screen._viewed_date, start + timedelta(days=1))
+
+    async def test_n_in_agenda_week_window_advances_seven_days(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
@@ -1034,10 +1050,31 @@ class DateNavigationTest(TuiFlowTestCase):
             assert isinstance(screen, MainScreen)
             await pilot.press("ctrl+a")
             await pilot.pause()
+            await pilot.press("w")  # Week sub-window
+            await pilot.pause()
             start = screen._viewed_date
             await pilot.press("n")
             await pilot.pause()
-            self.assertEqual(screen._viewed_date, start)
+            self.assertEqual(screen._viewed_date, start + timedelta(days=7))
+
+    async def test_n_in_agenda_month_window_advances_one_month(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+a")
+            await pilot.pause()
+            await pilot.press("m")  # Month sub-window
+            await pilot.pause()
+            screen._viewed_date = date(2026, 1, 31)  # exercise month clamp
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("n")
+            await pilot.pause()
+            # Feb 2026 has 28 days; relativedelta clamps to 2026-02-28.
+            self.assertEqual(screen._viewed_date, date(2026, 2, 28))
 
 
 class StartupFocusTest(TuiFlowTestCase):
