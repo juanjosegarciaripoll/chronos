@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import threading
 from collections.abc import Sequence
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from dateutil.relativedelta import relativedelta
-from textual import work
 from textual.app import ComposeResult
-from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label
@@ -48,6 +45,7 @@ from chronos.tui.screens.month_view_screen import (
 )
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
+from chronos.tui.screens.sync_progress_screen import SyncProgressScreen
 from chronos.tui.screens.todo_list_screen import (
     rows_for as todo_rows,
 )
@@ -82,12 +80,7 @@ class MainScreen(Screen[None]):
     `CONVENTIONS.md §11`.
     """
 
-    BINDINGS = [
-        *main_bindings(),
-        # Esc only does something while a sync worker is running; the
-        # main screen has no other "back" affordance to clobber.
-        Binding("escape", "cancel_sync", "Cancel sync", show=False),
-    ]
+    BINDINGS = main_bindings()
 
     def __init__(self) -> None:
         super().__init__()
@@ -95,10 +88,6 @@ class MainScreen(Screen[None]):
         self._viewed_date: date = date(2026, 4, 25)  # rebound in on_mount
         self._selection = CalendarSelection(refs=frozenset())
         self._last_rows: tuple[OccurrenceRow, ...] = ()
-        # Set when a `_run_sync` worker is in flight; the worker
-        # checks it between calendars and bails out via
-        # `SyncCancelled`. Cleared once the worker returns.
-        self._sync_cancel: threading.Event | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -431,81 +420,25 @@ class MainScreen(Screen[None]):
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _run_sync(self) -> None:
-        services = self._services()
-        runner = services.sync_runner
+        runner = self._services().sync_runner
         if runner is None:
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 "Sync from inside the TUI is not wired in this build."
             )
             return
-        if self._sync_cancel is not None:
-            # An earlier sync hasn't returned yet. Don't stack workers.
-            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-                "A sync is already in progress."
-            )
-            return
-        self._sync_cancel = threading.Event()
-        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-            "Syncing… press Esc to cancel."
-        )
-        self._spawn_sync_worker(runner, self._sync_cancel)
-
-    @work(thread=True, exclusive=True, group="chronos-sync")
-    def _spawn_sync_worker(
-        self,
-        runner: Any,
-        cancel_event: threading.Event,
-    ) -> None:
-        # Run on a Textual worker thread so the UI thread stays
-        # responsive (and so log output redirected to `tui.log` can't
-        # bleed onto the screen mid-render). Results come back via
-        # `call_from_thread` so the post-sync notify + view refresh
-        # happen on the UI thread.
-        try:
-            results = runner(cancel_event=cancel_event)
-        except Exception as exc:  # noqa: BLE001 — surface every failure
-            self.app.call_from_thread(self._sync_finished, None, exc)  # pyright: ignore[reportUnknownMemberType]
-            return
-        self.app.call_from_thread(self._sync_finished, results, None)  # pyright: ignore[reportUnknownMemberType]
+        # Push the foreground progress dialog. It owns the worker, the
+        # cancel event, and the live log tail; MainScreen just needs
+        # to refresh the view once it dismisses.
+        screen = SyncProgressScreen(runner, on_finished=self._sync_finished)
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _sync_finished(
         self,
-        results: Sequence[SyncResult] | None,
+        results: Sequence[SyncResult],
         error: BaseException | None,
     ) -> None:
-        cancelled = self._sync_cancel is not None and self._sync_cancel.is_set()
-        self._sync_cancel = None
-        if error is not None:
-            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-                f"Sync failed: {error}", severity="error"
-            )
-            return
-        if results is None:
-            return
-        added = sum(r.components_added for r in results)
-        updated = sum(r.components_updated for r in results)
-        removed = sum(r.components_removed for r in results)
-        error_count = sum(len(r.errors) for r in results)
-        prefix = "Sync cancelled" if cancelled else "Sync complete"
-        suffix = f" ({error_count} error(s))" if error_count else ""
-        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-            f"{prefix}: +{added} ~{updated} -{removed}{suffix}",
-            severity="warning"
-            if cancelled
-            else ("error" if error_count else "information"),
-        )
+        del results, error  # the dialog already showed the summary
         self.refresh_view()
-
-    def action_cancel_sync(self) -> None:
-        # Esc on the main screen only does something while sync is in
-        # flight: it sets the cancel event so the worker bails out
-        # at the next calendar boundary.
-        if self._sync_cancel is None:
-            return
-        self._sync_cancel.set()
-        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-            "Cancelling sync…"
-        )
 
     def _first_selected(self, calendars: tuple[CalendarRef, ...]) -> CalendarRef:
         for ref in calendars:

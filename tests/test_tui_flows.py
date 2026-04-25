@@ -1328,7 +1328,7 @@ class SyncFlowTest(TuiFlowTestCase):
             await pilot.pause()
             # Sync now runs on a Textual worker. Wait for it to settle
             # before asserting on `calls`.
-            await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
+            await pilot.app.workers.wait_for_complete()
             await pilot.pause()
 
         self.assertEqual(calls, [1])
@@ -1371,12 +1371,54 @@ class SyncFlowTest(TuiFlowTestCase):
             # No assertion on notify text; the path executed without
             # raising is the contract.
 
+    async def test_progress_dialog_shows_summary_on_completion(self) -> None:
+        # The dialog stays up after the runner returns and renders a
+        # summary line plus a Close button, replacing the prior
+        # background-notification flow.
+        from chronos.tui.screens.sync_progress_screen import SyncProgressScreen
+
+        def runner(**_kwargs: object) -> Sequence[SyncResult]:
+            return (
+                SyncResult(
+                    account_name=ACCOUNT_NAME,
+                    calendars_synced=1,
+                    components_added=3,
+                    components_updated=1,
+                    components_removed=0,
+                    errors=(),
+                ),
+            )
+
+        services = self.services(sync_runner=runner)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, SyncConfirmScreen)
+            await pilot.press("y")
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, SyncProgressScreen)
+            progress = pilot.app.screen
+            assert isinstance(progress, SyncProgressScreen)
+            self.assertEqual(progress._state, "done")
+            from textual.widgets import Static
+
+            summary = progress.query_one("#sync-progress-summary", Static)
+            self.assertIn("+3 added", str(summary.content))
+            self.assertIn("~1 updated", str(summary.content))
+
     async def test_escape_during_sync_sets_cancel_event(self) -> None:
         # Regression: previously sync ran on the UI thread and a stuck
         # sync could only be killed by exiting the whole app. With the
-        # worker, Esc flips the cancel event so the runner sees it on
-        # its next polling boundary.
+        # progress dialog owning a worker + cancel event, Esc on the
+        # dialog flips the event so the runner sees it on its next
+        # polling boundary.
         import threading
+
+        from chronos.tui.screens.sync_progress_screen import SyncProgressScreen
 
         gate = threading.Event()  # block the runner until we cancel
         observed: dict[str, threading.Event | None] = {"cancel": None}
@@ -1407,24 +1449,25 @@ class SyncFlowTest(TuiFlowTestCase):
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
             await pilot.pause()
-            # Sync worker is now blocked inside `runner`. The screen
-            # is back on MainScreen (sync confirm popped on confirm).
-            self.assertIsInstance(pilot.app.screen, MainScreen)
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            self.assertIsNotNone(screen._sync_cancel)
+            # The progress dialog is now the active screen, blocking
+            # in `runner`.
+            self.assertIsInstance(pilot.app.screen, SyncProgressScreen)
+            progress = pilot.app.screen
+            assert isinstance(progress, SyncProgressScreen)
             await pilot.press("escape")
             await pilot.pause()
-            # The cancel event the runner received is the same one Esc
-            # toggled, and it's set.
+            # Esc flipped the dialog's cancel event, which the runner
+            # received as a kwarg.
             cancel = observed["cancel"]
             assert cancel is not None
             self.assertTrue(cancel.is_set())
-            # Release the runner so the worker can finish cleanly.
+            self.assertTrue(progress._cancel_event.is_set())
+            # Release the runner so the worker finishes; dialog
+            # transitions to its "done" state.
             gate.set()
-            await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
+            await pilot.app.workers.wait_for_complete()
             await pilot.pause()
-            self.assertIsNone(screen._sync_cancel)
+            self.assertEqual(progress._state, "done")
 
 
 class SearchFlowTest(TuiFlowTestCase):

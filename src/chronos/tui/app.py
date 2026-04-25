@@ -75,16 +75,17 @@ class ChronosApp(App[None]):
        an action row at the bottom. ModalScreen already darkens the
        backdrop, so a clean panel reads as "this is a dialog" without
        extra effort. */
-    #sync-confirm-box, #confirm-box {
+    #sync-confirm-box, #confirm-box, #sync-progress-box {
         background: $surface;
         border: thick $accent;
         padding: 1 2;
         width: auto;
-        max-width: 80;
+        max-width: 100;
         height: auto;
     }
     #sync-confirm-box .dialog-title,
-    #confirm-box .dialog-title {
+    #confirm-box .dialog-title,
+    #sync-progress-box .dialog-title {
         text-style: bold;
         margin-bottom: 1;
     }
@@ -92,14 +93,31 @@ class ChronosApp(App[None]):
         color: $text-muted;
     }
     #sync-confirm-box .dialog-actions,
-    #confirm-box .dialog-actions {
+    #confirm-box .dialog-actions,
+    #sync-progress-box .dialog-actions {
         margin-top: 1;
         align-horizontal: right;
         height: auto;
     }
     #sync-confirm-box .dialog-actions Button,
-    #confirm-box .dialog-actions Button {
+    #confirm-box .dialog-actions Button,
+    #sync-progress-box .dialog-actions Button {
         margin-left: 1;
+    }
+    /* Progress dialog: live log tail + summary line. Width is wider
+       than the confirm dialogs so per-batch fetch lines fit. */
+    #sync-progress-box {
+        width: 90;
+    }
+    #sync-progress-log {
+        color: $text-muted;
+        height: auto;
+        max-height: 18;
+        margin-top: 1;
+    }
+    #sync-progress-summary {
+        margin-top: 1;
+        text-style: bold;
     }
     """
 

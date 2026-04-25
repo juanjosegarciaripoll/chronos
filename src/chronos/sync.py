@@ -199,15 +199,17 @@ def _sync_calendar(
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     prior_state = index.get_sync_state(calendar_ref)
     server_ctag = session.get_ctag(calendar.url)
-    logger.debug(
-        "%s/%s ctag=%s prior=%s",
-        account.name,
-        calendar.calendar_name,
-        server_ctag,
-        prior_state.ctag if prior_state else None,
-    )
+    prior_ctag_repr = prior_state.ctag if prior_state else None
 
     if _ctag_matches(prior_state, server_ctag):
+        # CTag stable since last sync — skip the calendar-query +
+        # multiget round trips entirely.
+        logger.info(
+            "[%s] %s fast path (CTag stable: %s)",
+            account.name,
+            calendar.calendar_name,
+            server_ctag,
+        )
         stats = _fast_path_reconcile(
             account=account,
             calendar=calendar,
@@ -217,6 +219,17 @@ def _sync_calendar(
             now=now,
         )
     else:
+        # CTag mismatch (or missing on either side) → re-list and
+        # reconcile. Surfaced at INFO so users investigating "why
+        # does sync re-fetch every time?" can see the prior vs
+        # server tokens directly in `tui.log` without enabling -v.
+        logger.info(
+            "[%s] %s slow path (CTag %s -> %s)",
+            account.name,
+            calendar.calendar_name,
+            prior_ctag_repr if prior_ctag_repr is not None else "(none)",
+            server_ctag if server_ctag is not None else "(none)",
+        )
         stats = _slow_path_reconcile(
             account=account,
             calendar=calendar,
@@ -226,12 +239,21 @@ def _sync_calendar(
             now=now,
         )
 
-    # CTag can have advanced because of our own pushes; re-read after mutations.
-    final_ctag = (
-        session.get_ctag(calendar.url)
-        if stats.path == "slow" or (stats.pushed or stats.deleted_remote)
-        else server_ctag
-    )
+    # Default: keep the CTag we read at the top of this run.
+    # Re-reading after an unchanged slow path is *worse* on servers
+    # whose `getctag` drifts per request (notably Google) — every
+    # sync would store a freshly-read token that the next sync's
+    # top-of-function read no longer matches, forcing the slow path
+    # forever. Only re-read when our own pushes / deletes advanced
+    # the server state, and fall back to the prior value if the
+    # re-read fails for any reason (network blip, parse error)
+    # rather than storing `None`, which would also pin the next
+    # sync to the slow path.
+    final_ctag = server_ctag
+    if stats.pushed or stats.deleted_remote:
+        re_read = session.get_ctag(calendar.url)
+        if re_read is not None:
+            final_ctag = re_read
 
     index.set_sync_state(
         SyncState(

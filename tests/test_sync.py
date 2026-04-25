@@ -174,6 +174,63 @@ class FastPathTest(SyncTestCase):
         self.assertIn("calendar_query", [c[0] for c in self.session.calls])
         self.assertEqual(result.components_added, 1)
 
+    def test_no_op_slow_path_stores_top_of_function_ctag(self) -> None:
+        # Regression: against servers whose `getctag` drifts on every
+        # PROPFIND (notably Google), re-reading the CTag at the end
+        # of an unchanged slow path stores a value that the next
+        # sync's top-of-function read won't match — pinning every
+        # subsequent sync to the slow path. The fix stores the CTag
+        # we read at the top, and only re-reads when our own pushes
+        # could have advanced the server.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}a.ics",
+            ics=_ics_with_uid("noop@example.com"),
+            etag="etag-a",
+        )
+        # First sync: slow path runs, stores the current CTag.
+        self._run()
+        first_state = self.index.get_sync_state(self.calendar_ref)
+        assert first_state is not None
+        first_ctag = first_state.ctag
+
+        # Force the slow path on the next sync by clearing local
+        # state, but keep the server unchanged. Then bump the
+        # server's CTag *after* the slow path's top-of-function
+        # read so the FakeCalDAVSession returns a different value
+        # if the engine re-reads at the end.
+        self.index.set_sync_state(
+            SyncState(
+                calendar=self.calendar_ref,
+                ctag="ctag-stale",
+                sync_token=None,
+                synced_at=datetime(2026, 4, 22, tzinfo=UTC),
+            )
+        )
+
+        original_get_ctag = self.session.get_ctag
+        call_count = {"n": 0}
+
+        def drifting_get_ctag(calendar_url: str) -> str | None:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return original_get_ctag(calendar_url)
+            # Pretend the server now reports a different opaque token.
+            return f"drifted-{call_count['n']}"
+
+        self.session.get_ctag = drifting_get_ctag  # type: ignore[method-assign]
+        self._run()
+        second_state = self.index.get_sync_state(self.calendar_ref)
+        assert second_state is not None
+        # Stored CTag is the value we read at the top of the slow
+        # path, not the drifted re-read — so the next sync's
+        # top-of-function read still matches and the fast path can
+        # kick in (assuming the server stops drifting).
+        self.assertEqual(second_state.ctag, first_ctag)
+        # And only one `get_ctag` call was made — no re-read at the
+        # end since the slow path didn't push anything.
+        self.assertEqual(call_count["n"], 1)
+
 
 class ServerDeletionTest(SyncTestCase):
     def test_server_deletion_removes_local_row(self) -> None:
