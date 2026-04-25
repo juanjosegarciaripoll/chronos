@@ -91,7 +91,7 @@ class MainScreen(Screen[None]):
             with Vertical(id="centre-pane"):
                 yield Label("", id="view-title")
                 yield EventList(id="centre-list")
-            yield EventView(id="detail-pane")
+                yield EventView(id="detail-pane")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -201,6 +201,10 @@ class MainScreen(Screen[None]):
         calendars = all_calendar_refs(services.config, services.mirror)
         title_label: Label = self.query_one("#view-title", Label)
         event_list: EventList = self.query_one(EventList)
+        # Friendly date labels (Today / Tomorrow / weekday) are anchored
+        # on the user's actual today, not on the viewed date — looking
+        # at a 2014 day still shows the absolute date, not "Today".
+        today = services.now().date()
         if self._view == ViewKind.DAY:
             title_label.update(day_title(self._viewed_date))
             rows = day_rows(
@@ -210,7 +214,7 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
             )
             self._last_rows = rows
-            event_list.show_events(rows)
+            event_list.show_events(rows, today=today)
         elif self._view == ViewKind.WEEK:
             title_label.update(week_title(self._viewed_date))
             rows = week_rows(
@@ -220,7 +224,7 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
             )
             self._last_rows = rows
-            event_list.show_events(rows)
+            event_list.show_events(rows, today=today)
         elif self._view == ViewKind.MONTH:
             title_label.update(month_title(self._viewed_date))
             rows = month_rows(
@@ -230,9 +234,8 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
             )
             self._last_rows = rows
-            event_list.show_events(rows)
+            event_list.show_events(rows, today=today)
         elif self._view == ViewKind.AGENDA:
-            today = services.now().date()
             title_label.update(agenda_title(today))
             rows = agenda_rows(
                 index=services.index,
@@ -241,7 +244,7 @@ class MainScreen(Screen[None]):
                 today=today,
             )
             self._last_rows = rows
-            event_list.show_events(rows)
+            event_list.show_events(rows, today=today)
         else:  # TODOS
             title_label.update(todo_title())
             self._last_rows = ()

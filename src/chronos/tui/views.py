@@ -145,12 +145,59 @@ def gather_todos(
     return tuple(out)
 
 
-def format_event_row(row: OccurrenceRow) -> tuple[str, str, str, str]:
-    start = row.occurrence.start.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+def format_friendly_start(start: datetime, today: date) -> str:
+    """Render a datetime using day-of-week / Today / Tomorrow shortcuts.
+
+    Anchored to UTC for determinism — every fixture and live ICS in
+    chronos stores instants as UTC. Switching to local time is a
+    separate concern (needs a per-account or per-app TZ).
+    """
+    moment = start.astimezone(UTC)
+    moment_date = moment.date()
+    delta = (moment_date - today).days
+    time_str = moment.strftime("%H:%M")
+    if delta == 0:
+        return f"Today {time_str}"
+    if delta == 1:
+        return f"Tomorrow {time_str}"
+    if delta == -1:
+        return f"Yesterday {time_str}"
+    if 1 < delta < 7:
+        return f"{moment.strftime('%A')} {time_str}"
+    if -7 < delta < -1:
+        return f"Last {moment.strftime('%A')} {time_str}"
+    if moment.year == today.year:
+        return f"{moment.strftime('%a %d %b')} {time_str}"
+    return f"{moment.strftime('%a %d %b %Y')} {time_str}"
+
+
+def format_duration(start: datetime, end: datetime | None) -> str:
+    """Compact human-readable duration: 30m, 1h, 1h30m, 1d, 1d6h."""
+    if end is None:
+        return ""
+    seconds = int((end - start).total_seconds())
+    if seconds <= 0:
+        return ""
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    return "".join(parts) or "0m"
+
+
+def format_event_row(row: OccurrenceRow, today: date) -> tuple[str, str, str, str, str]:
+    when = format_friendly_start(row.occurrence.start, today)
+    duration = format_duration(row.occurrence.start, row.occurrence.end)
     summary = row.component.summary or "(no summary)"
     calendar = row.component.ref.calendar_name
     location = row.component.location or ""
-    return start, summary, calendar, location
+    return when, duration, summary, calendar, location
 
 
 def format_todo_row(todo: VTodo) -> tuple[str, str, str, str]:
@@ -247,7 +294,9 @@ __all__ = [
     "agenda_window",
     "all_calendar_refs",
     "day_window",
+    "format_duration",
     "format_event_row",
+    "format_friendly_start",
     "format_todo_row",
     "gather_occurrences",
     "gather_todos",

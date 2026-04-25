@@ -50,7 +50,9 @@ from chronos.tui.views import (
     agenda_window,
     all_calendar_refs,
     day_window,
+    format_duration,
     format_event_row,
+    format_friendly_start,
     format_todo_row,
     gather_occurrences,
     gather_todos,
@@ -322,8 +324,122 @@ class GatherTodosTest(unittest.TestCase):
         self.assertEqual(todos, ())
 
 
+class FriendlyStartFormatTest(unittest.TestCase):
+    TODAY = date(2026, 4, 25)  # Saturday
+
+    def test_today(self) -> None:
+        self.assertEqual(
+            format_friendly_start(datetime(2026, 4, 25, 9, 30, tzinfo=UTC), self.TODAY),
+            "Today 09:30",
+        )
+
+    def test_tomorrow(self) -> None:
+        self.assertEqual(
+            format_friendly_start(datetime(2026, 4, 26, 14, 0, tzinfo=UTC), self.TODAY),
+            "Tomorrow 14:00",
+        )
+
+    def test_yesterday(self) -> None:
+        self.assertEqual(
+            format_friendly_start(datetime(2026, 4, 24, 8, 0, tzinfo=UTC), self.TODAY),
+            "Yesterday 08:00",
+        )
+
+    def test_within_a_week_uses_weekday_name(self) -> None:
+        # 2026-04-28 is the following Tuesday.
+        result = format_friendly_start(
+            datetime(2026, 4, 28, 9, 0, tzinfo=UTC), self.TODAY
+        )
+        self.assertEqual(result, "Tuesday 09:00")
+
+    def test_recent_past_uses_last_weekday(self) -> None:
+        # 2026-04-22 is the prior Wednesday.
+        result = format_friendly_start(
+            datetime(2026, 4, 22, 9, 0, tzinfo=UTC), self.TODAY
+        )
+        self.assertEqual(result, "Last Wednesday 09:00")
+
+    def test_same_year_uses_short_date(self) -> None:
+        result = format_friendly_start(
+            datetime(2026, 8, 15, 9, 0, tzinfo=UTC), self.TODAY
+        )
+        # Sat 15 Aug 09:00 — order varies by locale of strftime but
+        # the important pieces are all there.
+        self.assertIn("Aug", result)
+        self.assertIn("15", result)
+        self.assertIn("09:00", result)
+        self.assertNotIn("2026", result)  # year omitted for current-year
+
+    def test_other_year_includes_year(self) -> None:
+        result = format_friendly_start(
+            datetime(2014, 9, 30, 12, 18, tzinfo=UTC), self.TODAY
+        )
+        self.assertIn("2014", result)
+        self.assertIn("Sep", result)
+        self.assertIn("12:18", result)
+
+
+class DurationFormatTest(unittest.TestCase):
+    def test_zero_or_missing_end_is_empty(self) -> None:
+        self.assertEqual(format_duration(datetime(2026, 5, 1, 9, tzinfo=UTC), None), "")
+        self.assertEqual(
+            format_duration(
+                datetime(2026, 5, 1, 9, tzinfo=UTC),
+                datetime(2026, 5, 1, 9, tzinfo=UTC),
+            ),
+            "",
+        )
+
+    def test_minutes(self) -> None:
+        self.assertEqual(
+            format_duration(
+                datetime(2026, 5, 1, 9, tzinfo=UTC),
+                datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+            ),
+            "30m",
+        )
+
+    def test_whole_hours(self) -> None:
+        self.assertEqual(
+            format_duration(
+                datetime(2026, 5, 1, 9, tzinfo=UTC),
+                datetime(2026, 5, 1, 11, tzinfo=UTC),
+            ),
+            "2h",
+        )
+
+    def test_hours_and_minutes(self) -> None:
+        self.assertEqual(
+            format_duration(
+                datetime(2026, 5, 1, 9, tzinfo=UTC),
+                datetime(2026, 5, 1, 10, 30, tzinfo=UTC),
+            ),
+            "1h30m",
+        )
+
+    def test_full_day(self) -> None:
+        self.assertEqual(
+            format_duration(
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 5, 2, tzinfo=UTC),
+            ),
+            "1d",
+        )
+
+    def test_multi_day_with_remainder(self) -> None:
+        self.assertEqual(
+            format_duration(
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 5, 2, 6, 15, tzinfo=UTC),
+            ),
+            "1d6h15m",
+        )
+
+
 class RowFormattingTest(unittest.TestCase):
-    def test_format_event_row_has_four_columns(self) -> None:
+    TODAY = date(2026, 4, 25)
+
+    def test_format_event_row_has_five_columns_with_friendly_when(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
         event = VEvent(
             ref=ref,
@@ -333,8 +449,8 @@ class RowFormattingTest(unittest.TestCase):
             summary="Hello",
             description=None,
             location="Room 1",
-            dtstart=datetime(2026, 5, 1, 9, tzinfo=UTC),
-            dtend=None,
+            dtstart=datetime(2026, 6, 15, 9, tzinfo=UTC),
+            dtend=datetime(2026, 6, 15, 10, tzinfo=UTC),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -345,18 +461,21 @@ class RowFormattingTest(unittest.TestCase):
         row = OccurrenceRow(
             occurrence=Occurrence(
                 ref=ref,
-                start=datetime(2026, 5, 1, 9, tzinfo=UTC),
-                end=None,
+                start=datetime(2026, 6, 15, 9, tzinfo=UTC),
+                end=datetime(2026, 6, 15, 10, tzinfo=UTC),
                 recurrence_id=None,
                 is_override=False,
             ),
             component=event,
         )
-        cells = format_event_row(row)
-        self.assertEqual(cells[0], "2026-05-01 09:00")
-        self.assertEqual(cells[1], "Hello")
-        self.assertEqual(cells[2], WORK_CAL)
-        self.assertEqual(cells[3], "Room 1")
+        cells = format_event_row(row, self.TODAY)
+        # 2026-06-15 is well over a week out → short-date format.
+        self.assertIn("Jun", cells[0])
+        self.assertIn("09:00", cells[0])
+        self.assertEqual(cells[1], "1h")
+        self.assertEqual(cells[2], "Hello")
+        self.assertEqual(cells[3], WORK_CAL)
+        self.assertEqual(cells[4], "Room 1")
 
     def test_format_event_row_handles_missing_summary_and_location(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
@@ -371,9 +490,10 @@ class RowFormattingTest(unittest.TestCase):
             ),
             component=event,
         )
-        cells = format_event_row(row)
-        self.assertEqual(cells[1], "(no summary)")
-        self.assertEqual(cells[3], "")
+        cells = format_event_row(row, self.TODAY)
+        self.assertEqual(cells[1], "")  # no end -> no duration
+        self.assertEqual(cells[2], "(no summary)")
+        self.assertEqual(cells[4], "")
 
     def test_format_todo_row_renders_due_and_status(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, PERSONAL_CAL, "y")

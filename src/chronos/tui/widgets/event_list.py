@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from textual.widgets import DataTable
 
 from chronos.domain import ComponentRef, StoredComponent, VTodo
 from chronos.tui.views import OccurrenceRow, format_event_row, format_todo_row
 
-_EVENT_COLUMNS = ("Start", "Summary", "Calendar", "Location")
+_EVENT_COLUMNS = ("When", "Duration", "Summary", "Calendar", "Location")
 _TODO_COLUMNS = ("Due", "Summary", "Calendar", "Status")
 
 
@@ -24,7 +25,7 @@ class EventList(DataTable[str]):
         self._mode: str | None = None
         self._refs: dict[str, ComponentRef] = {}
 
-    def show_events(self, rows: Sequence[OccurrenceRow]) -> None:
+    def show_events(self, rows: Sequence[OccurrenceRow], *, today: date) -> None:
         self._reset(_EVENT_COLUMNS, "events")
         for row in rows:
             key = self._row_key(
@@ -32,7 +33,7 @@ class EventList(DataTable[str]):
                 row.occurrence.recurrence_id,
                 instance=row.occurrence.start.isoformat(),
             )
-            self.add_row(*format_event_row(row), key=key)
+            self.add_row(*format_event_row(row, today), key=key)
             self._refs[key] = row.component.ref
 
     def show_todos(self, todos: Sequence[VTodo]) -> None:

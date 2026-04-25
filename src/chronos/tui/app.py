@@ -45,10 +45,14 @@ class ChronosApp(App[None]):
     CSS = """
     #main-body { height: 1fr; }
     CalendarPanel { width: 30; border-right: solid $accent; }
-    #centre-pane { width: 2fr; }
-    #detail-pane { width: 1fr; border-left: solid $accent; padding: 1; }
+    #centre-pane { width: 1fr; }
     #view-title { padding: 0 1; color: $text-muted; }
-    EventList { height: 1fr; }
+    EventList { height: 2fr; }
+    #detail-pane {
+        height: 1fr;
+        border-top: solid $accent;
+        padding: 1;
+    }
     #event-edit, #search-dialog, #confirm-box, #sync-confirm-box {
         padding: 1;
     }
