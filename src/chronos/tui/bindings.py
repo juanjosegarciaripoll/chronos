@@ -30,6 +30,12 @@ KEY_SEARCH = "/"
 KEY_QUIT = "q"
 KEY_OPEN = "enter"
 KEY_BACK = "escape"
+# Same shift-letter caveat as `KEY_TODOS` / `KEY_TODOS_ALT`: some
+# terminals emit the uppercase character, others the modifier form.
+KEY_NEXT = "N"
+KEY_NEXT_ALT = "shift+n"
+KEY_PREV = "P"
+KEY_PREV_ALT = "shift+p"
 
 
 def main_bindings() -> list[BindingType]:
@@ -50,6 +56,10 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_TRASH, "trash_event", "Trash"),
         Binding(KEY_SYNC, "sync", "Sync"),
         Binding(KEY_SEARCH, "search", "Search"),
+        Binding(KEY_NEXT, "next_period", "Next"),
+        Binding(KEY_NEXT_ALT, "next_period", "Next", show=False),
+        Binding(KEY_PREV, "prev_period", "Prev"),
+        Binding(KEY_PREV_ALT, "prev_period", "Prev", show=False),
         Binding(KEY_QUIT, "quit", "Quit"),
     ]
 
@@ -90,7 +100,11 @@ __all__ = [
     "KEY_EDIT",
     "KEY_MONTH",
     "KEY_NEW",
+    "KEY_NEXT",
+    "KEY_NEXT_ALT",
     "KEY_OPEN",
+    "KEY_PREV",
+    "KEY_PREV_ALT",
     "KEY_QUIT",
     "KEY_SEARCH",
     "KEY_SYNC",

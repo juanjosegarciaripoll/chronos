@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, cast
 
+from dateutil.relativedelta import relativedelta
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
@@ -100,6 +101,10 @@ class MainScreen(Screen[None]):
         panel: CalendarPanel = self.query_one(CalendarPanel)
         panel.populate(all_calendar_refs(services.config, services.mirror))
         self.refresh_view()
+        # Land focus on the event list, not the calendar tree, so the
+        # user can navigate / open / edit events without first having
+        # to tab out of the left-hand panel.
+        self.query_one(EventList).focus()
 
     # View switches ----------------------------------------------------------
 
@@ -130,6 +135,27 @@ class MainScreen(Screen[None]):
         self._viewed_date = self._services().now().date()
         if self._view in (ViewKind.AGENDA, ViewKind.TODOS):
             self._view = ViewKind.DAY
+        self.refresh_view()
+
+    def action_next_period(self) -> None:
+        self._step_period(direction=+1)
+
+    def action_prev_period(self) -> None:
+        self._step_period(direction=-1)
+
+    def _step_period(self, *, direction: int) -> None:
+        # Advance / retreat the viewed date by the natural unit for
+        # the current view. Agenda + todos ignore `_viewed_date`, so
+        # `N` / `P` are no-ops there. Day view also doesn't act here
+        # — the user can hop ±1 day with `t` (today) and the date
+        # picker; binding day to N/P would clash with the user's
+        # explicit "week or month" framing.
+        if self._view == ViewKind.WEEK:
+            self._viewed_date = self._viewed_date + timedelta(days=7 * direction)
+        elif self._view == ViewKind.MONTH:
+            self._viewed_date = self._viewed_date + relativedelta(months=direction)
+        else:
+            return
         self.refresh_view()
 
     def action_quit(self) -> None:

@@ -968,6 +968,102 @@ class TodayAndTodosKeysSwappedTest(TuiFlowTestCase):
             self.assertEqual(screen._view, ViewKind.TODOS)
 
 
+class NextPrevPeriodTest(TuiFlowTestCase):
+    """`N` / `P` advance and retreat the viewed date by one week or
+    one month, depending on the current view. They're no-ops elsewhere.
+    """
+
+    async def test_next_in_week_view_jumps_seven_days(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("w")
+            await pilot.pause()
+            start = screen._viewed_date
+            await pilot.press("N")
+            await pilot.pause()
+            self.assertEqual(screen._viewed_date, start + timedelta(days=7))
+
+    async def test_prev_in_week_view_retreats_seven_days(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("w")
+            await pilot.pause()
+            start = screen._viewed_date
+            await pilot.press("P")
+            await pilot.pause()
+            self.assertEqual(screen._viewed_date, start - timedelta(days=7))
+
+    async def test_next_in_month_view_advances_one_calendar_month(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("m")
+            await pilot.pause()
+            screen._viewed_date = date(2026, 1, 31)  # exercise day clamp
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("N")
+            await pilot.pause()
+            # Feb has 28 days in 2026 → relativedelta clamps to 2026-02-28.
+            self.assertEqual(screen._viewed_date, date(2026, 2, 28))
+
+    async def test_prev_in_month_view_handles_year_rollover(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("m")
+            await pilot.pause()
+            screen._viewed_date = date(2026, 1, 15)
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("P")
+            await pilot.pause()
+            self.assertEqual(screen._viewed_date, date(2025, 12, 15))
+
+    async def test_next_in_agenda_view_is_a_noop(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("a")  # AGENDA ignores _viewed_date.
+            await pilot.pause()
+            start = screen._viewed_date
+            await pilot.press("N")
+            await pilot.pause()
+            self.assertEqual(screen._viewed_date, start)
+
+
+class StartupFocusTest(TuiFlowTestCase):
+    async def test_event_list_has_focus_on_mount(self) -> None:
+        # Regression: previously the calendar tree on the left grabbed
+        # focus by default, so the user had to tab out of it before
+        # arrow keys did anything useful.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            event_list = screen.query_one(EventList)
+            self.assertTrue(event_list.has_focus)
+
+
 class DetailPaneTracksCursorTest(TuiFlowTestCase):
     async def test_arrow_down_refreshes_detail_pane(self) -> None:
         # Regression: moving the cursor through the event list left
@@ -981,10 +1077,6 @@ class DetailPaneTracksCursorTest(TuiFlowTestCase):
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
             await pilot.press("a")  # Agenda has multiple rows seeded.
-            await pilot.pause()
-
-            event_list = screen.query_one(EventList)
-            event_list.focus()
             await pilot.pause()
 
             first_component = screen._currently_selected_component()
