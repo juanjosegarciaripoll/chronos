@@ -52,8 +52,7 @@ from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.oauth import (
     OAuthError,
     StoredTokens,
-    poll_for_tokens,
-    request_device_code,
+    run_loopback_flow,
     save_tokens,
 )
 from chronos.paths import (
@@ -195,17 +194,19 @@ def _default_context_factory(config_path: Path | None) -> CliContext:
 def _default_cli_authorizer(
     account_name: str, spec: OAuthCredential, _token_path: Path
 ) -> StoredTokens:
-    """Run the OAuth device flow inline when sync hits an unauthorized account.
+    """Run the OAuth loopback flow inline when sync hits an unauthorized account.
 
     Wired into `_default_context_factory` so plain `chronos sync` "just
-    works" the first time: print the URL + code on stdout, poll until
-    the user authorizes, return the tokens (the caller saves them).
+    works" the first time: open the user's browser to the consent
+    screen, capture the redirect on a random local port, exchange the
+    code for tokens (the caller saves them).
 
     Refuses to prompt when stdin/stdout aren't a TTY — cron / scripted
-    invocations get a clean error rather than blocking on input. Network
-    or HTTP failures from the device endpoint are surfaced loudly on
-    stdout (not just stderr) so the user notices them right after the
-    "authorization required" preface.
+    invocations get a clean error rather than silently blocking on a
+    browser that may never open. Network and HTTP failures from the
+    OAuth provider are surfaced loudly on stdout (not just stderr) so
+    the user notices them right after the "authorization required"
+    preface.
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise OAuthError(
@@ -215,18 +216,18 @@ def _default_cli_authorizer(
         )
     sys.stdout.write(
         f"\n[{account_name}] OAuth authorization required. "
-        "Requesting device code from the OAuth provider...\n"
+        "Opening your browser to the provider's consent screen...\n"
     )
     sys.stdout.flush()
     try:
-        return _default_device_flow(spec, sys.stdout)
+        return _default_loopback_flow(spec, sys.stdout)
     except OAuthError as exc:
         sys.stdout.write(
             f"\n[{account_name}] OAuth setup failed: {exc}\n"
             "  - Verify client_id and client_secret in config.toml.\n"
-            "  - For Google: the OAuth client must be of type 'TVs and "
-            "Limited Input devices' for the device flow to work; the "
-            "Web/Desktop types reject it.\n"
+            "  - For Google: the OAuth client must be of type 'Desktop "
+            "app' (the same type Thunderbird uses); Web/TV types reject "
+            "the loopback redirect.\n"
         )
         sys.stdout.flush()
         raise
@@ -972,8 +973,15 @@ def cmd_oauth_authorize(
     *,
     config_path: Path,
     account_name: str,
-    device_flow: Callable[[OAuthCredential, TextIO], StoredTokens] | None = None,
+    auth_flow: Callable[[OAuthCredential, TextIO], StoredTokens] | None = None,
 ) -> int:
+    """Re-run OAuth authorization for an account.
+
+    Usually unnecessary — the first `chronos sync` for an unauthorized
+    account auto-runs the same flow inline. Useful when the user wants
+    to re-consent to new scopes, swap OAuth clients, or reset a revoked
+    refresh token without waiting for the next sync to discover it.
+    """
     try:
         config = load_config(config_path)
     except ConfigError as exc:
@@ -998,7 +1006,7 @@ def cmd_oauth_authorize(
             "only meaningful for the oauth and google backends.\n"
         )
         return 2
-    flow = device_flow or _default_device_flow
+    flow = auth_flow or _default_loopback_flow
     try:
         tokens = flow(oauth_credential, stdout)
     except OAuthError as exc:
@@ -1092,18 +1100,16 @@ def _credential_backend(spec: CredentialSpec) -> str:
     return "encrypted"
 
 
-def _default_device_flow(credential: OAuthCredential, stdout: TextIO) -> StoredTokens:
-    grant = request_device_code(client_id=credential.client_id, scope=credential.scope)
+def _default_loopback_flow(credential: OAuthCredential, stdout: TextIO) -> StoredTokens:
+    """Default flow for production: OAuth 2.0 loopback (RFC 8252 + PKCE)."""
     stdout.write(
-        f"\nOpen {grant.verification_url} on any device and enter this code:\n"
-        f"\n    {grant.user_code}\n\n"
-        "Waiting for authorisation...\n"
+        "Opening browser. If it doesn't open automatically, copy the URL "
+        "printed above into your browser. Waiting for the redirect...\n"
     )
     stdout.flush()
-    return poll_for_tokens(
+    return run_loopback_flow(
         client_id=credential.client_id,
         client_secret=credential.client_secret,
-        grant=grant,
         scope=credential.scope,
     )
 

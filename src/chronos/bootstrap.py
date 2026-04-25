@@ -60,8 +60,10 @@ use_utf8 = false
 
 # # Google Calendar via OAuth 2.0. Only the client_id/client_secret from
 # # your Google Cloud project are required; the CalDAV URL, username, and
-# # OAuth scope are filled in by chronos. The first `chronos sync` will
-# # walk you through the device flow and store the tokens.
+# # OAuth scope are filled in by chronos. The OAuth client must be of
+# # type "Desktop app" (the same type Thunderbird uses). The first
+# # `chronos sync` will open your browser to the consent screen and
+# # store the tokens automatically.
 # [[accounts]]
 # name = "google"
 # [accounts.credential]
@@ -69,8 +71,9 @@ use_utf8 = false
 # client_id = "REPLACE-ME.apps.googleusercontent.com"
 # client_secret = "REPLACE-ME"
 
-# # Generic OAuth 2.0 device flow (Microsoft / Outlook, custom IdPs):
-# # configure URL, username, scope, and client credentials explicitly.
+# # Generic OAuth 2.0 (Microsoft / Outlook, custom IdPs): configure URL,
+# # username, scope, and client credentials explicitly. The first sync
+# # opens a browser using the loopback redirect flow (RFC 8252 + PKCE).
 # [[accounts]]
 # name = "outlook"
 # url = "https://outlook.office365.com/"

@@ -18,11 +18,14 @@ from chronos.oauth import (
     DeviceCodeGrant,
     OAuthError,
     StoredTokens,
+    build_authorization_url,
     build_bearer_auth,
+    exchange_code_for_tokens,
     load_tokens,
     poll_for_tokens,
     refresh_access_token,
     request_device_code,
+    run_loopback_flow,
     save_tokens,
 )
 
@@ -378,3 +381,195 @@ class SaveTokensPermissionsTest(unittest.TestCase):
         )
         mode = path.stat().st_mode & 0o777
         self.assertEqual(mode, 0o600)
+
+
+class BuildAuthorizationUrlTest(unittest.TestCase):
+    def test_url_contains_required_params(self) -> None:
+        from urllib.parse import parse_qs, urlparse
+
+        url = build_authorization_url(
+            client_id="cid.apps.googleusercontent.com",
+            redirect_uri="http://127.0.0.1:54321/",
+            scope="https://www.googleapis.com/auth/calendar",
+            state="csrf-state-token",
+            code_challenge="abc123",
+        )
+        parsed = urlparse(url)
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        self.assertEqual(parsed.netloc, "accounts.google.com")
+        self.assertEqual(params["client_id"], "cid.apps.googleusercontent.com")
+        self.assertEqual(params["redirect_uri"], "http://127.0.0.1:54321/")
+        self.assertEqual(params["response_type"], "code")
+        self.assertEqual(params["state"], "csrf-state-token")
+        self.assertEqual(params["code_challenge"], "abc123")
+        self.assertEqual(params["code_challenge_method"], "S256")
+        # offline + prompt=consent are required to receive a refresh
+        # token on every flow (Google's default returns access_token only
+        # after the first authorization).
+        self.assertEqual(params["access_type"], "offline")
+        self.assertEqual(params["prompt"], "consent")
+
+
+class ExchangeCodeForTokensTest(unittest.TestCase):
+    def test_returns_stored_tokens_from_response(self) -> None:
+        post = MagicMock(
+            return_value=_mock_response(
+                json_body={
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "expires_in": 3600,
+                    "scope": "https://example/scope",
+                }
+            )
+        )
+        tokens = exchange_code_for_tokens(
+            client_id="c",
+            client_secret="s",
+            code="auth-code-from-redirect",
+            code_verifier="pkce-verifier",
+            redirect_uri="http://127.0.0.1:1234/",
+            scope="https://example/scope",
+            http_post=post,
+            now=lambda: 1000.0,
+        )
+        self.assertEqual(tokens.access_token, "at")
+        self.assertEqual(tokens.refresh_token, "rt")
+        self.assertEqual(tokens.expiry_unix, 4600.0)
+        # And the request carried PKCE + the auth code.
+        ((_url,), kwargs) = post.call_args
+        sent = kwargs["data"]
+        self.assertEqual(sent["code"], "auth-code-from-redirect")
+        self.assertEqual(sent["code_verifier"], "pkce-verifier")
+        self.assertEqual(sent["grant_type"], "authorization_code")
+
+    def test_http_error_raises(self) -> None:
+        post = MagicMock(
+            return_value=_mock_response(
+                status=400, json_body={"error": "invalid_grant"}
+            )
+        )
+        with self.assertRaises(OAuthError) as ctx:
+            exchange_code_for_tokens(
+                client_id="c",
+                client_secret="s",
+                code="x",
+                code_verifier="v",
+                redirect_uri="http://127.0.0.1:1/",
+                scope="s",
+                http_post=post,
+            )
+        self.assertIn("400", str(ctx.exception))
+
+
+class LoopbackFlowTest(unittest.TestCase):
+    """`run_loopback_flow` end-to-end: real `HTTPServer` on `127.0.0.1:0`,
+    an in-test "browser" that fires the redirect via `urllib.request`,
+    and a mocked token endpoint. The callback path runs through the
+    actual handler the production code uses."""
+
+    def _browser_that_calls_back(
+        self,
+        *,
+        code: str = "auth-code-xyz",
+        state_override: str | None = None,
+    ) -> tuple[Any, dict[str, str]]:
+        """Returns `(open_browser, captured)`.
+
+        The returned `open_browser` triggers a real HTTP GET to the
+        redirect URI in a daemon thread, simulating the browser
+        completing the consent flow. `state_override=None` echoes back
+        whatever state was in the auth URL (happy path); pass a literal
+        to force a CSRF mismatch.
+        """
+        import contextlib
+        import threading
+        import urllib.request
+        from urllib.parse import parse_qs, urlparse
+
+        captured: dict[str, str] = {}
+
+        def open_browser(url: str) -> bool:
+            captured["auth_url"] = url
+            params = parse_qs(urlparse(url).query)
+            redirect_uri = params["redirect_uri"][0]
+            echo_state = (
+                state_override if state_override is not None else params["state"][0]
+            )
+            callback = f"{redirect_uri}?code={code}&state={echo_state}"
+
+            def fire() -> None:
+                with contextlib.suppress(Exception):
+                    urllib.request.urlopen(callback, timeout=5).read()  # noqa: S310
+
+            threading.Thread(target=fire, daemon=True).start()
+            return True
+
+        return open_browser, captured
+
+    def test_happy_path_exchanges_code(self) -> None:
+        token_post = MagicMock(
+            return_value=_mock_response(
+                json_body={
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "expires_in": 3600,
+                    "scope": "https://example/scope",
+                }
+            )
+        )
+        open_browser, captured = self._browser_that_calls_back(code="auth-code-xyz")
+        tokens = run_loopback_flow(
+            client_id="cid",
+            client_secret="cs",
+            scope="https://example/scope",
+            open_browser=open_browser,
+            http_post=token_post,
+            now=lambda: 5000.0,
+            timeout_seconds=10,
+        )
+        # Browser was opened with an auth URL pointing at our local
+        # ephemeral port (`http://127.0.0.1:<port>/`).
+        self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1%3A", captured["auth_url"])
+        # Tokens flowed through the exchange.
+        self.assertEqual(tokens.access_token, "at")
+        self.assertEqual(tokens.refresh_token, "rt")
+        self.assertEqual(tokens.expiry_unix, 8600.0)
+        # And the token endpoint received the code captured at the
+        # redirect.
+        sent = token_post.call_args.kwargs["data"]
+        self.assertEqual(sent["code"], "auth-code-xyz")
+        self.assertEqual(sent["grant_type"], "authorization_code")
+
+    def test_no_browser_raises(self) -> None:
+        with self.assertRaises(OAuthError) as ctx:
+            run_loopback_flow(
+                client_id="c",
+                client_secret="s",
+                scope="x",
+                open_browser=lambda _url: False,
+                timeout_seconds=1,
+            )
+        self.assertIn("no browser", str(ctx.exception))
+
+    def test_state_mismatch_raises(self) -> None:
+        open_browser, _ = self._browser_that_calls_back(state_override="FORGED-state")
+        with self.assertRaises(OAuthError) as ctx:
+            run_loopback_flow(
+                client_id="c",
+                client_secret="s",
+                scope="x",
+                open_browser=open_browser,
+                timeout_seconds=10,
+            )
+        self.assertIn("state", str(ctx.exception).lower())
+
+    def test_timeout_when_no_callback(self) -> None:
+        with self.assertRaises(OAuthError) as ctx:
+            run_loopback_flow(
+                client_id="c",
+                client_secret="s",
+                scope="x",
+                open_browser=lambda _url: True,  # opens but never calls back
+                timeout_seconds=1,
+            )
+        self.assertIn("timed out", str(ctx.exception))

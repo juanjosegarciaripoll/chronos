@@ -599,7 +599,7 @@ class InitCommandTest(ConfigEditingCliTestCase):
         body = self.config_path.read_text(encoding="utf-8")
         self.assertIn("# # Basic auth", body)
         self.assertIn("# # Google Calendar via OAuth", body)
-        self.assertIn("# # Generic OAuth 2.0 device flow", body)
+        self.assertIn("# # Generic OAuth 2.0", body)
 
     def test_init_refuses_when_file_exists(self) -> None:
         self.config_path.write_text("config_version = 1\n", encoding="utf-8")
@@ -1155,7 +1155,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
             self.stderr,
             config_path=self.config_path,
             account_name="google",
-            device_flow=fake_flow,
+            auth_flow=fake_flow,
         )
         self.assertEqual(code, 0)
         self.assertIn("would have printed", self.stdout.getvalue())
@@ -1242,7 +1242,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
                 self.stderr,
                 config_path=self.config_path,
                 account_name="google",
-                device_flow=fake_flow,
+                auth_flow=fake_flow,
             )
         self.assertEqual(code, 0)
         cred = captured["credential"]
@@ -1274,7 +1274,7 @@ class CliAuthorizerTest(unittest.TestCase):
                 )
         self.assertIn("TTY", str(ctx.exception))
 
-    def test_delegates_to_default_device_flow_when_interactive(self) -> None:
+    def test_delegates_to_loopback_flow_when_interactive(self) -> None:
         from chronos.domain import OAuthCredential
         from chronos.oauth import StoredTokens
 
@@ -1286,7 +1286,7 @@ class CliAuthorizerTest(unittest.TestCase):
         with (
             mock.patch("chronos.cli.sys.stdin") as stdin,
             mock.patch("chronos.cli.sys.stdout") as stdout,
-            mock.patch("chronos.cli._default_device_flow", flow),
+            mock.patch("chronos.cli._default_loopback_flow", flow),
         ):
             stdin.isatty.return_value = True
             stdout.isatty.return_value = True
@@ -1295,7 +1295,7 @@ class CliAuthorizerTest(unittest.TestCase):
             )
         self.assertIs(result, tokens)
         flow.assert_called_once()
-        # And the user is told what's happening before the URL prints.
+        # And the user is told what's happening before the browser opens.
         write_calls = [c.args[0] for c in stdout.write.call_args_list]
         self.assertTrue(any("OAuth authorization required" in w for w in write_calls))
 

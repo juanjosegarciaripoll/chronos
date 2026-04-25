@@ -1,14 +1,23 @@
-"""OAuth 2.0 device flow + token storage + request signing.
+"""OAuth 2.0 (loopback + device flow) + token storage + request signing.
 
-This module bridges `chronos` to Google's OAuth 2.0 endpoints. The
-same endpoints work for any Google CalDAV account; the `scope` on
+This module bridges `chronos` to Google's OAuth 2.0 endpoints. The same
+endpoints work for any Google CalDAV account; the `scope` on
 `OAuthCredential` is the only knob users typically change.
 
 Pieces:
 
-- **Device flow** (`request_device_code`, `poll_for_tokens`) — the
-  user opens a URL on any device, enters a short code, authorises
-  chronos. No local webserver; works over SSH.
+- **Loopback flow** (`run_loopback_flow`, RFC 8252) — the default for
+  desktop usage. We open the user's browser to Google's authorization
+  page with `redirect_uri=http://127.0.0.1:<random-port>/`, listen on
+  that port for the redirect, and exchange the auth code for tokens
+  using PKCE. This is what "Desktop app" OAuth clients use (the same
+  flow Thunderbird, gh CLI, vdirsyncer, etc. use). Requires a local
+  browser.
+- **Device flow** (`request_device_code`, `poll_for_tokens`, RFC 8628)
+  — the SSH/headless fallback. The user opens a URL on any device,
+  enters a short code, authorises chronos. No local browser needed,
+  but Google requires the OAuth client be of type "TVs and Limited
+  Input devices".
 - **Token store** (`save_tokens`, `load_tokens`) — plain JSON under
   `paths.oauth_token_dir()`, with a best-effort 0600 chmod (ignored
   on Windows). Contains the refresh token; keep it safe.
@@ -25,11 +34,18 @@ to maintain than pulling in a second HTTP library.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
+import http.server
 import json
 import os
+import secrets
 import stat
+import threading
 import time
+import urllib.parse
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,8 +54,29 @@ from typing import Any, cast
 import niquests
 from niquests.auth import AuthBase
 
+_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
+_LOOPBACK_TIMEOUT_SECONDS = 300
+
+_LOOPBACK_SUCCESS_HTML = (
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<title>chronos</title></head><body style='font-family:sans-serif;"
+    "max-width:32em;margin:4em auto;text-align:center'>"
+    "<h1>chronos: authorization received</h1>"
+    "<p>You can close this window and return to your terminal.</p>"
+    "</body></html>"
+)
+
+_LOOPBACK_ERROR_HTML = (
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<title>chronos: error</title></head><body style='font-family:sans-serif;"
+    "max-width:32em;margin:4em auto;text-align:center'>"
+    "<h1>chronos: authorization failed</h1>"
+    "<p>{message}</p>"
+    "<p>You can close this window and check the terminal.</p>"
+    "</body></html>"
+)
 
 
 class OAuthError(RuntimeError):
@@ -61,6 +98,227 @@ class StoredTokens:
     refresh_token: str
     expiry_unix: float
     scope: str
+
+
+# Loopback flow (RFC 8252) ----------------------------------------------------
+
+
+def _generate_pkce_pair() -> tuple[str, str]:
+    """Generate (verifier, S256-challenge) for OAuth 2.0 PKCE.
+
+    The verifier is a 64-byte URL-safe random string; the challenge is
+    the base64url-encoded SHA-256 of the verifier (no padding), per RFC
+    7636 §4.2. PKCE is required for Google "Desktop app" OAuth clients.
+    """
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+def build_authorization_url(
+    *,
+    client_id: str,
+    redirect_uri: str,
+    scope: str,
+    state: str,
+    code_challenge: str,
+    auth_url: str = _AUTH_URL,
+) -> str:
+    """Build the authorization-request URL the user's browser opens.
+
+    `access_type=offline` + `prompt=consent` ensures Google returns a
+    refresh token on every flow, even after the first time the user
+    authorized (otherwise re-running the flow returns access_token only
+    and our token store would lose the refresh_token).
+    """
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": scope,
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    return f"{auth_url}?{urllib.parse.urlencode(params)}"
+
+
+def exchange_code_for_tokens(
+    *,
+    client_id: str,
+    client_secret: str,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str,
+    scope: str,
+    http_post: Callable[..., Any] | None = None,
+    now: Callable[[], float] | None = None,
+) -> StoredTokens:
+    """Exchange an authorization code (loopback flow) for tokens."""
+    post = http_post or niquests.post
+    clock = now or time.time
+    response = cast(
+        Any,
+        post(
+            _TOKEN_URL,
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "code_verifier": code_verifier,
+                "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri,
+            },
+            timeout=30,
+        ),
+    )
+    _raise_for_status(response, "token exchange")
+    data = response.json()
+    if not isinstance(data, dict):
+        raise OAuthError(f"token exchange returned non-object JSON: {data!r}")
+    payload = cast(dict[str, object], data)
+    expires_in = _optional_int(payload, "expires_in", default=3600)
+    return StoredTokens(
+        access_token=_require_str(payload, "access_token"),
+        refresh_token=_require_str(payload, "refresh_token"),
+        expiry_unix=clock() + expires_in,
+        scope=_optional_str(payload, "scope", default=scope),
+    )
+
+
+def _make_callback_handler(
+    received: dict[str, str],
+    done: threading.Event,
+) -> type[http.server.BaseHTTPRequestHandler]:
+    """HTTPRequestHandler class that captures the OAuth redirect query string.
+
+    Closure-bound so each loopback flow has its own state — class
+    attributes would race if two flows ever overlap.
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = "chronos-oauth/1"
+
+        def do_GET(self) -> None:  # noqa: N802 — http.server callback name
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            for key, values in params.items():
+                if values:
+                    received[key] = values[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            if "error" in received:
+                body = _LOOPBACK_ERROR_HTML.format(message=received["error"])
+            elif "code" in received:
+                body = _LOOPBACK_SUCCESS_HTML
+            else:
+                body = _LOOPBACK_ERROR_HTML.format(
+                    message="Missing 'code' and 'error' in callback"
+                )
+            self.wfile.write(body.encode("utf-8"))
+            done.set()
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, ARG002
+            # Silence the default per-request stderr logging — the
+            # device-flow callback is internal plumbing, not server
+            # traffic the user needs to see.
+            pass
+
+    return Handler
+
+
+def run_loopback_flow(
+    *,
+    client_id: str,
+    client_secret: str,
+    scope: str,
+    open_browser: Callable[[str], bool] | None = None,
+    server_factory: Callable[
+        [tuple[str, int], type[http.server.BaseHTTPRequestHandler]],
+        http.server.HTTPServer,
+    ]
+    | None = None,
+    timeout_seconds: float = _LOOPBACK_TIMEOUT_SECONDS,
+    http_post: Callable[..., Any] | None = None,
+    now: Callable[[], float] | None = None,
+) -> StoredTokens:
+    """OAuth 2.0 loopback flow with PKCE for Desktop-class clients.
+
+    Listens on a random local port, opens the user's browser to
+    Google's consent screen with that port as the redirect URI, waits
+    for the redirect carrying the auth code (or error), and exchanges
+    the code for tokens.
+
+    Raises `OAuthError` if no browser is available, the redirect times
+    out, the state token doesn't match (CSRF), or Google reports an
+    error.
+    """
+    open_browser = open_browser or webbrowser.open
+    make_server = server_factory or http.server.HTTPServer
+    received: dict[str, str] = {}
+    done = threading.Event()
+    handler_cls = _make_callback_handler(received, done)
+    server = make_server(("127.0.0.1", 0), handler_cls)
+    try:
+        port = server.server_port  # OS-assigned ephemeral port
+        redirect_uri = f"http://127.0.0.1:{port}/"
+        verifier, challenge = _generate_pkce_pair()
+        state = secrets.token_urlsafe(16)
+        auth_url = build_authorization_url(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            state=state,
+            code_challenge=challenge,
+        )
+        if not open_browser(auth_url):
+            raise OAuthError(
+                "no browser available; cannot complete the loopback "
+                "flow. Open the URL manually on a machine that can "
+                "reach this one's localhost, or use the device flow "
+                "(SSH / headless) instead.\n\n"
+                f"{auth_url}\n"
+            )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        if not done.wait(timeout=timeout_seconds):
+            raise OAuthError(
+                f"loopback flow timed out after {timeout_seconds:.0f}s; "
+                "no callback received from the OAuth provider"
+            )
+        server.shutdown()
+        thread.join(timeout=5)
+    finally:
+        server.server_close()
+
+    if received.get("state") != state:
+        raise OAuthError(
+            "loopback flow: state token mismatch — refusing to "
+            "complete (possible CSRF attempt)"
+        )
+    if "error" in received:
+        description = received.get("error_description", "")
+        raise OAuthError(
+            f"loopback flow rejected: {received['error']}"
+            + (f" ({description})" if description else "")
+        )
+    code = received.get("code")
+    if not code:
+        raise OAuthError(f"loopback flow: missing 'code' in callback: {received!r}")
+    return exchange_code_for_tokens(
+        client_id=client_id,
+        client_secret=client_secret,
+        code=code,
+        code_verifier=verifier,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        http_post=http_post,
+        now=now,
+    )
 
 
 # Device flow -----------------------------------------------------------------
@@ -377,9 +635,12 @@ __all__ = [
     "DeviceCodeGrant",
     "OAuthError",
     "StoredTokens",
+    "build_authorization_url",
     "build_bearer_auth",
+    "exchange_code_for_tokens",
     "load_tokens",
     "poll_for_tokens",
     "request_device_code",
+    "run_loopback_flow",
     "save_tokens",
 ]
