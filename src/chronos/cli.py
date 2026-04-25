@@ -204,6 +204,22 @@ _LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 _LOG_DATEFMT = "%H:%M:%S"
 
 
+class _DropH3DowngradeFilter(logging.Filter):
+    """Drop urllib3's per-request "Retrying after MustDowngradeError" line.
+
+    niquests advertises HTTP/3, urllib3 picks it up from the server's
+    Alt-Svc header, then bails because it can't actually serve h3 —
+    every CalDAV request retries on HTTP/2 and logs a WARNING. The
+    retry is automatic and harmless; the warning just clutters the
+    sync output. We still want every other urllib3 WARNING (real
+    network errors, redirects, etc.).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return "MustDowngradeError" not in message
+
+
 def _configure_logging(
     verbose_count: int,
     stream: TextIO,
@@ -231,6 +247,7 @@ def _configure_logging(
         level = default_level
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    handler.addFilter(_DropH3DowngradeFilter())
     root = logging.getLogger()
     # Clear pre-existing handlers so repeated `main()` calls (tests)
     # don't accumulate duplicates.
