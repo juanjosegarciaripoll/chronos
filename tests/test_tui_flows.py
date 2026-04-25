@@ -1449,11 +1449,19 @@ class SyncFlowTest(TuiFlowTestCase):
             progress = pilot.app.screen
             assert isinstance(progress, SyncProgressScreen)
             self.assertEqual(progress._state, "done")
-            from textual.widgets import Static
+            from textual.widgets import Button, Static
 
             summary = progress.query_one("#sync-progress-summary", Static)
             self.assertIn("+3 added", str(summary.content))
             self.assertIn("~1 updated", str(summary.content))
+            # The Cancel button is hidden once the worker reports
+            # back; the Close button is visible and primary so the
+            # user can dismiss the dialog.
+            cancel = progress.query_one("#sync-cancel", Button)
+            close = progress.query_one("#sync-close", Button)
+            self.assertFalse(cancel.display)
+            self.assertTrue(close.display)
+            self.assertEqual(str(close.label), "Close")
 
     async def test_escape_during_sync_sets_cancel_event(self) -> None:
         # Regression: previously sync ran on the UI thread and a stuck

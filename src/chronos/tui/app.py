@@ -111,7 +111,11 @@ class ChronosApp(App[None]):
     #sync-progress-box .dialog-actions {
         margin-top: 1;
         align-horizontal: right;
-        height: auto;
+        /* `height: 3` reserves room for the standard Textual button
+           row even when the dialog body is tall — `height: auto` on
+           the parent + a tall RichLog above could otherwise squash
+           the action row to zero. */
+        height: 3;
     }
     #sync-confirm-box .dialog-actions Button,
     #confirm-box .dialog-actions Button,

@@ -63,9 +63,18 @@ class SyncProgressScreen(ModalScreen[None]):
             )
             yield Static("", id="sync-progress-summary")
             with Horizontal(classes="dialog-actions"):
-                yield Button("Cancel", id="sync-action", variant="warning")
+                # Two distinct buttons, only one visible at a time.
+                # Mutating a single button's `label` between "Cancel"
+                # and "Close" works in theory but proved unreliable
+                # across Textual versions — the swap was sometimes
+                # invisible until the next reflow. Swapping `display`
+                # between two pre-composed buttons is unambiguous.
+                yield Button("Cancel", id="sync-cancel", variant="warning")
+                yield Button("Close", id="sync-close", variant="primary")
 
     def on_mount(self) -> None:
+        # Hide the Close button until the worker reports back.
+        self.query_one("#sync-close", Button).display = False
         # Hook the chronos logger so per-calendar / per-batch / per-
         # ingest INFO records show up in the dialog as they happen.
         # The handler is also why we don't need a custom progress
@@ -116,10 +125,13 @@ class SyncProgressScreen(ModalScreen[None]):
             title.update("Sync complete")
         self.query_one("#sync-progress-summary", Static).update(self._summary())
 
-        button = self.query_one("#sync-action", Button)
-        button.label = "Close"
-        button.variant = "default"
-        button.disabled = False
+        # Swap which button is visible. `display = False` removes the
+        # widget from layout, so the action row collapses to just the
+        # remaining button.
+        self.query_one("#sync-cancel", Button).display = False
+        close = self.query_one("#sync-close", Button)
+        close.display = True
+        close.focus()
 
     def _summary(self) -> str:
         if self._error is not None:
@@ -136,30 +148,28 @@ class SyncProgressScreen(ModalScreen[None]):
         return line
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        del event  # the dialog only has one button
-        if self._state == "running":
+        if event.button.id == "sync-cancel":
             self._request_cancel()
-            return
-        self._dismiss_with_result()
+        elif event.button.id == "sync-close":
+            self._dismiss_with_result()
 
     def action_close_or_cancel(self) -> None:
-        # Esc behaves like the button: cancel while running, close
-        # once the worker has reported back.
+        # Esc behaves like clicking whichever button is currently
+        # visible: cancel while running, close once the worker has
+        # reported back.
         if self._state == "running":
             self._request_cancel()
             return
-        self._dismiss_with_result()
+        if self._state == "done":
+            self._dismiss_with_result()
 
     def _request_cancel(self) -> None:
         if self._state != "running":
             return
         self._cancel_event.set()
         self._state = "cancelling"
-        title = self.query_one("#sync-progress-title", Label)
-        title.update("Cancelling sync…")
-        button = self.query_one("#sync-action", Button)
-        button.label = "Cancelling…"
-        button.disabled = True
+        self.query_one("#sync-progress-title", Label).update("Cancelling sync…")
+        self.query_one("#sync-cancel", Button).disabled = True
 
     def _dismiss_with_result(self) -> None:
         results = self._results
