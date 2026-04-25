@@ -13,6 +13,9 @@ dependencies = [
     "tomli-w>=1.0",
 ]
 
+[project.scripts]
+chronos = "chronos.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

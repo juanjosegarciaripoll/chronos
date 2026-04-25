@@ -92,3 +92,4 @@ uv run python scripts/build.py --installer
 9. Don't expand recurrences on write. RRULE expansion is a read-time concern served by the `occurrences` cache. See `RECURRENCE.md`.
 10. Don't invent synthetic UIDs on the write path. Synthetic UIDs exist only to defensively ingest malformed server data (see `SYNCHRONIZATION.md §C-8`).
 11. Don't lower the `--cov-fail-under` floor or sprinkle `# pragma: no cover` to make red builds green. The fix is a test (see §5).
+12. Don't attribute commits, PRs, code comments, or any other artifact to Claude / an AI assistant. No `Co-Authored-By: Claude ...` trailers, no "Generated with Claude Code" footers, no `# written by Claude` comments. The author of every change is the human running the tool.
