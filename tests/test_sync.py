@@ -421,6 +421,38 @@ class IdempotencyTest(SyncTestCase):
         self.assertEqual(second.components_updated, 0)
         self.assertEqual(second.components_removed, 0)
 
+    def test_empty_server_etag_does_not_trigger_phantom_updates(self) -> None:
+        # Regression: against servers that don't include getetag in
+        # calendar-query responses (Exchange-style gateways), the slow
+        # path must not treat every event as "changed" on every pass.
+        # Force slow path by leaving the server CTag unset between
+        # syncs; the per-event etag from the server is "" (sentinel).
+        for uid in ("a", "b"):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{uid}.ics",
+                ics=_ics_with_uid(f"empty-etag-{uid}@example.com"),
+                etag="",  # server didn't return getetag
+            )
+        # Make the server CTag absent so every sync hits the slow path.
+        self.session.set_ctag(CALENDAR_URL, "")
+        self.session._ctags[CALENDAR_URL] = None  # type: ignore[assignment]
+
+        first = self._run()
+        self.assertEqual(first.components_added, 2)
+
+        self.session.calls.clear()
+        second = self._run()
+        self.assertEqual(second.components_added, 0)
+        self.assertEqual(second.components_updated, 0)
+        self.assertEqual(second.components_removed, 0)
+        # And critically: no multiget on the second pass — empty
+        # server etags shouldn't drive refetches.
+        self.assertEqual(
+            [c for c in self.session.calls if c[0] == "calendar_multiget"],
+            [],
+        )
+
 
 class CtagResetTest(SyncTestCase):
     def test_c4_local_state_ctag_invalidated_triggers_resync(self) -> None:

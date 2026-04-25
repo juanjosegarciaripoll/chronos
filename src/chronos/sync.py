@@ -244,10 +244,15 @@ def _slow_path_reconcile(
         errors=errors,
     )
 
+    # When the server returns an empty etag (CalDAV gateways that omit
+    # getetag, see caldav_client._MISSING_SERVER_ETAG), we can't compare
+    # — trust the local copy and skip the refetch. CTag still drives
+    # slow-path entry, so missed in-place modifications on such servers
+    # are bounded by CTag granularity, not by every-sync churn.
     changed_hrefs = [
         href
         for href, etag in server_map.items()
-        if href in local_by_href and local_by_href[href].etag != etag
+        if href in local_by_href and etag and local_by_href[href].etag != etag
     ]
     updated = _fetch_and_ingest(
         account=account,

@@ -23,6 +23,7 @@ Known v1 limitations:
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from typing import Any, cast
 from xml.etree import ElementTree as ET
@@ -37,6 +38,14 @@ from caldav.lib.error import (
 
 from chronos.authorization import Authorization
 from chronos.domain import ComponentKind, RemoteCalendar
+
+# Sentinel etag for `calendar_query` results from servers that don't
+# return `getetag` with the calendar-query REPORT (some Exchange-style
+# CalDAV gateways do this). The sync engine treats it as "different
+# from any local etag", forcing a multiget; the multiget falls back to
+# a content-hash etag (`_content_etag`) so subsequent change detection
+# still works.
+_MISSING_SERVER_ETAG = ""
 
 _DAV_NS = "DAV:"
 _CS_NS = "http://calendarserver.org/ns/"
@@ -120,10 +129,13 @@ class CalDAVHttpSession:
         out: list[tuple[str, str]] = []
         for event in events:
             href = _opt_str(cast(object, getattr(event, "url", None)))
-            etag = _opt_str(cast(object, getattr(event, "etag", None)))
-            if href is None or etag is None:
+            if href is None:
                 continue
-            out.append((href, etag))
+            etag = _opt_str(cast(object, getattr(event, "etag", None)))
+            # Some servers omit getetag in the calendar-query REPORT.
+            # Use a sentinel so the event isn't silently dropped; the
+            # multiget pass will compute a stable content-hash etag.
+            out.append((href, etag or _MISSING_SERVER_ETAG))
         return tuple(out)
 
     def calendar_multiget(
@@ -139,10 +151,15 @@ class CalDAVHttpSession:
             except DAVError as exc:
                 raise CalDAVError(str(exc)) from exc
             ics = _extract_ics(event)
-            etag = _opt_str(cast(object, getattr(event, "etag", None)))
-            resolved_href = _opt_str(cast(object, getattr(event, "url", href)))
-            if ics is None or etag is None or resolved_href is None:
+            if ics is None:
                 continue
+            resolved_href = _opt_str(cast(object, getattr(event, "url", href))) or href
+            etag = _opt_str(cast(object, getattr(event, "etag", None)))
+            if not etag:
+                # Server didn't return getetag; derive a stable
+                # per-content etag from the body so the next sync's
+                # change detection still has something to compare.
+                etag = _content_etag(ics)
             out.append((resolved_href, etag, ics))
         return tuple(out)
 
@@ -324,6 +341,17 @@ def _opt_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _content_etag(ics: bytes) -> str:
+    """Stable per-content etag for servers that don't return getetag.
+
+    Marked as a WebDAV weak validator (`W/`) to make it visually
+    obvious in logs that this isn't a server-issued value, and to
+    avoid colliding with any hex string a real server might mint.
+    """
+    digest = hashlib.sha256(ics).hexdigest()[:32]
+    return f'W/"chronos-{digest}"'
 
 
 def _build_client(url: str, authorization: Authorization) -> Any:

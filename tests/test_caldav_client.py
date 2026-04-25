@@ -236,7 +236,11 @@ class CalendarQueryTest(CalDAVHttpSessionTestCase):
             },
         )
 
-    def test_skips_events_without_etag(self) -> None:
+    def test_events_without_etag_get_sentinel_not_dropped(self) -> None:
+        # Some CalDAV servers (notably Exchange-style gateways) don't
+        # return getetag in calendar-query responses. The wrapper must
+        # NOT silently drop those events; the multiget pass will
+        # synthesize a content-hash etag.
         client = MagicMock()
         no_etag_event = MagicMock()
         no_etag_event.url = "https://x/cal/work/x.ics"
@@ -247,6 +251,23 @@ class CalendarQueryTest(CalDAVHttpSessionTestCase):
         cal.get_display_name.return_value = "Work"
         cal.get_supported_components.return_value = ["VEVENT"]
         cal.events.return_value = [no_etag_event]
+        client.principal.return_value = _fake_principal("https://x/p/", (cal,))
+        session = self._session_with_client(client)
+        session.list_calendars("https://x/p/")
+        pairs = session.calendar_query("https://x/cal/work/")
+        self.assertEqual(pairs, (("https://x/cal/work/x.ics", ""),))
+
+    def test_events_without_url_are_dropped(self) -> None:
+        client = MagicMock()
+        no_url_event = MagicMock()
+        no_url_event.url = None
+        no_url_event.etag = "some-etag"
+        cal = MagicMock()
+        cal.url = "https://x/cal/work/"
+        cal.name = "Work"
+        cal.get_display_name.return_value = "Work"
+        cal.get_supported_components.return_value = ["VEVENT"]
+        cal.events.return_value = [no_url_event]
         client.principal.return_value = _fake_principal("https://x/p/", (cal,))
         session = self._session_with_client(client)
         session.list_calendars("https://x/p/")
@@ -285,6 +306,64 @@ class CalendarMultigetTest(CalDAVHttpSessionTestCase):
         self.assertEqual(len(results), 2)
         self.assertIn(("https://x/cal/work/a.ics", "etag-a", b"A-bytes"), results)
         self.assertIn(("https://x/cal/work/b.ics", "etag-b", b"B-bytes"), results)
+
+    def test_missing_etag_synthesises_content_hash(self) -> None:
+        # Counterpart to calendar_query's missing-etag handling: when
+        # multiget can't get an etag from the server, fall back to a
+        # deterministic content hash so subsequent change-detection
+        # passes still have something to compare.
+        client = MagicMock()
+        event = MagicMock()
+        event.url = "https://x/cal/work/a.ics"
+        event.etag = None
+        event.data = b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"
+        cal = MagicMock()
+        cal.url = "https://x/cal/work/"
+        cal.name = "Work"
+        cal.get_display_name.return_value = "Work"
+        cal.get_supported_components.return_value = ["VEVENT"]
+        cal.events.return_value = [event]
+        cal.event_by_url.return_value = event
+        client.principal.return_value = _fake_principal("https://x/p/", (cal,))
+        session = self._session_with_client(client)
+        session.list_calendars("https://x/p/")
+        results = session.calendar_multiget(
+            "https://x/cal/work/", ["https://x/cal/work/a.ics"]
+        )
+        self.assertEqual(len(results), 1)
+        href, etag, data = results[0]
+        self.assertEqual(href, "https://x/cal/work/a.ics")
+        self.assertEqual(data, b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+        # Content-hash etag is stable and weak-validator marked.
+        self.assertTrue(etag.startswith('W/"chronos-'), etag)
+        # Same content → same etag (deterministic).
+        again = session.calendar_multiget(
+            "https://x/cal/work/", ["https://x/cal/work/a.ics"]
+        )
+        self.assertEqual(again[0][1], etag)
+
+    def test_missing_data_still_dropped(self) -> None:
+        client = MagicMock()
+        event = MagicMock()
+        event.url = "https://x/cal/work/a.ics"
+        event.etag = "etag-a"
+        event.data = None
+        cal = MagicMock()
+        cal.url = "https://x/cal/work/"
+        cal.name = "Work"
+        cal.get_display_name.return_value = "Work"
+        cal.get_supported_components.return_value = ["VEVENT"]
+        cal.events.return_value = [event]
+        cal.event_by_url.return_value = event
+        client.principal.return_value = _fake_principal("https://x/p/", (cal,))
+        session = self._session_with_client(client)
+        session.list_calendars("https://x/p/")
+        self.assertEqual(
+            session.calendar_multiget(
+                "https://x/cal/work/", ["https://x/cal/work/a.ics"]
+            ),
+            (),
+        )
 
     def test_converts_string_data_to_bytes(self) -> None:
         client = MagicMock()
