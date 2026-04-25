@@ -20,6 +20,7 @@ from chronos.oauth import (
     StoredTokens,
     build_authorization_url,
     build_bearer_auth,
+    discover_google_user_email,
     exchange_code_for_tokens,
     load_tokens,
     poll_for_tokens,
@@ -573,3 +574,43 @@ class LoopbackFlowTest(unittest.TestCase):
                 timeout_seconds=1,
             )
         self.assertIn("timed out", str(ctx.exception))
+
+
+class DiscoverGoogleUserEmailTest(unittest.TestCase):
+    """Google's CalDAV principal-discovery returns 404 on the root URL,
+    so we look up the user's email via the Calendar API and build the
+    per-user URL `<root>/<email>/user/`. Reuses the existing calendar
+    OAuth scope (no extra consent)."""
+
+    def test_returns_email_from_primary_calendar_id(self) -> None:
+        bearer = MagicMock()
+        get = MagicMock(
+            return_value=_mock_response(
+                json_body={"id": "user@example.com", "summary": "user@example.com"}
+            )
+        )
+        email = discover_google_user_email(bearer, http_get=get)
+        self.assertEqual(email, "user@example.com")
+        # The bearer auth was passed to niquests for signing.
+        ((url,), kwargs) = get.call_args
+        self.assertIn("calendar/v3/calendars/primary", url)
+        self.assertIs(kwargs["auth"], bearer)
+
+    def test_http_error_raises(self) -> None:
+        bearer = MagicMock()
+        get = MagicMock(
+            return_value=_mock_response(
+                status=401, json_body={"error": "Invalid Credentials"}
+            )
+        )
+        with self.assertRaises(OAuthError) as ctx:
+            discover_google_user_email(bearer, http_get=get)
+        self.assertIn("401", str(ctx.exception))
+
+    def test_missing_id_field_raises(self) -> None:
+        bearer = MagicMock()
+        get = MagicMock(
+            return_value=_mock_response(json_body={"summary": "no id here"})
+        )
+        with self.assertRaises(OAuthError):
+            discover_google_user_email(bearer, http_get=get)

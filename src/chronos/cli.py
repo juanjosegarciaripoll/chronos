@@ -52,6 +52,7 @@ from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.oauth import (
     OAuthError,
     StoredTokens,
+    discover_google_user_email,
     run_loopback_flow,
     save_tokens,
 )
@@ -1117,7 +1118,36 @@ def _default_loopback_flow(credential: OAuthCredential, stdout: TextIO) -> Store
 def _default_session_factory(
     account: AccountConfig, authorization: Authorization
 ) -> CalDAVSession:
-    return CalDAVHttpSession(url=account.url, authorization=authorization)
+    url = _resolve_caldav_url(account, authorization)
+    return CalDAVHttpSession(url=url, authorization=authorization)
+
+
+_GOOGLE_PRINCIPAL_URL_TEMPLATE = (
+    "https://apidata.googleusercontent.com/caldav/v2/{email}/user/"
+)
+
+
+def _resolve_caldav_url(account: AccountConfig, authorization: Authorization) -> str:
+    """For Google accounts on the default URL, build the per-user
+    principal URL from the user's email. Google's CalDAV root returns
+    404 to PROPFIND; the per-user URL works.
+
+    Skips the override when the user explicitly set a non-default URL
+    in `config.toml` (e.g. pointing at a service account or a domain
+    delegation endpoint), or when the account isn't a `google` backend
+    at all.
+    """
+    if not isinstance(account.credential, GoogleCredential):
+        return account.url
+    if account.url != GOOGLE_CALDAV_URL:
+        return account.url
+    if authorization.http_auth is None:
+        return account.url
+    try:
+        email = discover_google_user_email(authorization.http_auth)
+    except OAuthError as exc:
+        raise CalDAVError(f"Google account discovery failed: {exc}") from exc
+    return _GOOGLE_PRINCIPAL_URL_TEMPLATE.format(email=email)
 
 
 def _collect_components(
