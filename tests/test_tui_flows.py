@@ -645,6 +645,20 @@ class FiveViewsNavigableTest(TuiFlowTestCase):
             self.assertEqual(pilot.app.screen._view, ViewKind.TODOS)
 
 
+class QuitBindingTest(TuiFlowTestCase):
+    async def test_q_exits_the_app(self) -> None:
+        # Regression: Textual's screen-binding dispatch does not bubble
+        # missing actions to the App, so binding "q" to "quit" without
+        # MainScreen.action_quit silently dropped the press.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app._exit)
+
+
 class TodayResetsViewedDateTest(TuiFlowTestCase):
     async def test_today_jumps_back_to_now(self) -> None:
         services = self.services()

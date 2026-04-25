@@ -127,6 +127,13 @@ class MainScreen(Screen[None]):
         self._viewed_date = self._services().now().date()
         self.refresh_view()
 
+    def action_quit(self) -> None:
+        # Textual's screen-level binding dispatch does NOT fall through
+        # to App.action_quit when the screen has no `action_quit`. The
+        # binding fires, the action lookup misses, and the press is
+        # silently dropped. Defining it locally is the only reliable fix.
+        self.app.exit()  # pyright: ignore[reportUnknownMemberType]
+
     # Mutating actions -------------------------------------------------------
 
     def action_new_event(self) -> None:

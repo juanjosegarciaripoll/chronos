@@ -373,6 +373,37 @@ class RegexScopingTest(SyncTestCase):
         queried_urls = [c[1] for c in self.session.calls if c[0] == "calendar_query"]
         self.assertEqual(queried_urls, [CALENDAR_URL])
 
+    def test_filter_skipping_all_calendars_lands_in_errors(self) -> None:
+        # Server has calendars but no include pattern matches any of
+        # them. The result should NOT silently report 0 syncs; it
+        # should explain why.
+        self.session.add_calendar(url=OTHER_URL, name=OTHER_NAME)
+        account = _account(include=("nonexistent-name",))
+        result = self._run(account=account)
+        self.assertEqual(result.calendars_synced, 0)
+        self.assertEqual(len(result.errors), 1)
+        message = result.errors[0]
+        self.assertIn("none matched", message)
+        self.assertIn("nonexistent-name", message)
+        # And the discovered calendar names are listed so the user
+        # knows what they could write into the include pattern.
+        self.assertIn(CALENDAR_NAME, message)
+        self.assertIn(OTHER_NAME, message)
+
+    def test_no_remote_calendars_does_not_emit_filter_message(self) -> None:
+        # Empty server → 0 syncs, but no "discovered N but matched 0"
+        # message because there were none to begin with.
+        empty_session = FakeCalDAVSession()
+        result = sync_account(
+            account=_account(),
+            session=empty_session,
+            mirror=self.mirror,
+            index=self.index,
+            now=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        )
+        self.assertEqual(result.calendars_synced, 0)
+        self.assertEqual(result.errors, ())
+
 
 class IdempotencyTest(SyncTestCase):
     def test_no_changes_second_pass(self) -> None:

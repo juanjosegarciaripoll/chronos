@@ -65,6 +65,18 @@ def sync_account(
 
     per_calendar_stats: list[CalendarSyncStats] = []
     errors: list[str] = []
+    if remote_calendars and not scoped:
+        # Distinguishes the silent "your include / exclude regex matched
+        # nothing" case from "the server has no calendars at all". Without
+        # this the user sees a 0-calendar success and is stumped.
+        names = ", ".join(sorted(c.name for c in remote_calendars))
+        include_patterns = [p.pattern for p in account.include]
+        exclude_patterns = [p.pattern for p in account.exclude]
+        errors.append(
+            f"server has {len(remote_calendars)} calendar(s) "
+            f"({names}) but none matched include={include_patterns} / "
+            f"exclude={exclude_patterns}"
+        )
     for remote in scoped:
         calendar = _resolve_calendar(account, remote)
         try:
