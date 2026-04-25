@@ -24,8 +24,10 @@ Known v1 limitations:
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Sequence
 from typing import Any, cast
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
 import caldav
@@ -38,6 +40,8 @@ from caldav.lib.error import (
 
 from chronos.authorization import Authorization
 from chronos.domain import ComponentKind, RemoteCalendar
+
+logger = logging.getLogger(__name__)
 
 # Sentinel etag for `calendar_query` results from servers that don't
 # return `getetag` with the calendar-query REPORT (some Exchange-style
@@ -56,6 +60,23 @@ _CTAG_PROPFIND_BODY = (
     "<d:prop><cs:getctag/></d:prop>"
     "</d:propfind>"
 )
+
+# calendar-query REPORT (RFC 4791 §7.8) asking only for `getetag`.
+# Deliberately omits `<C:calendar-data/>` so the server doesn't ship
+# the entire ICS body in this round trip — `calendar_multiget` does
+# that separately. This also avoids `caldav.Calendar.events()`'s
+# fall-through to per-event GETs, which 404 on Google for
+# recurrence-id override hrefs returned in the REPORT (those hrefs
+# are listable but not directly GETtable).
+_CALENDAR_QUERY_BODY = (
+    '<?xml version="1.0" encoding="utf-8" ?>'
+    '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+    "<d:prop><d:getetag/></d:prop>"
+    '<c:filter><c:comp-filter name="VCALENDAR"/></c:filter>'
+    "</c:calendar-query>"
+)
+
+_MULTIGET_BATCH_SIZE = 100
 
 
 class CalDAVError(Exception):
@@ -85,7 +106,9 @@ class CalDAVHttpSession:
 
     def discover_principal(self) -> str:
         principal = self._get_principal()
-        return str(cast(object, principal.url))
+        url = str(cast(object, principal.url))
+        logger.info("discovered principal %s", url)
+        return url
 
     def list_calendars(self, principal_url: str) -> Sequence[RemoteCalendar]:
         del principal_url  # caldav caches the principal across calls
@@ -105,6 +128,7 @@ class CalDAVHttpSession:
                     supported_components=_extract_supported_components(cal),
                 )
             )
+        logger.info("listed %d calendars", len(out))
         return tuple(out)
 
     def get_ctag(self, calendar_url: str) -> str | None:
@@ -119,48 +143,72 @@ class CalDAVHttpSession:
         return _parse_ctag(response)
 
     def calendar_query(self, calendar_url: str) -> Sequence[tuple[str, str]]:
-        calendar = self._find_calendar(calendar_url)
+        # Issue the calendar-query REPORT directly so we get only
+        # (href, etag) pairs and never trigger a per-event GET. See the
+        # `_CALENDAR_QUERY_BODY` comment for why `caldav.Calendar.events()`
+        # is unsafe against Google.
         try:
-            events: list[Any] = list(calendar.events())
+            response = self._client.report(calendar_url, _CALENDAR_QUERY_BODY, depth=1)
         except NotFoundError as exc:
             raise CalDAVNotFoundError(str(exc)) from exc
         except DAVError as exc:
             raise CalDAVError(str(exc)) from exc
-        out: list[tuple[str, str]] = []
-        for event in events:
-            href = _opt_str(cast(object, getattr(event, "url", None)))
-            if href is None:
-                continue
-            etag = _opt_str(cast(object, getattr(event, "etag", None)))
-            # Some servers omit getetag in the calendar-query REPORT.
-            # Use a sentinel so the event isn't silently dropped; the
-            # multiget pass will compute a stable content-hash etag.
-            out.append((href, etag or _MISSING_SERVER_ETAG))
-        return tuple(out)
+        pairs = _parse_calendar_query(
+            _response_body(response) or b"", base_url=calendar_url
+        )
+        logger.info("  calendar-query: %d resource(s) listed by server", len(pairs))
+        return pairs
 
     def calendar_multiget(
         self, calendar_url: str, hrefs: Sequence[str]
     ) -> Sequence[tuple[str, str, bytes]]:
-        calendar = self._find_calendar(calendar_url)
+        if not hrefs:
+            return ()
+        # Issue chunks of `_MULTIGET_BATCH_SIZE` to keep individual
+        # response bodies manageable. RFC 4791 §7.10 places no bound
+        # on the number of hrefs per multiget, but Google in practice
+        # rejects very large bodies and a fresh "Holidays" calendar
+        # can be 10k+ resources.
         out: list[tuple[str, str, bytes]] = []
-        for href in hrefs:
+        chunks = _chunk(hrefs, _MULTIGET_BATCH_SIZE)
+        total = len(hrefs)
+        # Per-chunk INFO logging (not just DEBUG) so big calendars
+        # don't look stuck while a multi-thousand-resource fetch is
+        # in flight. With ~5k events at 100/chunk that's 50 lines —
+        # not noisy enough to bury other output.
+        if len(chunks) > 1:
+            logger.info(
+                "fetching %d resources from %s (%d batches of up to %d)",
+                total,
+                calendar_url,
+                len(chunks),
+                _MULTIGET_BATCH_SIZE,
+            )
+        fetched = 0
+        for batch_index, chunk in enumerate(chunks, start=1):
+            body = _build_multiget_body(chunk)
             try:
-                event = calendar.event_by_url(href)
-            except NotFoundError:
-                continue
+                response = self._client.report(calendar_url, body, depth=1)
+            except NotFoundError as exc:
+                raise CalDAVNotFoundError(str(exc)) from exc
             except DAVError as exc:
                 raise CalDAVError(str(exc)) from exc
-            ics = _extract_ics(event)
-            if ics is None:
-                continue
-            resolved_href = _opt_str(cast(object, getattr(event, "url", href))) or href
-            etag = _opt_str(cast(object, getattr(event, "etag", None)))
-            if not etag:
-                # Server didn't return getetag; derive a stable
-                # per-content etag from the body so the next sync's
-                # change detection still has something to compare.
-                etag = _content_etag(ics)
-            out.append((resolved_href, etag, ics))
+            parsed = _parse_multiget(
+                _response_body(response) or b"", base_url=calendar_url
+            )
+            out.extend(parsed)
+            fetched += len(chunk)
+            if len(chunks) > 1:
+                logger.info(
+                    "  batch %d/%d: %d/%d resources fetched",
+                    batch_index,
+                    len(chunks),
+                    fetched,
+                    total,
+                )
+        logger.debug(
+            "REPORT calendar-multiget %s -> %d body(ies)", calendar_url, len(out)
+        )
         return tuple(out)
 
     def put(self, href: str, ics: bytes, etag: str | None) -> str:
@@ -264,6 +312,159 @@ def _default_components() -> frozenset[ComponentKind]:
     return frozenset({ComponentKind.VEVENT, ComponentKind.VTODO})
 
 
+def _parse_calendar_query(body: bytes, *, base_url: str) -> tuple[tuple[str, str], ...]:
+    """Parse a calendar-query REPORT multistatus into (href, etag) pairs.
+
+    Hrefs are returned as absolute URLs (some servers, including
+    Google, return relative paths like `/caldav/v2/.../foo.ics`),
+    using `base_url`'s scheme+host to resolve them. The rest of the
+    sync engine compares hrefs as opaque strings, so consistency
+    matters more than correctness of any specific format.
+
+    Falls back to the empty-string sentinel etag when a propstat
+    carried `getetag` with a non-2xx status — Google embeds a 404
+    propstat for properties it doesn't expose on a given resource,
+    and the multiget pass derives a content-hash etag in that case.
+    """
+    if not body:
+        return ()
+    try:
+        tree = ET.fromstring(body)
+    except ET.ParseError:
+        return ()
+    ns = {"d": _DAV_NS}
+    out: list[tuple[str, str]] = []
+    for response in tree.findall("d:response", ns):
+        href_elem = response.find("d:href", ns)
+        if href_elem is None or href_elem.text is None:
+            continue
+        href = _absolute_href(href_elem.text.strip(), base_url=base_url)
+        if not href:
+            continue
+        etag = ""
+        for propstat in response.findall("d:propstat", ns):
+            status_elem = propstat.find("d:status", ns)
+            if status_elem is None or status_elem.text is None:
+                continue
+            if " 200 " not in status_elem.text:
+                continue
+            etag_elem = propstat.find("d:prop/d:getetag", ns)
+            if etag_elem is not None and etag_elem.text:
+                etag = etag_elem.text.strip().strip('"')
+                break
+        out.append((href, etag or _MISSING_SERVER_ETAG))
+    return tuple(out)
+
+
+def _absolute_href(href: str, *, base_url: str) -> str:
+    """Resolve `href` against `base_url` and URL-decode the path.
+
+    URL-decoding matches what `caldav.Event.url` did before the rewrite
+    to raw REPORT (`%40` → `@`). Existing local-index rows were stored
+    in that decoded form, so without this normalization a fresh
+    `calendar_query` returns hrefs that don't match local hrefs and
+    sync mistakes everything for "deleted on server" — tripping the
+    mass-deletion guard.
+    """
+    if not href:
+        return href
+    if href.startswith(("http://", "https://")):
+        return unquote(href)
+    parsed = urlsplit(base_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, unquote(href), "", ""))
+
+
+def _chunk(items: Sequence[str], size: int) -> list[Sequence[str]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+_CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
+
+# Register the namespaces once so `ET.tostring` emits the conventional
+# `d:` / `c:` prefixes used by all CalDAV servers we've tested.
+ET.register_namespace("d", _DAV_NS)
+ET.register_namespace("c", _CALDAV_NS)
+
+
+def _build_multiget_body(hrefs: Sequence[str]) -> str:
+    """Build a calendar-multiget REPORT body (RFC 4791 §7.10).
+
+    Hrefs already match the local-index form (URL-decoded path,
+    absolute URL). Re-encode the path for the request body since the
+    server expects percent-encoded hrefs (Google's responses use
+    `%40` for `@`, and rejects the bare-`@` form in some multiget
+    bodies). Built via `xml.etree.ElementTree` so escaping and
+    encoding are the stdlib's responsibility, not ours.
+    """
+    root = ET.Element(f"{{{_CALDAV_NS}}}calendar-multiget")
+    prop = ET.SubElement(root, f"{{{_DAV_NS}}}prop")
+    ET.SubElement(prop, f"{{{_DAV_NS}}}getetag")
+    ET.SubElement(prop, f"{{{_CALDAV_NS}}}calendar-data")
+    for href in hrefs:
+        elem = ET.SubElement(root, f"{{{_DAV_NS}}}href")
+        elem.text = _path_for_request(href)
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _path_for_request(href: str) -> str:
+    """Strip the scheme+host from `href` and percent-encode the path."""
+    parsed = urlsplit(href)
+    path = parsed.path if parsed.scheme and parsed.netloc else href
+    # `safe="/:"` keeps path separators and the colon literal; every
+    # other character (including `@`) is percent-encoded.
+    return quote(path, safe="/:")
+
+
+def _parse_multiget(body: bytes, *, base_url: str) -> list[tuple[str, str, bytes]]:
+    """Parse a calendar-multiget REPORT multistatus into (href, etag, ics).
+
+    Skips responses that carried only a non-2xx propstat — those are
+    hrefs the server reported in calendar-query but can't actually
+    expose to multiget (notably Google recurrence-id override URLs).
+    Missing etags fall through to the content-hash etag in
+    `_content_etag`, matching the calendar-query path.
+    """
+    if not body:
+        return []
+    try:
+        tree = ET.fromstring(body)
+    except ET.ParseError:
+        return []
+    ns = {"d": _DAV_NS, "c": "urn:ietf:params:xml:ns:caldav"}
+    out: list[tuple[str, str, bytes]] = []
+    for response in tree.findall("d:response", ns):
+        href_elem = response.find("d:href", ns)
+        if href_elem is None or href_elem.text is None:
+            continue
+        href = _absolute_href(href_elem.text.strip(), base_url=base_url)
+        if not href:
+            continue
+        etag = ""
+        ics: bytes | None = None
+        for propstat in response.findall("d:propstat", ns):
+            status_elem = propstat.find("d:status", ns)
+            if status_elem is None or status_elem.text is None:
+                continue
+            if " 200 " not in status_elem.text:
+                continue
+            etag_elem = propstat.find("d:prop/d:getetag", ns)
+            if etag_elem is not None and etag_elem.text:
+                etag = etag_elem.text.strip().strip('"')
+            data_elem = propstat.find("d:prop/c:calendar-data", ns)
+            if data_elem is not None and data_elem.text:
+                # XML 1.0 §2.11 line-ending normalization strips CR
+                # from CRLF inside text content; iCalendar (RFC 5545
+                # §3.1) requires CRLF, so restore it.
+                normalized = data_elem.text.replace("\r\n", "\n").replace("\n", "\r\n")
+                ics = normalized.encode("utf-8")
+        if ics is None:
+            continue
+        if not etag:
+            etag = _content_etag(ics)
+        out.append((href, etag, ics))
+    return out
+
+
 def _parse_ctag(response: Any) -> str | None:
     body = _response_body(response)
     if body is None:
@@ -300,15 +501,6 @@ def _response_body(response: Any) -> bytes | None:
     return None
 
 
-def _extract_ics(event: Any) -> bytes | None:
-    data = cast(object, getattr(event, "data", None))
-    if isinstance(data, bytes):
-        return data
-    if isinstance(data, str):
-        return data.encode("utf-8")
-    return None
-
-
 def _extract_response_etag(response: Any) -> str | None:
     headers = cast(object, getattr(response, "headers", None))
     if headers is None:
@@ -335,12 +527,6 @@ def _translate_write_error(exc: PutError, href: str) -> CalDAVError:
     if "404" in message:
         return CalDAVNotFoundError(f"PUT {href}: {exc}")
     return CalDAVError(f"PUT {href}: {exc}")
-
-
-def _opt_str(value: object) -> str | None:
-    if value is None:
-        return None
-    return str(value)
 
 
 def _content_etag(ics: bytes) -> str:

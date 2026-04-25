@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import urllib.parse
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from chronos.caldav_client import CalDAVError
 from chronos.domain import (
     AccountConfig,
     CalendarConfig,
@@ -26,6 +28,8 @@ from chronos.ical_parser import IcalParseError, ParsedComponent, parse_vcalendar
 from chronos.protocols import CalDAVSession, IndexRepository, MirrorRepository
 from chronos.recurrence import populate_occurrences
 from chronos.storage_indexing import synthetic_uid
+
+logger = logging.getLogger(__name__)
 
 _MASS_DELETION_RATIO = 0.2
 _MASS_DELETION_MIN_BASELINE = 5
@@ -66,6 +70,7 @@ def sync_account(
     now: datetime | None = None,
 ) -> SyncResult:
     clock = now or datetime.now(UTC)
+    logger.info("sync account %s", account.name)
     principal_url = session.discover_principal()
     remote_calendars = session.list_calendars(principal_url)
     scoped = _scoped_calendars(remote_calendars, account)
@@ -84,8 +89,12 @@ def sync_account(
             f"({names}) but none matched include={include_patterns} / "
             f"exclude={exclude_patterns}"
         )
-    for remote in scoped:
+    total = len(scoped)
+    for index_pos, remote in enumerate(scoped, start=1):
         calendar = _resolve_calendar(account, remote)
+        logger.info(
+            "[%s] (%d/%d) %s", account.name, index_pos, total, calendar.calendar_name
+        )
         try:
             stats = _sync_calendar(
                 account=account,
@@ -98,6 +107,32 @@ def sync_account(
         except SyncHaltError as exc:
             errors.append(f"{calendar.calendar_name}: {exc}")
             continue
+        except CalDAVError as exc:
+            # One bad calendar (e.g. a server quirk on a single
+            # resource) shouldn't take down the rest of the account's
+            # sync. Surface the failure as a per-calendar error and
+            # carry on.
+            logger.warning(
+                "calendar %s/%s failed: %s",
+                account.name,
+                calendar.calendar_name,
+                exc,
+            )
+            errors.append(f"{calendar.calendar_name}: {exc}")
+            continue
+        logger.info(
+            "[%s] (%d/%d) %s done: path=%s +%d ~%d -%d push=%d trash=%d",
+            account.name,
+            index_pos,
+            total,
+            calendar.calendar_name,
+            stats.path,
+            stats.added,
+            stats.updated,
+            stats.removed,
+            stats.pushed,
+            stats.deleted_remote,
+        )
         per_calendar_stats.append(stats)
         errors.extend(stats.errors)
 
@@ -123,6 +158,13 @@ def _sync_calendar(
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     prior_state = index.get_sync_state(calendar_ref)
     server_ctag = session.get_ctag(calendar.url)
+    logger.debug(
+        "%s/%s ctag=%s prior=%s",
+        account.name,
+        calendar.calendar_name,
+        server_ctag,
+        prior_state.ctag if prior_state else None,
+    )
 
     if _ctag_matches(prior_state, server_ctag):
         stats = _fast_path_reconcile(

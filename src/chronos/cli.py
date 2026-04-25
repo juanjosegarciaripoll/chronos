@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import logging
 import os
 import shlex
 import shutil
@@ -52,7 +53,6 @@ from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.oauth import (
     OAuthError,
     StoredTokens,
-    discover_google_user_email,
     run_loopback_flow,
     save_tokens,
 )
@@ -104,6 +104,14 @@ def main(
     err = stderr if stderr is not None else sys.stderr
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # `sync` defaults to INFO so the per-calendar / per-chunk progress
+    # logger.info(...) calls are visible without forcing the user to
+    # type `-v`. Other commands stay at WARNING (quiet by default).
+    _configure_logging(
+        args.verbose,
+        err,
+        default_level=logging.INFO if args.command == "sync" else logging.WARNING,
+    )
     config_path: Path = args.config or default_config_path()
 
     # Config-editing commands operate on the TOML file without needing the
@@ -192,6 +200,49 @@ def _default_context_factory(config_path: Path | None) -> CliContext:
     )
 
 
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+_LOG_DATEFMT = "%H:%M:%S"
+
+
+def _configure_logging(
+    verbose_count: int,
+    stream: TextIO,
+    *,
+    default_level: int = logging.WARNING,
+) -> None:
+    """Wire `logging` to stderr based on `-v` / `CHRONOS_LOG_LEVEL`.
+
+    `default_level` is what we use when neither -v nor the env var is
+    set — `cmd_sync` lifts it to INFO so the per-calendar progress
+    messages are visible without typing -v.
+
+    `-v` lifts to INFO regardless of the default, `-vv` to DEBUG. The
+    `CHRONOS_LOG_LEVEL` env var (DEBUG/INFO/WARNING/ERROR) overrides
+    everything so users can crank verbosity without re-typing flags.
+    """
+    env = os.environ.get("CHRONOS_LOG_LEVEL", "").upper().strip()
+    if env in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+        level = getattr(logging, env)
+    elif verbose_count >= 2:
+        level = logging.DEBUG
+    elif verbose_count == 1:
+        level = logging.INFO
+    else:
+        level = default_level
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    root = logging.getLogger()
+    # Clear pre-existing handlers so repeated `main()` calls (tests)
+    # don't accumulate duplicates.
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
+    # urllib3's per-request DEBUG noise is only useful at -vv; keep it
+    # at WARNING for -v so INFO-level sync progress stays readable.
+    if level > logging.DEBUG:
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
 def _default_cli_authorizer(
     account_name: str, spec: OAuthCredential, _token_path: Path
 ) -> StoredTokens:
@@ -254,6 +305,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to config.toml (defaults to platform user-config dir).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help=(
+            "Increase log verbosity (-v INFO, -vv DEBUG). The "
+            "CHRONOS_LOG_LEVEL env var is also honoured "
+            "(DEBUG/INFO/WARNING/ERROR)."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1128,36 +1190,7 @@ def _default_loopback_flow(credential: OAuthCredential, stdout: TextIO) -> Store
 def _default_session_factory(
     account: AccountConfig, authorization: Authorization
 ) -> CalDAVSession:
-    url = _resolve_caldav_url(account, authorization)
-    return CalDAVHttpSession(url=url, authorization=authorization)
-
-
-_GOOGLE_PRINCIPAL_URL_TEMPLATE = (
-    "https://apidata.googleusercontent.com/caldav/v2/{email}/user/"
-)
-
-
-def _resolve_caldav_url(account: AccountConfig, authorization: Authorization) -> str:
-    """For Google accounts on the default URL, build the per-user
-    principal URL from the user's email. Google's CalDAV root returns
-    404 to PROPFIND; the per-user URL works.
-
-    Skips the override when the user explicitly set a non-default URL
-    in `config.toml` (e.g. pointing at a service account or a domain
-    delegation endpoint), or when the account isn't a `google` backend
-    at all.
-    """
-    if not isinstance(account.credential, GoogleCredential):
-        return account.url
-    if account.url != GOOGLE_CALDAV_URL:
-        return account.url
-    if authorization.http_auth is None:
-        return account.url
-    try:
-        email = discover_google_user_email(authorization.http_auth)
-    except OAuthError as exc:
-        raise CalDAVError(f"Google account discovery failed: {exc}") from exc
-    return _GOOGLE_PRINCIPAL_URL_TEMPLATE.format(email=email)
+    return CalDAVHttpSession(url=account.url, authorization=authorization)
 
 
 def _collect_components(

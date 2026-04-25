@@ -584,45 +584,6 @@ def build_bearer_auth(
     )
 
 
-# Google account discovery ---------------------------------------------------
-
-
-_GOOGLE_PRIMARY_CALENDAR_URL = (
-    "https://www.googleapis.com/calendar/v3/calendars/primary"
-)
-
-
-def discover_google_user_email(
-    bearer_auth: AuthBase,
-    *,
-    http_get: Callable[..., Any] | None = None,
-) -> str:
-    """Look up the authenticated user's email via Google's Calendar API.
-
-    Returns the `id` field of the user's primary calendar, which Google
-    sets to the user's email address. Used to build the per-user
-    principal URL Google CalDAV's principal-discovery requires (a
-    PROPFIND on the root URL `https://apidata.googleusercontent.com/
-    caldav/v2/` returns 404; the per-user URL `<root>/<email>/user/`
-    works).
-
-    Reuses the existing Calendar OAuth scope, so no extra consent is
-    needed beyond what `chronos sync` already asks for.
-    """
-    get = http_get or niquests.get
-    response = cast(
-        Any,
-        get(_GOOGLE_PRIMARY_CALENDAR_URL, auth=bearer_auth, timeout=30),
-    )
-    _raise_for_status(response, "Google primary-calendar lookup")
-    data = response.json()
-    if not isinstance(data, dict):
-        raise OAuthError(
-            f"Google primary-calendar lookup returned non-object JSON: {data!r}"
-        )
-    return _require_str(cast(dict[str, object], data), "id")
-
-
 # Helpers ---------------------------------------------------------------------
 
 
@@ -676,7 +637,6 @@ __all__ = [
     "StoredTokens",
     "build_authorization_url",
     "build_bearer_auth",
-    "discover_google_user_email",
     "exchange_code_for_tokens",
     "load_tokens",
     "poll_for_tokens",
