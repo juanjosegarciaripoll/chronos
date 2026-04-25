@@ -40,7 +40,7 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
     ),
     (
         "Tools",
-        frozenset({"sync", "search", "show_help", "quit"}),
+        frozenset({"sync", "search", "show_help", "quit", "toggle_calendars"}),
     ),
 )
 

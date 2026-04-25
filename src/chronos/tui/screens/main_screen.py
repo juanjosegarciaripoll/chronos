@@ -101,7 +101,7 @@ class MainScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-body"):
-            yield CalendarPanel()
+            yield CalendarPanel(on_selection_change=self._on_calendar_selection)
             with Vertical(id="centre-pane"):
                 yield Label("", id="view-title")
                 yield EventList(id="centre-list")
@@ -113,11 +113,28 @@ class MainScreen(Screen[None]):
         self._viewed_date = services.now().date()
         panel: CalendarPanel = self.query_one(CalendarPanel)
         panel.populate(all_calendar_refs(services.config, services.mirror))
+        # The calendar tree is hidden by default — the agenda already
+        # shows everything, and a permanent left-hand panel chews up
+        # horizontal real estate that the timeline views need. Pressing
+        # `c` reveals it.
+        panel.display = False
         self.refresh_view()
         # Land focus on the event list, not the calendar tree, so the
         # user can navigate / open / edit events without first having
         # to tab out of the left-hand panel.
         self.query_one(EventList).focus()
+
+    def action_toggle_calendars(self) -> None:
+        panel = self.query_one(CalendarPanel)
+        panel.display = not panel.display
+        if panel.display:
+            panel.focus()
+        else:
+            self.query_one(EventList).focus()
+
+    def _on_calendar_selection(self, selection: CalendarSelection) -> None:
+        self._selection = selection
+        self.refresh_view()
 
     # View switches ----------------------------------------------------------
 

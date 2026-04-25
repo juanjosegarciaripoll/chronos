@@ -38,6 +38,7 @@ KEY_PREV = "P"
 KEY_PREV_ALT = "shift+p"
 KEY_DELETE = "D"
 KEY_DELETE_ALT = "shift+d"
+KEY_TOGGLE_CALENDARS = "c"
 
 
 def main_bindings() -> list[BindingType]:
@@ -57,6 +58,7 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_OPEN, "open_event", "Open", show=False),
         Binding(KEY_DELETE, "delete_event", "Delete"),
         Binding(KEY_DELETE_ALT, "delete_event", "Delete", show=False),
+        Binding(KEY_TOGGLE_CALENDARS, "toggle_calendars", "Calendars"),
         Binding(KEY_SYNC, "sync", "Sync"),
         Binding(KEY_SEARCH, "search", "Search"),
         Binding(KEY_NEXT, "next_period", "Next"),
@@ -110,6 +112,7 @@ __all__ = [
     "KEY_TODAY",
     "KEY_TODOS",
     "KEY_TODOS_ALT",
+    "KEY_TOGGLE_CALENDARS",
     "KEY_WEEK",
     "BindingType",
     "detail_bindings",

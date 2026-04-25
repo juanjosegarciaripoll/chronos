@@ -1607,3 +1607,78 @@ class DraftAndDetailScreenWiringTest(unittest.TestCase):
                 default_calendar=None,
                 on_save=lambda _draft: None,
             )
+
+
+class CalendarPanelToggleTest(TuiFlowTestCase):
+    """The calendars tree is hidden by default; `c` reveals it. Once
+    visible, Enter on a leaf toggles that calendar in the active
+    `CalendarSelection`, which filters the event list."""
+
+    async def test_panel_hidden_by_default(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from chronos.tui.widgets.calendar_panel import CalendarPanel
+
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            self.assertFalse(screen.query_one(CalendarPanel).display)
+
+    async def test_c_key_toggles_panel_visibility(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from chronos.tui.widgets.calendar_panel import CalendarPanel
+
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            panel = screen.query_one(CalendarPanel)
+            self.assertFalse(panel.display)
+
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertTrue(panel.display)
+            self.assertTrue(panel.has_focus)
+
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertFalse(panel.display)
+
+    async def test_enter_on_calendar_leaf_toggles_selection(self) -> None:
+        # Toggling a calendar in the panel must immediately update
+        # `MainScreen._selection` and re-render the event list against
+        # the new filter.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from chronos.tui.widgets.calendar_panel import CalendarPanel
+
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            panel = screen.query_one(CalendarPanel)
+            await pilot.press("c")
+            await pilot.pause()
+            # Move into the tree and pick the first leaf (work calendar).
+            await pilot.press("down")  # account node
+            await pilot.pause()
+            await pilot.press("down")  # first leaf
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            # The first-alphabetical calendar (`private`) is now in
+            # the selection set.
+            picked = CalendarRef(ACCOUNT_NAME, PERSONAL_CAL)
+            self.assertIn(picked, screen._selection.refs)
+            # And the panel's leaf label reflects the toggle.
+            cursor = panel.cursor_node
+            assert cursor is not None
+            self.assertIn("[x]", str(cursor.label))
+
+            # Toggling again removes the calendar — empty selection
+            # falls back to "show all", per `CalendarSelection.contains`.
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertNotIn(picked, screen._selection.refs)
