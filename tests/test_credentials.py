@@ -129,3 +129,40 @@ class BuildAuthTest(unittest.TestCase):
         self.assertEqual(auth.basic, ("alice@example.com", "secret"))
         self.assertIsNone(auth.http_auth)
         self.assertIsNone(auth.on_commit)
+
+
+class GoogleBackendTest(unittest.TestCase):
+    """`GoogleCredential` is OAuth-with-defaults; verify it routes to OAuth
+    and uses the fixed Google scope rather than the basic-auth code path.
+    """
+
+    def test_google_routes_through_oauth_with_google_scope(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from chronos.domain import GOOGLE_OAUTH_SCOPE, GoogleCredential
+
+        provider = DefaultCredentialsProvider(env={})
+        account = _account(
+            GoogleCredential(client_id="cid", client_secret="cs"), username=""
+        )
+        bearer = MagicMock()
+        bearer.persist = MagicMock()
+        with (
+            patch(
+                "chronos.credentials.build_bearer_auth", return_value=bearer
+            ) as mock_build,
+            patch(
+                "chronos.credentials.oauth_token_path",
+                return_value=Path("/tmp/chronos-acct-token.json"),
+            ),
+        ):
+            auth = provider.build_auth(account)
+        mock_build.assert_called_once_with(
+            client_id="cid",
+            client_secret="cs",
+            scope=GOOGLE_OAUTH_SCOPE,
+            token_path=Path("/tmp/chronos-acct-token.json"),
+        )
+        self.assertIsNone(auth.basic)
+        self.assertIs(auth.http_auth, bearer)
+        self.assertIs(auth.on_commit, bearer.persist)

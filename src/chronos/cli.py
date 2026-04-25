@@ -28,6 +28,7 @@ from chronos.config import load as load_config
 from chronos.config import save as save_config
 from chronos.credentials import CredentialResolutionError, DefaultCredentialsProvider
 from chronos.domain import (
+    GOOGLE_CALDAV_URL,
     AccountConfig,
     AppConfig,
     CalendarRef,
@@ -35,6 +36,7 @@ from chronos.domain import (
     ComponentRef,
     CredentialSpec,
     EnvCredential,
+    GoogleCredential,
     LocalStatus,
     OAuthCredential,
     PlaintextCredential,
@@ -242,11 +244,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     account_add = account_sub.add_parser("add", help="Append a new account.")
     account_add.add_argument("--name", required=True)
-    account_add.add_argument("--url", required=True)
-    account_add.add_argument("--username", required=True)
+    account_add.add_argument(
+        "--url",
+        default=None,
+        help=(
+            "CalDAV root URL. Required for every backend except 'google', "
+            "which defaults to Google's CalDAV root."
+        ),
+    )
+    account_add.add_argument(
+        "--username",
+        default=None,
+        help=(
+            "Account username. Required for every backend except 'google', "
+            "where the OAuth identity supplies it and this can be omitted."
+        ),
+    )
     account_add.add_argument(
         "--credential-backend",
-        choices=("plaintext", "env", "command", "oauth"),
+        choices=("plaintext", "env", "command", "oauth", "google"),
         required=True,
     )
     account_add.add_argument(
@@ -255,24 +271,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "For plaintext: the password. For env: the variable name. "
             "For command: the command line (shlex-split). Unused for "
-            "the oauth backend — use --oauth-client-id + "
-            "--oauth-client-secret instead."
+            "the oauth and google backends — pass --client-id + "
+            "--client-secret instead."
         ),
     )
     account_add.add_argument(
-        "--oauth-client-id",
+        "--client-id",
         default=None,
-        help="OAuth 2.0 client ID (required when --credential-backend=oauth).",
+        help=(
+            "OAuth 2.0 client ID (required when --credential-backend is "
+            "'oauth' or 'google')."
+        ),
     )
     account_add.add_argument(
-        "--oauth-client-secret",
+        "--client-secret",
         default=None,
-        help="OAuth 2.0 client secret (required when --credential-backend=oauth).",
+        help=(
+            "OAuth 2.0 client secret (required when --credential-backend "
+            "is 'oauth' or 'google')."
+        ),
     )
     account_add.add_argument(
         "--oauth-scope",
         default="https://www.googleapis.com/auth/calendar",
-        help="OAuth scope; defaults to Google Calendar read+write.",
+        help=(
+            "OAuth scope; defaults to Google Calendar read+write. "
+            "Ignored for the 'google' backend (which fixes the scope)."
+        ),
     )
     account_add.add_argument(
         "--mirror-path",
@@ -372,8 +397,8 @@ def _dispatch_account(
             username=args.username,
             backend=args.credential_backend,
             value=args.credential_value,
-            oauth_client_id=args.oauth_client_id,
-            oauth_client_secret=args.oauth_client_secret,
+            client_id=args.client_id,
+            client_secret=args.client_secret,
             oauth_scope=args.oauth_scope,
             mirror_path=args.mirror_path,
             trash_retention_days=args.trash_retention_days,
@@ -713,12 +738,12 @@ def cmd_account_add(
     *,
     config_path: Path,
     name: str,
-    url: str,
-    username: str,
+    url: str | None,
+    username: str | None,
     backend: str,
     value: str | None,
-    oauth_client_id: str | None,
-    oauth_client_secret: str | None,
+    client_id: str | None,
+    client_secret: str | None,
     oauth_scope: str,
     mirror_path: Path | None,
     trash_retention_days: int,
@@ -735,20 +760,32 @@ def cmd_account_add(
         credential = _build_credential(
             backend,
             value=value,
-            oauth_client_id=oauth_client_id,
-            oauth_client_secret=oauth_client_secret,
+            client_id=client_id,
+            client_secret=client_secret,
             oauth_scope=oauth_scope,
         )
     except ValueError as exc:
         stderr.write(f"{exc}\n")
         return 2
+    if isinstance(credential, GoogleCredential):
+        resolved_url = url or GOOGLE_CALDAV_URL
+        resolved_username = username or ""
+    else:
+        if not url:
+            stderr.write(f"backend {backend!r} requires --url\n")
+            return 2
+        if not username:
+            stderr.write(f"backend {backend!r} requires --username\n")
+            return 2
+        resolved_url = url
+        resolved_username = username
     import re  # local import: avoid module-level coupling for one-shot CLI
 
     resolved_mirror_path = mirror_path or default_mirror_path(name)
     new_account = AccountConfig(
         name=name,
-        url=url,
-        username=username,
+        url=resolved_url,
+        username=resolved_username,
         credential=credential,
         mirror_path=resolved_mirror_path,
         trash_retention_days=trash_retention_days,
@@ -873,20 +910,27 @@ def cmd_oauth_authorize(
         stderr.write(f"account not found: {account_name}\n")
         return 1
     credential = account.credential
-    if not isinstance(credential, OAuthCredential):
+    if isinstance(credential, GoogleCredential):
+        oauth_credential = OAuthCredential(
+            client_id=credential.client_id,
+            client_secret=credential.client_secret,
+        )
+    elif isinstance(credential, OAuthCredential):
+        oauth_credential = credential
+    else:
         stderr.write(
-            f"account {account_name!r} does not use the oauth backend "
+            f"account {account_name!r} does not use an OAuth backend "
             f"(has {type(credential).__name__}). `oauth authorize` is "
-            "only meaningful for oauth accounts.\n"
+            "only meaningful for the oauth and google backends.\n"
         )
         return 2
     flow = device_flow or _default_device_flow
     try:
-        tokens = flow(credential, stdout)
+        tokens = flow(oauth_credential, stdout)
     except OAuthError as exc:
         stderr.write(f"{exc}\n")
         return 1
-    token_path = credential.token_path or oauth_token_path(account_name)
+    token_path = oauth_credential.token_path or oauth_token_path(account_name)
     save_tokens(token_path, tokens)
     stdout.write(f"Tokens saved to {token_path}\n")
     return 0
@@ -933,18 +977,20 @@ def _build_credential(
     backend: str,
     *,
     value: str | None,
-    oauth_client_id: str | None,
-    oauth_client_secret: str | None,
+    client_id: str | None,
+    client_secret: str | None,
     oauth_scope: str,
 ) -> CredentialSpec:
+    if backend == "google":
+        if not client_id or not client_secret:
+            raise ValueError("google backend requires --client-id and --client-secret")
+        return GoogleCredential(client_id=client_id, client_secret=client_secret)
     if backend == "oauth":
-        if not oauth_client_id or not oauth_client_secret:
-            raise ValueError(
-                "oauth backend requires --oauth-client-id and --oauth-client-secret"
-            )
+        if not client_id or not client_secret:
+            raise ValueError("oauth backend requires --client-id and --client-secret")
         return OAuthCredential(
-            client_id=oauth_client_id,
-            client_secret=oauth_client_secret,
+            client_id=client_id,
+            client_secret=client_secret,
             scope=oauth_scope,
         )
     if value is None:
@@ -967,6 +1013,8 @@ def _credential_backend(spec: CredentialSpec) -> str:
         return "command"
     if isinstance(spec, OAuthCredential):
         return "oauth"
+    if isinstance(spec, GoogleCredential):
+        return "google"
     return "encrypted"
 
 

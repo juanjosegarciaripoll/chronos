@@ -58,12 +58,32 @@ class OAuthCredential:
     token_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class GoogleCredential:
+    """Google-specific OAuth shorthand: only client_id + client_secret.
+
+    Equivalent to `OAuthCredential` with the Google CalDAV scope and
+    the default token path, but writeable in `config.toml` as a
+    two-field block. The TOML reader also lets accounts using this
+    backend omit `url` and `username` — they default to Google's
+    CalDAV root and an empty display string respectively.
+    """
+
+    client_id: str
+    client_secret: str
+
+
+GOOGLE_CALDAV_URL = "https://apidata.googleusercontent.com/caldav/v2/"
+GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/calendar"
+
+
 CredentialSpec = (
     PlaintextCredential
     | EnvCredential
     | CommandCredential
     | KeyringCredential
     | OAuthCredential
+    | GoogleCredential
 )
 
 

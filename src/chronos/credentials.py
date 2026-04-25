@@ -6,10 +6,12 @@ from collections.abc import Mapping
 
 from chronos.authorization import Authorization
 from chronos.domain import (
+    GOOGLE_OAUTH_SCOPE,
     AccountConfig,
     CommandCredential,
     CredentialSpec,
     EnvCredential,
+    GoogleCredential,
     KeyringCredential,
     OAuthCredential,
     PlaintextCredential,
@@ -44,6 +46,16 @@ class DefaultCredentialsProvider:
         spec = account.credential
         if isinstance(spec, OAuthCredential):
             return _build_oauth_authorization(account.name, spec)
+        if isinstance(spec, GoogleCredential):
+            return _build_oauth_authorization(
+                account.name,
+                OAuthCredential(
+                    client_id=spec.client_id,
+                    client_secret=spec.client_secret,
+                    scope=GOOGLE_OAUTH_SCOPE,
+                    token_path=None,
+                ),
+            )
         password = self._resolve_password(account.name, spec)
         return Authorization(basic=(account.username, password))
 

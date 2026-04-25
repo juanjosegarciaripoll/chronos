@@ -11,11 +11,13 @@ from typing import cast
 import tomli_w
 
 from chronos.domain import (
+    GOOGLE_CALDAV_URL,
     AccountConfig,
     AppConfig,
     CommandCredential,
     CredentialSpec,
     EnvCredential,
+    GoogleCredential,
     KeyringCredential,
     OAuthCredential,
     PlaintextCredential,
@@ -71,11 +73,20 @@ def _parse_account(data: object, key: str) -> AccountConfig:
     account = cast(dict[str, object], data)
     name = _require_str(account, "name", key)
     account_key = f"{key}[{name}]"
-    url = _require_str(account, "url", account_key)
-    username = _require_str(account, "username", account_key)
     credential = _parse_credential(
         account.get("credential"), f"{account_key}.credential"
     )
+    # The "google" backend has well-known url + username defaults so
+    # the user only has to write the OAuth client_id + client_secret.
+    if isinstance(credential, GoogleCredential):
+        url = (
+            _optional_str(account, "url", account_key, default=GOOGLE_CALDAV_URL)
+            or GOOGLE_CALDAV_URL
+        )
+        username = _optional_str(account, "username", account_key, default="") or ""
+    else:
+        url = _require_str(account, "url", account_key)
+        username = _require_str(account, "username", account_key)
     mirror_path = _parse_mirror_path(account, name, account_key)
     trash_retention_days = _optional_int(
         account,
@@ -129,6 +140,11 @@ def _parse_credential(data: object, key: str) -> CredentialSpec:
             service=_require_str(spec, "service", key),
             username=_require_str(spec, "username", key),
         )
+    if backend == "google":
+        return GoogleCredential(
+            client_id=_require_str(spec, "client_id", key),
+            client_secret=_require_str(spec, "client_secret", key),
+        )
     if backend == "oauth":
         token_path_raw = _optional_str(spec, "token_path", key, default=None)
         return OAuthCredential(
@@ -147,7 +163,7 @@ def _parse_credential(data: object, key: str) -> CredentialSpec:
         )
     raise ConfigError(
         f"unknown credential backend '{backend}' "
-        "(expected: plaintext, env, command, encrypted, oauth)",
+        "(expected: plaintext, env, command, encrypted, oauth, google)",
         key,
     )
 
@@ -283,16 +299,20 @@ def save(config: AppConfig, path: Path) -> None:
 
 
 def _dump_account(account: AccountConfig) -> dict[str, object]:
-    out: dict[str, object] = {
-        "name": account.name,
-        "url": account.url,
-        "username": account.username,
-        "credential": _dump_credential(account.credential),
-        "trash_retention_days": account.trash_retention_days,
-        "include": [p.pattern for p in account.include],
-        "exclude": [p.pattern for p in account.exclude],
-        "read_only": [p.pattern for p in account.read_only],
-    }
+    is_google = isinstance(account.credential, GoogleCredential)
+    out: dict[str, object] = {"name": account.name}
+    # The "google" backend defaults both fields, so omit them on dump
+    # when they are at their default values; keeps round-tripped configs
+    # as minimal as the hand-written form.
+    if not (is_google and account.url == GOOGLE_CALDAV_URL):
+        out["url"] = account.url
+    if not (is_google and account.username == ""):
+        out["username"] = account.username
+    out["credential"] = _dump_credential(account.credential)
+    out["trash_retention_days"] = account.trash_retention_days
+    out["include"] = [p.pattern for p in account.include]
+    out["exclude"] = [p.pattern for p in account.exclude]
+    out["read_only"] = [p.pattern for p in account.read_only]
     # Only emit mirror_path when the user picked a non-default location;
     # accounts that took the default stay clean on round-trip through
     # `chronos account add` / `config edit`.
@@ -313,6 +333,12 @@ def _dump_credential(spec: CredentialSpec) -> dict[str, object]:
             "backend": "encrypted",
             "service": spec.service,
             "username": spec.username,
+        }
+    if isinstance(spec, GoogleCredential):
+        return {
+            "backend": "google",
+            "client_id": spec.client_id,
+            "client_secret": spec.client_secret,
         }
     # spec narrows to OAuthCredential by elimination.
     out: dict[str, object] = {

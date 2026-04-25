@@ -7,6 +7,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from chronos import cli
 from chronos.credentials import DefaultCredentialsProvider
@@ -255,7 +256,8 @@ class BuildSyncRunnerTest(CliTestCase):
         committed: list[int] = []
 
         class StubCreds:
-            def build_auth(self, _account: AccountConfig) -> Authorization:
+            def build_auth(self, account: AccountConfig) -> Authorization:
+                _ = account
                 return Authorization(
                     basic=("user@example.com", "pw"),
                     on_commit=lambda: committed.append(1),
@@ -268,7 +270,7 @@ class BuildSyncRunnerTest(CliTestCase):
             config=_config(),
             mirror=self.mirror,
             index=self.index,
-            creds=StubCreds(),  # type: ignore[arg-type]
+            creds=StubCreds(),
             stdout=self.stdout,
             stderr=self.stderr,
             now=NOW,
@@ -596,7 +598,8 @@ class InitCommandTest(ConfigEditingCliTestCase):
         # And it carries the inline help so a curious user sees it.
         body = self.config_path.read_text(encoding="utf-8")
         self.assertIn("# # Basic auth", body)
-        self.assertIn("# # OAuth 2.0 device flow", body)
+        self.assertIn("# # Google Calendar via OAuth", body)
+        self.assertIn("# # Generic OAuth 2.0 device flow", body)
 
     def test_init_refuses_when_file_exists(self) -> None:
         self.config_path.write_text("config_version = 1\n", encoding="utf-8")
@@ -943,9 +946,9 @@ class AccountAddOAuthTest(ConfigEditingCliTestCase):
                 "me@gmail.com",
                 "--credential-backend",
                 "oauth",
-                "--oauth-client-id",
+                "--client-id",
                 "1234.apps.googleusercontent.com",
-                "--oauth-client-secret",
+                "--client-secret",
                 "GOCSPX-secret",
                 "--mirror-path",
                 "/tmp/chronos/google",
@@ -960,6 +963,79 @@ class AccountAddOAuthTest(ConfigEditingCliTestCase):
         assert isinstance(cred, OAuthCredential)
         self.assertEqual(cred.client_id, "1234.apps.googleusercontent.com")
         self.assertEqual(cred.client_secret, "GOCSPX-secret")
+
+    def test_add_google_account_minimal(self) -> None:
+        """`--credential-backend google` accepts only client_id+secret;
+        url and username are filled in from Google's defaults."""
+        self._run(["init"])
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "google",
+                "--credential-backend",
+                "google",
+                "--client-id",
+                "1234.apps.googleusercontent.com",
+                "--client-secret",
+                "GOCSPX-secret",
+            ]
+        )
+        self.assertEqual(code, 0)
+        from chronos.config import load
+        from chronos.domain import GOOGLE_CALDAV_URL, GoogleCredential
+
+        config = load(self.config_path)
+        account = config.accounts[0]
+        cred = account.credential
+        assert isinstance(cred, GoogleCredential)
+        self.assertEqual(cred.client_id, "1234.apps.googleusercontent.com")
+        self.assertEqual(cred.client_secret, "GOCSPX-secret")
+        self.assertEqual(account.url, GOOGLE_CALDAV_URL)
+        self.assertEqual(account.username, "")
+
+    def test_google_missing_client_id_rejected(self) -> None:
+        self._run(["init"])
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "google",
+                "--credential-backend",
+                "google",
+                "--client-secret",
+                "secret-only",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--client-id", self.stderr.getvalue())
+
+    def test_non_google_backend_still_requires_url(self) -> None:
+        self._run(["init"])
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--username",
+                "u@example.com",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "pw",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--url", self.stderr.getvalue())
 
     def test_oauth_missing_client_id_rejected(self) -> None:
         self._run(["init"])
@@ -979,14 +1055,14 @@ class AccountAddOAuthTest(ConfigEditingCliTestCase):
                 "me@example.com",
                 "--credential-backend",
                 "oauth",
-                "--oauth-client-secret",
+                "--client-secret",
                 "s",
                 "--mirror-path",
                 "/tmp/m",
             ]
         )
         self.assertEqual(code, 2)
-        self.assertIn("--oauth-client-id", self.stderr.getvalue())
+        self.assertIn("--client-id", self.stderr.getvalue())
 
 
 class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
@@ -1004,9 +1080,9 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
                 "me@example.com",
                 "--credential-backend",
                 "oauth",
-                "--oauth-client-id",
+                "--client-id",
                 "cid",
-                "--oauth-client-secret",
+                "--client-secret",
                 "cs",
                 "--mirror-path",
                 "/tmp/m",
@@ -1110,7 +1186,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
         self.stdout.seek(0)
         code = self._run(["oauth", "authorize", "--account", "basic"])
         self.assertEqual(code, 2)
-        self.assertIn("does not use the oauth backend", self.stderr.getvalue())
+        self.assertIn("does not use an OAuth backend", self.stderr.getvalue())
 
     def test_authorize_unknown_account(self) -> None:
         self._run(["init"])
@@ -1119,6 +1195,62 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
         code = self._run(["oauth", "authorize", "--account", "nobody"])
         self.assertEqual(code, 1)
         self.assertIn("account not found", self.stderr.getvalue())
+
+    def test_authorize_accepts_google_backend(self) -> None:
+        """`google` is OAuth shorthand; `oauth authorize` must run the
+        device flow with the underlying client_id/secret + Google scope."""
+        from chronos.domain import GOOGLE_OAUTH_SCOPE, OAuthCredential
+        from chronos.oauth import StoredTokens
+
+        self._run(["init"])
+        self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "google",
+                "--credential-backend",
+                "google",
+                "--client-id",
+                "g-cid",
+                "--client-secret",
+                "g-cs",
+            ]
+        )
+        self.stdout.truncate(0)
+        self.stdout.seek(0)
+
+        captured: dict[str, Any] = {}
+
+        def fake_flow(credential: OAuthCredential, _stdout: Any) -> StoredTokens:
+            captured["credential"] = credential
+            return StoredTokens(
+                access_token="at",
+                refresh_token="rt",
+                expiry_unix=12345.0,
+                scope=credential.scope,
+            )
+
+        from chronos import cli
+
+        with mock.patch(
+            "chronos.cli.oauth_token_path",
+            return_value=self.tmp / "g-tokens.json",
+        ):
+            code = cli.cmd_oauth_authorize(
+                self.stdout,
+                self.stderr,
+                config_path=self.config_path,
+                account_name="google",
+                device_flow=fake_flow,
+            )
+        self.assertEqual(code, 0)
+        cred = captured["credential"]
+        assert isinstance(cred, OAuthCredential)
+        self.assertEqual(cred.client_id, "g-cid")
+        self.assertEqual(cred.client_secret, "g-cs")
+        self.assertEqual(cred.scope, GOOGLE_OAUTH_SCOPE)
+        self.assertTrue((self.tmp / "g-tokens.json").exists())
 
 
 class ConfigEditCommandTest(ConfigEditingCliTestCase):

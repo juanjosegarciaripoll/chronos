@@ -157,6 +157,45 @@ class ParseAccountTest(unittest.TestCase):
             parse(self._wrap(acct_data))
         self.assertIn("include", ctx.exception.key)
 
+    def test_google_account_omits_url_and_username(self) -> None:
+        from chronos.domain import GOOGLE_CALDAV_URL, GoogleCredential
+
+        config = parse(
+            {
+                "config_version": 1,
+                "accounts": [
+                    {
+                        "name": "google",
+                        "credential": {
+                            "backend": "google",
+                            "client_id": "cid.apps.googleusercontent.com",
+                            "client_secret": "GOCSPX-x",
+                        },
+                    }
+                ],
+            }
+        )
+        acct = config.accounts[0]
+        self.assertIsInstance(acct.credential, GoogleCredential)
+        self.assertEqual(acct.url, GOOGLE_CALDAV_URL)
+        self.assertEqual(acct.username, "")
+
+    def test_non_google_account_still_requires_url(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            parse(
+                {
+                    "config_version": 1,
+                    "accounts": [
+                        {
+                            "name": "personal",
+                            "username": "u@example.com",
+                            "credential": {"backend": "env", "variable": "X"},
+                        }
+                    ],
+                }
+            )
+        self.assertIn("url", str(ctx.exception))
+
     def test_trash_retention_days_override(self) -> None:
         acct_data = dict(self.BASE_ACCOUNT)
         acct_data["trash_retention_days"] = 7
@@ -256,6 +295,28 @@ class ParseCredentialTest(unittest.TestCase):
             parse(self._wrap({"backend": "oauth", "client_secret": "cs"}))
         self.assertIn("client_id", str(ctx.exception))
 
+    def test_google_minimal(self) -> None:
+        config = parse(
+            self._wrap(
+                {
+                    "backend": "google",
+                    "client_id": "1234.apps.googleusercontent.com",
+                    "client_secret": "GOCSPX-secret",
+                }
+            )
+        )
+        from chronos.domain import GoogleCredential
+
+        cred = config.accounts[0].credential
+        assert isinstance(cred, GoogleCredential)
+        self.assertEqual(cred.client_id, "1234.apps.googleusercontent.com")
+        self.assertEqual(cred.client_secret, "GOCSPX-secret")
+
+    def test_google_missing_client_id_raises(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            parse(self._wrap({"backend": "google", "client_secret": "cs"}))
+        self.assertIn("client_id", str(ctx.exception))
+
     def test_unknown_backend(self) -> None:
         with self.assertRaises(ConfigError) as ctx:
             parse(self._wrap({"backend": "saml2"}))
@@ -347,6 +408,34 @@ class DumpTest(unittest.TestCase):
             reparsed.accounts[0].mirror_path, default_mirror_path("personal")
         )
 
+    def test_dump_omits_url_and_username_for_google_defaults(self) -> None:
+        from chronos.domain import GoogleCredential
+        from chronos.paths import default_mirror_path
+
+        account = AccountConfig(
+            name="google",
+            url="https://apidata.googleusercontent.com/caldav/v2/",
+            username="",
+            credential=GoogleCredential(client_id="cid", client_secret="cs"),
+            mirror_path=default_mirror_path("google"),
+            trash_retention_days=30,
+            include=(re.compile(".*"),),
+            exclude=(),
+            read_only=(),
+        )
+        config = AppConfig(
+            config_version=1, use_utf8=False, editor=None, accounts=(account,)
+        )
+        data = dump(config)
+        from typing import cast as _cast
+
+        accounts = _cast(list[dict[str, object]], data["accounts"])
+        self.assertNotIn("url", accounts[0])
+        self.assertNotIn("username", accounts[0])
+        # Round-trip recovers the same account from the minimal form.
+        reparsed = parse(data)
+        self.assertEqual(reparsed.accounts[0], account)
+
     def test_dump_keeps_mirror_path_when_custom(self) -> None:
         config = _sample_config()
         # _sample_config uses /tmp/chronos/personal which is NOT the
@@ -372,7 +461,7 @@ class DumpTest(unittest.TestCase):
         self.assertEqual(data["editor"], "nvim")
 
     def test_credential_roundtrip(self) -> None:
-        from chronos.domain import OAuthCredential
+        from chronos.domain import GoogleCredential, OAuthCredential
 
         for cred in (
             PlaintextCredential(password="s3cret"),
@@ -389,6 +478,10 @@ class DumpTest(unittest.TestCase):
                 client_secret="cs2",
                 scope="https://example/scope",
                 token_path=Path("/tmp/t.json"),
+            ),
+            GoogleCredential(
+                client_id="g.apps.googleusercontent.com",
+                client_secret="GOCSPX-x",
             ),
         ):
             with self.subTest(backend=type(cred).__name__):

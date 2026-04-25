@@ -58,18 +58,28 @@ use_utf8 = false
 # # trash_retention_days defaults to 30.
 # # include / exclude are Python regexes (re.fullmatch); default include = [".*"].
 
-# # OAuth 2.0 device flow: Google Calendar, Microsoft / Outlook.
-# # After saving this file, run:
+# # Google Calendar via OAuth 2.0. Only the client_id/client_secret from
+# # your Google Cloud project are required; the CalDAV URL, username, and
+# # OAuth scope are filled in by chronos. After saving, run:
 # #   chronos oauth authorize --account google
 # [[accounts]]
 # name = "google"
-# url = "https://apidata.googleusercontent.com/caldav/v2/"
-# username = "you@gmail.com"
 # [accounts.credential]
-# backend = "oauth"
+# backend = "google"
 # client_id = "REPLACE-ME.apps.googleusercontent.com"
 # client_secret = "REPLACE-ME"
-# scope = "https://www.googleapis.com/auth/calendar"
+
+# # Generic OAuth 2.0 device flow (Microsoft / Outlook, custom IdPs):
+# # configure URL, username, scope, and client credentials explicitly.
+# [[accounts]]
+# name = "outlook"
+# url = "https://outlook.office365.com/"
+# username = "you@outlook.com"
+# [accounts.credential]
+# backend = "oauth"
+# client_id = "REPLACE-ME"
+# client_secret = "REPLACE-ME"
+# scope = "https://outlook.office.com/Calendars.ReadWrite"
 """
 
 

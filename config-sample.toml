@@ -23,9 +23,10 @@ use_utf8 = false
 
 # [[accounts]]
 # name = "google"
-# url = "https://apidata.googleusercontent.com/caldav/v2/you@gmail.com/events/"
-# username = "you@gmail.com"
-# credential = { backend = "oauth", client_id = "12345.apps.googleusercontent.com", client_secret = "GOCSPX-..." }
-# # Run `chronos oauth authorize --account google` once to obtain
-# # access/refresh tokens. They are stored under the OS-standard user
-# # data directory (tokens/<account>.json), not in this file.
+# credential = { backend = "google", client_id = "12345.apps.googleusercontent.com", client_secret = "GOCSPX-..." }
+# # The "google" backend defaults the CalDAV URL, OAuth scope, and
+# # username for you. Only the client_id/client_secret from your
+# # Google Cloud project are required. Run
+# #   chronos oauth authorize --account google
+# # once to obtain access/refresh tokens, which are stored under the
+# # OS-standard user data directory (tokens/<account>.json), not here.
