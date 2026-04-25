@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
+import threading
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -129,35 +131,78 @@ _COMPONENT_COLUMNS = (
 
 
 class SqliteIndexRepository:
+    """SQLite-backed projection of every component in the local mirror.
+
+    Connections are per-thread. The TUI runs sync on a worker thread
+    while the UI thread keeps reading from the index for view
+    refreshes; sqlite3's default `check_same_thread=True` rejects
+    cross-thread access on a shared connection. WAL mode plus
+    `busy_timeout` lets multiple connections (one per thread) talk to
+    the same file safely. We open `check_same_thread=False` so that
+    `close()` — which the TUI calls on app exit, from a thread that
+    didn't necessarily open every cached connection — doesn't itself
+    trip the same guard.
+    """
+
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._conn = self._open()
-
-    def _open(self) -> sqlite3.Connection:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._path, isolation_level=None)
+        self._local = threading.local()
+        # Mirror of every connection we hand out, so `close()` can
+        # walk them. Guarded by `_connections_lock` because the
+        # registration happens on whatever thread first asks for a
+        # connection.
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        # Open + run the schema once on the constructing thread; the
+        # `CREATE … IF NOT EXISTS` statements are idempotent, so
+        # connections opened later don't need to re-run them.
+        self._open_connection().executescript(_SCHEMA)
+
+    def _open_connection(self) -> sqlite3.Connection:
+        existing = cast(sqlite3.Connection | None, getattr(self._local, "conn", None))
+        if existing is not None:
+            return existing
+        conn = sqlite3.connect(
+            self._path, isolation_level=None, check_same_thread=False
+        )
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 5000")
-        conn.executescript(_SCHEMA)
+        self._local.conn = conn
+        with self._connections_lock:
+            self._connections.append(conn)
         return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._open_connection()
 
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection]:
-        if self._conn.in_transaction:
-            yield self._conn
+        conn = self._open_connection()
+        if conn.in_transaction:
+            yield conn
             return
-        self._conn.execute("BEGIN")
+        conn.execute("BEGIN")
         try:
-            yield self._conn
+            yield conn
         except BaseException:
-            self._conn.execute("ROLLBACK")
+            conn.execute("ROLLBACK")
             raise
         else:
-            self._conn.execute("COMMIT")
+            conn.execute("COMMIT")
 
     def close(self) -> None:
-        self._conn.close()
+        with self._connections_lock:
+            for conn in self._connections:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.close()
+            self._connections.clear()
+        # Drop the thread-local cache too so a subsequent call on
+        # this repository (uncommon but possible in tests) reopens
+        # fresh connections instead of returning closed handles.
+        self._local = threading.local()
 
     def upsert_component(self, component: StoredComponent) -> None:
         row = _component_to_row(component)

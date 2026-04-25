@@ -366,3 +366,56 @@ class ConnectionContextManagerTest(unittest.TestCase):
         rows = self.repo.list_calendar_components(CalendarRef("personal", "work"))
         # First survives, second rolled back.
         self.assertEqual({r.ref.uid for r in rows}, {"first@example.com"})
+
+
+class CrossThreadAccessTest(unittest.TestCase):
+    """The TUI runs sync on a worker thread while the UI thread keeps
+    reading from the same repository. sqlite3's `check_same_thread`
+    guard blocks that by default; the repository now opens per-thread
+    connections so cross-thread access works without corruption."""
+
+    def setUp(self) -> None:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.repo = SqliteIndexRepository(tmp / "index.sqlite3")
+        self.addCleanup(self.repo.close)
+
+    def test_writes_from_worker_thread_visible_on_main_thread(self) -> None:
+        import threading
+
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                self.repo.upsert_component(
+                    _event(_ref("worker@example.com"), href="/dav/w.ics", etag="v1")
+                )
+            except BaseException as exc:  # noqa: BLE001 — propagate to main
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        self.assertEqual(errors, [])
+        rows = self.repo.list_calendar_components(CalendarRef("personal", "work"))
+        self.assertEqual({r.ref.uid for r in rows}, {"worker@example.com"})
+
+    def test_close_is_safe_from_a_different_thread(self) -> None:
+        import threading
+
+        # Open a connection on a worker thread first; main thread then
+        # closes the repo. With `check_same_thread=False` (the new
+        # default) close() can walk and close every cached connection
+        # regardless of which thread opened it.
+        def warm_up() -> None:
+            self.repo.list_calendar_components(CalendarRef("personal", "work"))
+
+        thread = threading.Thread(target=warm_up)
+        thread.start()
+        thread.join()
+        # Should not raise.
+        self.repo.close()
+        # Re-add cleanup as a no-op so the addCleanup(close) in setUp
+        # doesn't trip over double-close. close() now resets the
+        # thread-local cache, so a subsequent call would just open
+        # fresh connections — but we don't want that side effect.
+        self.repo._connections.clear()  # type: ignore[attr-defined]
