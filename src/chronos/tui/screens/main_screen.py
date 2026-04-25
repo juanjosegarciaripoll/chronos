@@ -20,6 +20,7 @@ from chronos.domain import (
     VEvent,
 )
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
+from chronos.recurrence import expand
 from chronos.tui.bindings import main_bindings
 from chronos.tui.screens.agenda_screen import (
     rows_for as agenda_rows,
@@ -70,6 +71,14 @@ from chronos.tui.widgets.event_view import EventView
 
 if TYPE_CHECKING:
     from chronos.tui.app import ChronosApp, TuiServices
+
+
+# Mirrors `sync._OCCURRENCE_WINDOW_PAST` / `_OCCURRENCE_WINDOW_FUTURE`.
+# Kept local instead of importing because the local-edit path doesn't
+# otherwise depend on the sync engine and we don't want to pull
+# `chronos.sync` into the TUI's import graph.
+_LOCAL_OCCURRENCE_WINDOW_PAST = timedelta(days=365 * 30)
+_LOCAL_OCCURRENCE_WINDOW_FUTURE = timedelta(days=365 * 5)
 
 
 class MainScreen(Screen[None]):
@@ -362,6 +371,7 @@ class MainScreen(Screen[None]):
                 synced_at=None,
             )
             services.index.upsert_component(component)
+            self._refresh_local_occurrences(component)
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Created {draft.summary!r}"
             )
@@ -389,10 +399,36 @@ class MainScreen(Screen[None]):
                 synced_at=existing.synced_at,
             )
             services.index.upsert_component(updated)
+            self._refresh_local_occurrences(updated)
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Updated {draft.summary!r}"
             )
         self.refresh_view()
+
+    def _refresh_local_occurrences(self, component: StoredComponent) -> None:
+        """Re-expand `component` and rewrite its `occurrences` rows.
+
+        `IndexRepository.upsert_component` invalidates (deletes) the
+        occurrence rows for the master so a stale cache doesn't
+        outlive a content change. The sync engine repopulates the
+        cache by calling `populate_occurrences`, but local create /
+        edit flows have no such backstop — without a refresh here,
+        the saved event vanishes from every view that joins
+        `components` against `occurrences` (agenda, day, week,
+        month) until the next sync. Single-component expansion is
+        cheap and matches the window the sync engine uses, so the
+        cache stays consistent with what `populate_occurrences`
+        would have produced.
+        """
+        services = self._services()
+        now = services.now()
+        occurrences = expand(
+            master=component,
+            overrides=(),
+            window_start=now - _LOCAL_OCCURRENCE_WINDOW_PAST,
+            window_end=now + _LOCAL_OCCURRENCE_WINDOW_FUTURE,
+        )
+        services.index.set_occurrences(component.ref, occurrences)
 
     def _trash(self, component: StoredComponent) -> None:
         services = self._services()

@@ -1163,6 +1163,51 @@ class EditExistingEventTest(TuiFlowTestCase):
         raw = services.mirror.read(ref.resource)
         self.assertIn(b"Edited summary", raw)
 
+    async def test_edited_event_still_appears_in_agenda(self) -> None:
+        # Regression: `IndexRepository.upsert_component` invalidates
+        # the master's `occurrences` rows on every upsert. The TUI's
+        # save flow used to upsert without re-expanding, so an edited
+        # event vanished from every view that joins
+        # `components` against `occurrences` (agenda, day, week, month)
+        # until the next sync rebuilt the cache.
+        services = self.services()
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "simple-event-1@example.com")
+        component = services.index.get_component(ref)
+        assert isinstance(component, VEvent)
+
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._edit_specific(component)
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            edit.query_one("#edit-summary").value = "Renamed"  # type: ignore[attr-defined]
+            edit.action_save()
+            await pilot.pause()
+
+        # The agenda window covers 2026-04-25 → 2026-05-09 (NOW.date()
+        # + 14 days). simple-event-1 starts 2026-05-01, so it falls
+        # inside the window after the edit.
+        from chronos.tui.views import (
+            CalendarSelection as _Sel,
+        )
+        from chronos.tui.views import (
+            agenda_window,
+            gather_occurrences,
+        )
+
+        rows = gather_occurrences(
+            index=services.index,
+            calendars=(CalendarRef(ACCOUNT_NAME, WORK_CAL),),
+            selection=_Sel(refs=frozenset()),
+            window=agenda_window(NOW.date()),
+        )
+        summaries = [r.component.summary for r in rows]
+        self.assertIn("Renamed", summaries)
+
 
 class DeleteFlowTest(TuiFlowTestCase):
     async def test_delete_with_confirmation_marks_trashed(self) -> None:
