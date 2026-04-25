@@ -16,8 +16,12 @@ KEY_DAY = "d"
 KEY_WEEK = "w"
 KEY_MONTH = "m"
 KEY_AGENDA = "a"
-KEY_TODOS = "t"
-KEY_TODAY = "T"
+KEY_TODAY = "t"
+# Two literal key names map to "Shift+T" depending on terminal driver:
+# some send the uppercase character (key="T"), others send the modifier
+# form (key="shift+t"). We bind both so the action fires either way.
+KEY_TODOS = "T"
+KEY_TODOS_ALT = "shift+t"
 KEY_NEW = "n"
 KEY_EDIT = "e"
 KEY_TRASH = "x"
@@ -35,8 +39,11 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_WEEK, "view_week", "Week"),
         Binding(KEY_MONTH, "view_month", "Month"),
         Binding(KEY_AGENDA, "view_agenda", "Agenda"),
-        Binding(KEY_TODOS, "view_todos", "Todos"),
         Binding(KEY_TODAY, "today", "Today"),
+        Binding(KEY_TODOS, "view_todos", "Todos"),
+        # Defensive alias: terminals that emit "shift+t" instead of the
+        # uppercase character "T" for the same physical keypress.
+        Binding(KEY_TODOS_ALT, "view_todos", "Todos", show=False),
         Binding(KEY_NEW, "new_event", "New"),
         Binding(KEY_EDIT, "edit_event", "Edit"),
         Binding(KEY_OPEN, "open_event", "Open", show=False),
@@ -89,6 +96,7 @@ __all__ = [
     "KEY_SYNC",
     "KEY_TODAY",
     "KEY_TODOS",
+    "KEY_TODOS_ALT",
     "KEY_TRASH",
     "KEY_WEEK",
     "BindingType",

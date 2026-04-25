@@ -640,7 +640,7 @@ class FiveViewsNavigableTest(TuiFlowTestCase):
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.AGENDA)
 
-            await pilot.press("t")
+            await pilot.press("T")
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.TODOS)
 
@@ -668,9 +668,101 @@ class TodayResetsViewedDateTest(TuiFlowTestCase):
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
             screen._viewed_date = date(2024, 1, 1)
-            await pilot.press("T")
+            await pilot.press("t")
             await pilot.pause()
             self.assertEqual(screen._viewed_date, NOW.date())
+
+
+class TodayAndTodosKeysSwappedTest(TuiFlowTestCase):
+    """Regression: t / T were originally swapped (t=Todos, T=Today). The
+    user-friendly mapping is t=Today (lowercase, the most common
+    action), T=Todos (uppercase, the secondary view). And: some
+    terminals emit `shift+t` for the same physical keypress instead of
+    the uppercase character `T`, so we bind both forms.
+    """
+
+    async def test_lowercase_t_jumps_to_today_from_day_view(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._view = ViewKind.DAY
+            screen._viewed_date = date(1999, 1, 1)
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            # In day view: snaps viewed_date to now, view stays day.
+            self.assertEqual(screen._viewed_date, NOW.date())
+            self.assertEqual(screen._view, ViewKind.DAY)
+
+    async def test_lowercase_t_from_agenda_switches_to_day_view(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            # Agenda view ignores viewed_date, so action_today there
+            # would be invisible. We promote it to a view-switch so
+            # the user always sees today's events on press.
+            screen._view = ViewKind.AGENDA
+            screen._viewed_date = date(1999, 1, 1)
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            self.assertEqual(screen._view, ViewKind.DAY)
+            self.assertEqual(screen._viewed_date, NOW.date())
+
+    async def test_lowercase_t_from_todos_switches_to_day_view(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._view = ViewKind.TODOS
+            screen._viewed_date = date(1999, 1, 1)
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            self.assertEqual(screen._view, ViewKind.DAY)
+            self.assertEqual(screen._viewed_date, NOW.date())
+
+    async def test_uppercase_t_switches_to_todos(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._view = ViewKind.AGENDA
+            screen._viewed_date = date(1999, 1, 1)
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("T")
+            await pilot.pause()
+            # action_view_todos: view switches, viewed_date untouched.
+            self.assertEqual(screen._view, ViewKind.TODOS)
+            self.assertEqual(screen._viewed_date, date(1999, 1, 1))
+
+    async def test_shift_plus_t_alias_also_switches_to_todos(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._view = ViewKind.AGENDA
+            screen.refresh_view()
+            await pilot.pause()
+            await pilot.press("shift+t")
+            await pilot.pause()
+            self.assertEqual(screen._view, ViewKind.TODOS)
 
 
 class NewEventFlowTest(TuiFlowTestCase):

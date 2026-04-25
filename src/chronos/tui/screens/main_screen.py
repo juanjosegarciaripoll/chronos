@@ -124,7 +124,12 @@ class MainScreen(Screen[None]):
         self.refresh_view()
 
     def action_today(self) -> None:
+        # Always do something visible: snap viewed_date to now AND, if
+        # we're on a view that ignores viewed_date (agenda / todos),
+        # switch to the day view so the user actually sees "today".
         self._viewed_date = self._services().now().date()
+        if self._view in (ViewKind.AGENDA, ViewKind.TODOS):
+            self._view = ViewKind.DAY
         self.refresh_view()
 
     def action_quit(self) -> None:
