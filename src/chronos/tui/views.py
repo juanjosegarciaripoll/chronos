@@ -283,31 +283,60 @@ def _todo_sort_key(todo: VTodo) -> tuple[datetime, str]:
     return due, todo.ref.uid
 
 
-def render_event_detail(component: StoredComponent) -> str:
-    lines = [
-        f"Summary: {component.summary or '(no summary)'}",
-        f"Account / Calendar: "
-        f"{component.ref.account_name} / {component.ref.calendar_name}",
-        f"UID: {component.ref.uid}",
+_DETAIL_LABEL_WIDTH = len("Location:")  # the longest label in the grid
+
+
+def render_event_detail(component: StoredComponent, today: date) -> str:
+    """Multi-line component summary used by the detail pane.
+
+    Layout (labels right-aligned so the colons line up):
+
+         Summary: <text>
+          Source: <calendar> (<account>)
+        Location: <text or '(no location)'>
+           Start: <friendly date + time or '(not set)'>
+             End: <friendly date + time or '(not set)'>
+          Status: <status>          # only when present
+
+        Notes:
+        <description or '(no notes)'>
+
+    Times go through `format_friendly_start` so 'Today 09:00' /
+    'Tomorrow 14:00' / 'Tue 09:00' / 'Wed 15 May 09:00' shorthand
+    matches the row list. The iCal `UID` is not shown — it's an
+    implementation detail of the storage layer, not user-facing data.
+    """
+    lines: list[str] = [
+        _detail_field("Summary", component.summary or "(no summary)"),
+        _detail_field(
+            "Source",
+            f"{component.ref.calendar_name} ({component.ref.account_name})",
+        ),
+        _detail_field("Location", component.location or "(no location)"),
     ]
-    if component.location:
-        lines.append(f"Location: {component.location}")
     if isinstance(component, VEvent):
-        if component.dtstart is not None:
-            lines.append(f"Start: {component.dtstart.astimezone(UTC).isoformat()}")
-        if component.dtend is not None:
-            lines.append(f"End: {component.dtend.astimezone(UTC).isoformat()}")
+        lines.append(_detail_field("Start", _detail_when(component.dtstart, today)))
+        lines.append(_detail_field("End", _detail_when(component.dtend, today)))
     else:
         if component.dtstart is not None:
-            lines.append(f"Start: {component.dtstart.astimezone(UTC).isoformat()}")
-        if component.due is not None:
-            lines.append(f"Due: {component.due.astimezone(UTC).isoformat()}")
+            lines.append(_detail_field("Start", _detail_when(component.dtstart, today)))
+        lines.append(_detail_field("Due", _detail_when(component.due, today)))
     if component.status:
-        lines.append(f"Status: {component.status}")
-    if component.description:
-        lines.append("")
-        lines.append(component.description)
+        lines.append(_detail_field("Status", component.status))
+    lines.extend(["", "Notes:", component.description or "(no notes)"])
     return "\n".join(lines)
+
+
+def _detail_field(label: str, value: str) -> str:
+    # Right-align so the colons line up; values then start at the
+    # same column on every row.
+    return f"{label + ':':>{_DETAIL_LABEL_WIDTH}} {value}"
+
+
+def _detail_when(value: datetime | None, today: date) -> str:
+    if value is None:
+        return "(not set)"
+    return format_friendly_start(value, today)
 
 
 __all__ = [

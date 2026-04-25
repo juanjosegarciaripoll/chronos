@@ -688,13 +688,22 @@ class SearchAndDetailTest(unittest.TestCase):
             trashed_at=None,
             synced_at=None,
         )
-        text = render_event_detail(event)
+        today = date(2026, 4, 25)
+        text = render_event_detail(event, today)
         self.assertIn("Summary: Standup", text)
+        # New layout: "Source: <calendar> (<account>)" replaces the
+        # old "Account / Calendar:" line. The calendar comes first.
+        self.assertIn(f"Source: {WORK_CAL} ({ACCOUNT_NAME})", text)
         self.assertIn("Location: Zoom", text)
-        self.assertIn("Start:", text)
-        self.assertIn("End:", text)
+        # Times render through `format_friendly_start`, not ISO.
+        self.assertIn("Start: ", text)
+        self.assertIn("End: ", text)
+        self.assertNotIn("T09:00:00", text)
         self.assertIn("Status: CONFIRMED", text)
+        self.assertIn("Notes:", text)
         self.assertIn("Daily sync", text)
+        # Internal UID is suppressed.
+        self.assertNotIn("UID:", text)
 
     def test_render_event_detail_todo(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, PERSONAL_CAL, "uid-2")
@@ -715,17 +724,44 @@ class SearchAndDetailTest(unittest.TestCase):
             trashed_at=None,
             synced_at=None,
         )
-        text = render_event_detail(todo)
+        text = render_event_detail(todo, date(2026, 4, 25))
         self.assertIn("Buy milk", text)
-        self.assertIn("Due:", text)
-        self.assertIn("Start:", text)
+        self.assertIn("Due: ", text)
+        self.assertIn("Start: ", text)
+        # Empty description shows the placeholder, not a missing field.
+        self.assertIn("(no notes)", text)
 
     def test_render_event_detail_minimal(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "uid-3")
         event = _empty_event(ref)
-        text = render_event_detail(event)
+        text = render_event_detail(event, date(2026, 4, 25))
         self.assertIn("(no summary)", text)
         self.assertIn(WORK_CAL, text)
+        # The Location and Notes slots are always present, even when
+        # the underlying data is missing.
+        self.assertIn("(no location)", text)
+        self.assertIn("(no notes)", text)
+        # And Start / End placeholders surface as "(not set)" rather
+        # than disappearing — keeps the layout stable across events.
+        self.assertIn("(not set)", text)
+
+    def test_render_event_detail_aligns_labels(self) -> None:
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "uid-x")
+        event = _empty_event(ref)
+        text = render_event_detail(event, date(2026, 4, 25))
+        # Right-aligned labels mean every grid line's colon sits at
+        # the same column. Pick the column from the "Location:" line
+        # (the longest label) and assert each grid line carries a
+        # colon there.
+        location_line = next(
+            ln for ln in text.splitlines() if ln.lstrip().startswith("Location:")
+        )
+        colon_col = location_line.index(":")
+        for label in ("Summary", "Source", "Location", "Start", "End"):
+            line = next(
+                ln for ln in text.splitlines() if ln.lstrip().startswith(label + ":")
+            )
+            self.assertEqual(line[colon_col], ":", line)
 
 
 class DatePickerTest(unittest.TestCase):
@@ -973,7 +1009,7 @@ class DetailPaneTracksCursorTest(TuiFlowTestCase):
             # cursor.
             self.assertEqual(
                 str(event_view.content),
-                render_event_detail(second_component),
+                render_event_detail(second_component, NOW.date()),
             )
 
 

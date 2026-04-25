@@ -260,7 +260,8 @@ class MainScreen(Screen[None]):
     def _refresh_detail(self) -> None:
         component = self._currently_selected_component()
         view: EventView = self.query_one(EventView)
-        view.show(component)
+        today = self._services().now().date()
+        view.show(component, today=today)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         # Refresh the detail pane whenever the cursor moves in the
@@ -377,7 +378,8 @@ class MainScreen(Screen[None]):
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _open_specific(self, component: StoredComponent) -> None:
-        screen = EventDetailScreen(component, on_edit=self._edit_specific)
+        today = self._services().now().date()
+        screen = EventDetailScreen(component, today=today, on_edit=self._edit_specific)
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _run_sync(self) -> None:

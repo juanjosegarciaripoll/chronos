@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -20,10 +21,13 @@ class EventDetailScreen(Screen[None]):
     def __init__(
         self,
         component: StoredComponent,
+        *,
+        today: date,
         on_edit: Callable[[StoredComponent], None],
     ) -> None:
         super().__init__()
         self._component = component
+        self._today = today
         self._on_edit = on_edit
 
     def compose(self) -> ComposeResult:
@@ -34,7 +38,7 @@ class EventDetailScreen(Screen[None]):
 
     def on_mount(self) -> None:
         view: EventView = self.query_one(EventView)
-        view.show(self._component)
+        view.show(self._component, today=self._today)
 
     def action_close(self) -> None:
         self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
