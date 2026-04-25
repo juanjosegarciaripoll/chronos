@@ -370,6 +370,16 @@ class MainScreen(Screen[None]):
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _run_sync(self) -> None:
+        # v1 runs sync synchronously on the UI thread — the TUI is
+        # frozen for its duration. That is acceptable because sync is
+        # crash-safe: the lockfile (acquired inside `runner`) is
+        # released on any exception, mirror writes are temp-file +
+        # rename, and SQLite ingests are per-resource transactions.
+        # If the user hits Ctrl-C, KeyboardInterrupt propagates up
+        # and Textual exits — leaving a coherent on-disk state, but
+        # taking the TUI down with it. Running sync in a Textual
+        # worker so Ctrl-C only cancels the sync (not the app) is
+        # tracked in `ai/TASKS.md` followups.
         services = self._services()
         runner = services.sync_runner
         if runner is None:

@@ -42,6 +42,7 @@ import json
 import os
 import secrets
 import stat
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -420,8 +421,14 @@ def poll_for_tokens(
 
 
 def save_tokens(path: Path, tokens: StoredTokens) -> None:
-    """Atomic write of tokens to `path`. Sets 0600 perms on POSIX."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Atomic write of tokens to `path`. Sets 0600 perms on POSIX.
+
+    Same crash-safety contract as `storage.VdirMirrorRepository.write`:
+    bytes go into a freshly-named temp file in the target directory,
+    are fsync'd, then `os.replace`'d into place. On any exception
+    (including `KeyboardInterrupt`) the temp file is unlinked so the
+    next sync doesn't trip over half-written token data.
+    """
     payload = json.dumps(
         {
             "access_token": tokens.access_token,
@@ -430,10 +437,19 @@ def save_tokens(path: Path, tokens: StoredTokens) -> None:
             "scope": tokens.scope,
         },
         indent=2,
-    )
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name)
+        raise
     # Best-effort permission tightening on POSIX; chmod is a no-op on
     # Windows but harmless.
     with contextlib.suppress(OSError):

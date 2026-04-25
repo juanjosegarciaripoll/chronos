@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import tempfile
 import unittest
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from chronos.domain import (
     EnvCredential,
     LocalStatus,
     ResourceRef,
+    SyncResult,
     SyncState,
     VEvent,
 )
@@ -74,7 +76,7 @@ class SyncTestCase(unittest.TestCase):
         self.session.add_calendar(url=CALENDAR_URL, name=CALENDAR_NAME)
         self.calendar_ref = CalendarRef(ACCOUNT_NAME, CALENDAR_NAME)
 
-    def _run(self, *, account: AccountConfig | None = None) -> object:
+    def _run(self, *, account: AccountConfig | None = None) -> SyncResult:
         return sync_account(
             account=account or _account(),
             session=self.session,
@@ -581,3 +583,244 @@ class ResourceRefConstructionTest(unittest.TestCase):
     def test_basic_ref(self) -> None:
         ref = ResourceRef(ACCOUNT_NAME, CALENDAR_NAME, "x")
         self.assertEqual(ref.uid, "x")
+
+
+class CrashSafetyResumeTest(SyncTestCase):
+    """Interrupting sync mid-flight (Ctrl-C, network drop) must leave a
+    coherent on-disk state, and the next sync must converge to the
+    same end state as an uninterrupted run.
+
+    Load-bearing invariant under test: `_sync_calendar` only writes
+    the new CTag via `set_sync_state` *after* the slow/fast path
+    returns successfully. If anything raises before that, the prior
+    CTag stays in place, and the next sync re-enters the slow path.
+    """
+
+    def _seed(self, count: int) -> None:
+        for i in range(count):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}r{i}.ics",
+                ics=_ics_with_uid(f"r{i}@example.com"),
+                etag=f"etag-{i}",
+            )
+
+    def test_interrupt_during_multiget_preserves_prior_ctag(self) -> None:
+        self._seed(3)
+        # Inject an interrupt the first time multiget is called.
+        original_multiget = self.session.calendar_multiget
+        calls = {"n": 0}
+
+        def boom(
+            calendar_url: str, hrefs: Sequence[str]
+        ) -> Sequence[tuple[str, str, bytes]]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise KeyboardInterrupt
+            return original_multiget(calendar_url, hrefs)
+
+        self.session.calendar_multiget = boom  # type: ignore[method-assign]
+        with self.assertRaises(KeyboardInterrupt):
+            self._run()
+
+        # No CTag was written, so the next sync re-enters the slow path.
+        state = self.index.get_sync_state(self.calendar_ref)
+        self.assertIsNone(state)
+        # Nothing was ingested locally either — multiget raised before
+        # any resources came back.
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(rows, ())
+
+    def test_resumed_sync_converges_to_uninterrupted_end_state(self) -> None:
+        self._seed(5)
+        # Reference run: a clean session that does an uninterrupted
+        # sync. Capture the end state.
+        ref_index_path = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        ref_index = SqliteIndexRepository(ref_index_path / "index.sqlite3")
+        self.addCleanup(ref_index.close)
+        ref_mirror = VdirMirrorRepository(ref_index_path / "mirror")
+        ref_session = FakeCalDAVSession()
+        ref_session.add_calendar(url=CALENDAR_URL, name=CALENDAR_NAME)
+        for i in range(5):
+            ref_session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}r{i}.ics",
+                ics=_ics_with_uid(f"r{i}@example.com"),
+                etag=f"etag-{i}",
+            )
+        sync_account(
+            account=_account(),
+            session=ref_session,
+            mirror=ref_mirror,
+            index=ref_index,
+            now=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        )
+        ref_rows = ref_index.list_calendar_components(self.calendar_ref)
+        ref_uids = {r.ref.uid for r in ref_rows}
+        ref_state = ref_index.get_sync_state(self.calendar_ref)
+
+        # Fault-injected run: first sync raises KeyboardInterrupt
+        # mid-multiget; second sync runs normally and must reach the
+        # same uids + ctag as the reference.
+        original_multiget = self.session.calendar_multiget
+        calls = {"n": 0}
+
+        def flaky_multiget(
+            calendar_url: str, hrefs: Sequence[str]
+        ) -> Sequence[tuple[str, str, bytes]]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise KeyboardInterrupt
+            return original_multiget(calendar_url, hrefs)
+
+        self.session.calendar_multiget = flaky_multiget  # type: ignore[method-assign]
+        with self.assertRaises(KeyboardInterrupt):
+            self._run()
+        # Recover: subsequent multiget calls work; sync runs cleanly.
+        self._run()
+
+        observed_uids = {
+            r.ref.uid for r in self.index.list_calendar_components(self.calendar_ref)
+        }
+        observed_state = self.index.get_sync_state(self.calendar_ref)
+        self.assertEqual(observed_uids, ref_uids)
+        assert ref_state is not None and observed_state is not None
+        self.assertEqual(observed_state.ctag, ref_state.ctag)
+
+    def test_lost_put_response_recovers_via_412_reconciliation(self) -> None:
+        # Simulate "previous push succeeded server-side, response lost":
+        # the local row is still `href IS NULL` (we never recorded the
+        # etag), and the server already has a resource at the
+        # would-be target href with the same body. The next sync's
+        # PUT-with-If-None-Match-* must 412; the recovery path issues
+        # a multiget, sees the body matches by content hash, and
+        # adopts the server's (href, etag) so the row stops being
+        # pending.
+        local_ics = _ics_with_uid("lost-response@example.com")
+        ref = ComponentRef(
+            account_name=ACCOUNT_NAME,
+            calendar_name=CALENDAR_NAME,
+            uid="lost-response@example.com",
+        )
+        self.index.upsert_component(
+            VEvent(
+                ref=ref,
+                href=None,
+                etag=None,
+                raw_ics=local_ics,
+                summary="Local",
+                description=None,
+                location=None,
+                dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=None,
+            )
+        )
+        # Pre-seed the server at the exact href chronos would PUT to,
+        # with the same body. Mimics the lost-response state.
+        target_href = f"{CALENDAR_URL}lost-response%40example.com.ics"
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=target_href,
+            ics=local_ics,
+            etag="server-etag",
+        )
+
+        self._run()
+
+        row = self.index.get_component(ref)
+        assert row is not None
+        # Adopted server identity instead of looping on 412.
+        self.assertEqual(row.href, target_href)
+        self.assertEqual(row.etag, "server-etag")
+        self.assertEqual(self.index.list_pending_pushes(self.calendar_ref), ())
+
+    def test_412_with_diverged_remote_content_defers_to_next_sync(self) -> None:
+        # Same shape as the lost-response case, but the server's body
+        # differs from ours — a real conflict, not just a dropped
+        # response. We must not adopt a stale etag (which would mask
+        # the divergence on the next sync); leave the row pending and
+        # let the next slow-path sync surface the conflict.
+        local_ics = _ics_with_uid("conflict@example.com")
+        ref = ComponentRef(
+            account_name=ACCOUNT_NAME,
+            calendar_name=CALENDAR_NAME,
+            uid="conflict@example.com",
+        )
+        self.index.upsert_component(
+            VEvent(
+                ref=ref,
+                href=None,
+                etag=None,
+                raw_ics=local_ics,
+                summary="Local conflict",
+                description=None,
+                location=None,
+                dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=None,
+            )
+        )
+        target_href = f"{CALENDAR_URL}conflict%40example.com.ics"
+        # Server has *different* bytes at the same href.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=target_href,
+            ics=_ics_with_uid("conflict@example.com")
+            + b"X-DIVERGED:server-version\r\n",
+            etag="server-divergent-etag",
+        )
+
+        self._run()
+
+        # Row stays pending; we did NOT silently adopt a divergent etag.
+        row = self.index.get_component(ref)
+        assert row is not None
+        self.assertIsNone(row.href)
+        self.assertIsNone(row.etag)
+        self.assertEqual(len(self.index.list_pending_pushes(self.calendar_ref)), 1)
+
+    def test_interrupt_after_partial_ingest_keeps_committed_resources(self) -> None:
+        # Once a per-resource transaction commits, that resource is
+        # persistent — even if a later resource's ingest is interrupted.
+        # The partial cache plus the unchanged prior CTag together let
+        # the next sync re-fetch only what's missing (or, if the prior
+        # CTag is None, re-fetch everything; either way, idempotent).
+        self._seed(3)
+        # Inject the interrupt inside upsert_component on the *third*
+        # call so the first two resources commit first.
+        original_upsert = self.index.upsert_component
+        calls = {"n": 0}
+
+        from chronos.domain import StoredComponent
+
+        def flaky_upsert(component: StoredComponent) -> None:
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise KeyboardInterrupt
+            original_upsert(component)
+
+        self.index.upsert_component = flaky_upsert  # type: ignore[method-assign]
+        with self.assertRaises(KeyboardInterrupt):
+            self._run()
+        self.index.upsert_component = original_upsert  # type: ignore[method-assign]
+
+        # The first two resources committed in their own transactions.
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(len(rows), 2)
+        # CTag was not written; re-sync converges.
+        self.assertIsNone(self.index.get_sync_state(self.calendar_ref))
+        # Recovery sync brings the third resource in.
+        self._run()
+        rows_after = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(len(rows_after), 3)

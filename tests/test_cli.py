@@ -186,6 +186,81 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("session construction blew up", self.stderr.getvalue())
 
 
+class SyncLockReleaseTest(CliTestCase):
+    """The TUI runs sync synchronously on the UI thread. Any exception
+    raised during the sync (including a Ctrl-C that bubbles up as
+    KeyboardInterrupt) must release the sync lockfile so the next
+    `chronos sync` invocation isn't blocked. The persistence layers
+    (mirror temp-files, SQLite transactions, OAuth-token writes) are
+    each tested for atomicity in their own modules; this test pins
+    the additional lockfile-release guarantee at the cli boundary.
+    """
+
+    def _seed(self) -> None:
+        self.session.add_calendar(url="https://cal.example.com/work/", name="work")
+        self.session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+    def test_keyboard_interrupt_during_runner_releases_lock(self) -> None:
+        from chronos.authorization import Authorization
+
+        self._seed()
+        # Make discover_principal raise KeyboardInterrupt to simulate
+        # a Ctrl-C landing mid-flight.
+        flaky_session = FakeCalDAVSession()
+        flaky_session.add_calendar(url="https://cal.example.com/work/", name="work")
+
+        def boom() -> str:
+            raise KeyboardInterrupt
+
+        flaky_session.discover_principal = boom  # type: ignore[method-assign]
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return flaky_session
+
+        ctx = self._ctx(session_factory=factory)
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        lock_path = tmp / "sync.lock"
+
+        with mock.patch("chronos.cli.sync_lock_path", return_value=lock_path):
+            runner = cli.build_sync_runner(ctx)
+            with self.assertRaises(KeyboardInterrupt):
+                runner()
+
+            # Lock must be released — a fresh runner must be able to
+            # acquire it without blocking or raising SyncLockError.
+            ctx2 = self._ctx(session_factory=lambda *_: self.session)
+            self._seed()  # idempotent
+            runner2 = cli.build_sync_runner(ctx2)
+            results = runner2()
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].errors, ())
+
+    def test_concurrent_cmd_sync_invocations_rejected(self) -> None:
+        # Hold the lockfile via a separate `acquire_sync_lock` and
+        # verify `cmd_sync` exits non-zero with a "another chronos
+        # sync is already running" message.
+        from chronos.locking import acquire_sync_lock
+
+        self._seed()
+        ctx = self._ctx(session_factory=lambda *_: self.session)
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        lock_path = tmp / "sync.lock"
+
+        with (
+            mock.patch("chronos.cli.sync_lock_path", return_value=lock_path),
+            acquire_sync_lock(lock_path),
+        ):
+            exit_code = cli.cmd_sync(ctx)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("another chronos sync is already running", self.stderr.getvalue())
+
+
 class BuildSyncRunnerTest(CliTestCase):
     """`build_sync_runner` is the closure handed to the TUI's `_run_sync`.
 

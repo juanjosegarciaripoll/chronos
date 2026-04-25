@@ -296,3 +296,73 @@ class ConnectionContextManagerTest(unittest.TestCase):
             raise RuntimeError("boom")
         rows = self.repo.list_calendar_components(CalendarRef("personal", "work"))
         self.assertEqual(rows, ())
+
+    def test_keyboard_interrupt_inside_transaction_rolls_back(self) -> None:
+        # The connection() context manager catches BaseException, not
+        # just Exception, so a Ctrl-C mid-batch rolls back rather than
+        # leaving partial rows behind. This is the load-bearing
+        # invariant for resumable sync: ingest of one resource is
+        # all-or-nothing, and the next sync re-fetches what's missing.
+        with self.assertRaises(KeyboardInterrupt), self.repo.connection():
+            self.repo.upsert_component(
+                _event(_ref("partial@example.com"), href="/dav/p.ics", etag="v1")
+            )
+            raise KeyboardInterrupt
+        rows = self.repo.list_calendar_components(CalendarRef("personal", "work"))
+        self.assertEqual(rows, ())
+
+    def test_nested_connection_shares_transaction(self) -> None:
+        # `_ingest_resource` opens a transaction, then calls
+        # `upsert_component`, which itself uses connection(). The inner
+        # call must reuse the outer transaction; otherwise the inner's
+        # auto-commit would expose a half-built resource to readers
+        # before the outer is done.
+        with self.repo.connection():
+            self.repo.upsert_component(
+                _event(_ref("nested-a@example.com"), href="/dav/a.ics", etag="v1")
+            )
+            self.repo.upsert_component(
+                _event(_ref("nested-b@example.com"), href="/dav/b.ics", etag="v1")
+            )
+            # Mid-transaction read sees the rows because we're using
+            # the same connection that's mid-write.
+            mid = self.repo.list_calendar_components(CalendarRef("personal", "work"))
+            self.assertEqual(len(mid), 2)
+        # Post-commit read still sees them.
+        after = self.repo.list_calendar_components(CalendarRef("personal", "work"))
+        self.assertEqual(len(after), 2)
+
+    def test_outer_rolls_back_when_inner_raises_after_partial_writes(self) -> None:
+        # Ingest one resource successfully, start a second, blow up
+        # mid-second. Both must roll back together because they're
+        # in the same outer transaction.
+        with self.assertRaises(KeyboardInterrupt), self.repo.connection():
+            self.repo.upsert_component(
+                _event(_ref("outer-a@example.com"), href="/dav/a.ics", etag="v1")
+            )
+            self.repo.upsert_component(
+                _event(_ref("outer-b@example.com"), href="/dav/b.ics", etag="v1")
+            )
+            raise KeyboardInterrupt
+        rows = self.repo.list_calendar_components(CalendarRef("personal", "work"))
+        self.assertEqual(rows, ())
+
+    def test_resource_committed_independently_when_separate_transactions(self) -> None:
+        # `_fetch_and_ingest` calls `_ingest_resource` per fetched
+        # resource, each opening its own transaction. An interrupt
+        # between resources must preserve everything committed before
+        # it — that's what makes sync resumable.
+        # First resource: separate transaction.
+        with self.repo.connection():
+            self.repo.upsert_component(
+                _event(_ref("first@example.com"), href="/dav/1.ics", etag="v1")
+            )
+        # Second resource: blows up mid-transaction.
+        with self.assertRaises(KeyboardInterrupt), self.repo.connection():
+            self.repo.upsert_component(
+                _event(_ref("second@example.com"), href="/dav/2.ics", etag="v1")
+            )
+            raise KeyboardInterrupt
+        rows = self.repo.list_calendar_components(CalendarRef("personal", "work"))
+        # First survives, second rolled back.
+        self.assertEqual({r.ref.uid for r in rows}, {"first@example.com"})

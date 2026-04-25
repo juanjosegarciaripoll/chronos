@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from chronos.domain import ResourceRef
@@ -103,3 +105,106 @@ class MirrorConformanceTest(unittest.TestCase):
                 ref = _ref(f"{name}@example.com")
                 self.mirror.write(ref, data)
                 self.assertEqual(self.mirror.read(ref), data)
+
+
+class MirrorCrashSafetyTest(unittest.TestCase):
+    """The mirror must survive a crash (KeyboardInterrupt, kill -9) at
+    any point during a write: the previous file must be intact, and
+    no half-written `.ics` or stale `.tmp-*` file may be left behind
+    that would later be mistaken for real data.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.mirror = VdirMirrorRepository(self.root)
+
+    def _calendar_dir(self, calendar: str = CALENDAR) -> Path:
+        return self.root / ACCOUNT / calendar
+
+    def _leftovers(self, calendar: str = CALENDAR) -> list[str]:
+        return [
+            p.name
+            for p in self._calendar_dir(calendar).iterdir()
+            if p.name.startswith(".tmp-")
+        ]
+
+    def test_keyboard_interrupt_mid_write_preserves_prior_file(self) -> None:
+        # Set up a known-good file, then arrange for the next write
+        # to be interrupted mid-stream. The original file must remain
+        # readable and identical, with no temp file behind.
+        ref = _ref("interrupt@example.com")
+        self.mirror.write(ref, b"original")
+
+        original_replace = os.replace
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        with (
+            unittest.mock.patch("chronos.storage.os.replace", side_effect=boom),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.mirror.write(ref, b"new bytes that would have replaced original")
+
+        self.assertEqual(self.mirror.read(ref), b"original")
+        self.assertEqual(self._leftovers(), [])
+        # And the regular original_replace symbol still works on resume.
+        self.assertIs(os.replace, original_replace)
+
+    def test_first_write_failure_leaves_no_resource(self) -> None:
+        # If the very first write to a resource is interrupted, the
+        # resource must not exist (a partial file would be readable
+        # later and misinterpreted as legitimate content).
+        ref = _ref("never-saved@example.com")
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        with (
+            unittest.mock.patch("chronos.storage.os.replace", side_effect=boom),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.mirror.write(ref, b"some content")
+
+        self.assertFalse(self.mirror.exists(ref))
+        self.assertEqual(self._leftovers(), [])
+
+    def test_write_failure_before_replace_cleans_up_tmp(self) -> None:
+        # If the write fails before os.replace (e.g. disk full mid-fsync),
+        # the temp file must still be cleaned up so the directory
+        # doesn't accumulate orphaned `.tmp-*` files across many
+        # failed runs. fsync is inside the same try/finally as
+        # os.replace, so patching it exercises the cleanup path.
+        ref = _ref("disk-full@example.com")
+        self.mirror.write(ref, b"original")
+
+        with (
+            unittest.mock.patch(
+                "chronos.storage.os.fsync", side_effect=OSError("disk full")
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.mirror.write(ref, b"new content")
+
+        # Original file unchanged.
+        self.assertEqual(self.mirror.read(ref), b"original")
+        # No temp leftovers.
+        self.assertEqual(self._leftovers(), [])
+
+    def test_list_resources_ignores_stale_tmp_files(self) -> None:
+        # Even if a previous chronos run died so abruptly that the
+        # exception cleanup didn't get a chance to run (kill -9, OOM),
+        # `list_resources` must not surface the orphaned `.tmp-*`
+        # file as a real resource. The next sync's `_apply_server_deletions`
+        # walks `list_resources`; a stale tmp would be treated as a
+        # missing-from-server resource and trip the mass-deletion guard.
+        good_ref = _ref("real@example.com")
+        self.mirror.write(good_ref, b"real")
+        # Drop a fake leftover tmp by hand — what `kill -9` mid-write
+        # would leave behind.
+        cal_dir = self._calendar_dir()
+        leftover = cal_dir / ".tmp-deadbeef.ics"
+        leftover.write_bytes(b"half written garbage")
+
+        listed = self.mirror.list_resources(ACCOUNT, CALENDAR)
+        self.assertEqual({r.uid for r in listed}, {"real@example.com"})

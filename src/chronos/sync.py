@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import urllib.parse
 from collections.abc import Sequence
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from chronos.caldav_client import CalDAVError
+from chronos.caldav_client import CalDAVConflictError, CalDAVError
 from chronos.domain import (
     AccountConfig,
     CalendarConfig,
@@ -155,6 +156,19 @@ def _sync_calendar(
     index: IndexRepository,
     now: datetime,
 ) -> CalendarSyncStats:
+    """Reconcile one calendar.
+
+    **Resumability invariant** (load-bearing): `set_sync_state` is the
+    *last* index write before a successful return, gated on
+    `_slow_path_reconcile` / `_fast_path_reconcile` having returned
+    without raising. If anything raises mid-sync (KeyboardInterrupt,
+    network error, server 5xx), the prior CTag stays in place — so
+    the next sync re-enters the slow path and reconverges. Anything
+    already ingested before the interrupt is preserved (each
+    `_ingest_resource` is its own SQLite transaction); whatever was
+    in flight is rolled back. Do not move `set_sync_state` earlier
+    or wrap it in the same transaction as the per-resource ingests.
+    """
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     prior_state = index.get_sync_state(calendar_ref)
     server_ctag = session.get_ctag(calendar.url)
@@ -631,6 +645,39 @@ def _push_pending(
         target_href = _compute_href(calendar.url, uid)
         try:
             new_etag = session.put(target_href, master.raw_ics, etag=None)
+        except CalDAVConflictError:
+            # 412 from `If-None-Match: *` means the resource already
+            # exists at `target_href`. The most common cause is that
+            # an earlier push succeeded server-side but its response
+            # was lost (network drop, Ctrl-C between request and
+            # response). Reconcile rather than burning every future
+            # sync on a 412 retry loop.
+            adopted = _adopt_existing_remote(
+                session=session,
+                calendar=calendar,
+                target_href=target_href,
+                local_ics=master.raw_ics,
+            )
+            if adopted is None:
+                # Server has a *different* body at this UID, or we
+                # can't read the resource for some reason. The next
+                # slow-path sync will pull the remote version and
+                # surface the conflict; don't overwrite blindly.
+                logger.warning(
+                    "push: %s/%s uid=%s already exists remotely with "
+                    "different content; deferring to next slow sync",
+                    account.name,
+                    calendar.calendar_name,
+                    uid,
+                )
+                continue
+            target_href, new_etag = adopted
+            logger.info(
+                "push: %s/%s uid=%s adopted server etag (lost-response recovery)",
+                account.name,
+                calendar.calendar_name,
+                uid,
+            )
         except Exception:  # noqa: BLE001 — treat any PUT failure as retry next sync
             continue
         with index.connection():
@@ -641,6 +688,30 @@ def _push_pending(
                 index.upsert_component(updated)
         pushed += 1
     return pushed
+
+
+def _adopt_existing_remote(
+    *,
+    session: CalDAVSession,
+    calendar: CalendarConfig,
+    target_href: str,
+    local_ics: bytes,
+) -> tuple[str, str] | None:
+    """Look up the resource at `target_href`; adopt its (href, etag)
+    if its body matches `local_ics` byte-for-byte. Otherwise return
+    None so the caller can defer to the next slow-path sync.
+    """
+    try:
+        fetched = session.calendar_multiget(calendar.url, [target_href])
+    except CalDAVError:
+        return None
+    if not fetched:
+        return None
+    local_hash = hashlib.sha256(local_ics).hexdigest()
+    for href, etag, body in fetched:
+        if hashlib.sha256(body).hexdigest() == local_hash:
+            return href, etag
+    return None
 
 
 def _with_server_metadata(

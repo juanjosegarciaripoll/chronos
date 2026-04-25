@@ -5,6 +5,7 @@ import tempfile
 import textwrap
 import tomllib
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from chronos.config import ConfigError, dump, load, parse, save
@@ -545,5 +546,23 @@ class SaveRoundTripTest(unittest.TestCase):
     def test_save_is_atomic_no_tempfile_leftovers(self) -> None:
         path = self.tmp / "config.toml"
         save(_sample_config(), path)
+        leftovers = [p for p in self.tmp.iterdir() if p.name.startswith(".tmp-")]
+        self.assertEqual(leftovers, [])
+
+    def test_save_keyboard_interrupt_preserves_prior_file(self) -> None:
+        # Mid-save Ctrl-C must leave the previous config intact and
+        # not strand a `.tmp-*` file. Otherwise the user's next
+        # `chronos sync` could find no config or a half-written one.
+        path = self.tmp / "config.toml"
+        save(_sample_config(name="original-account"), path)
+        original_bytes = path.read_bytes()
+        with (
+            unittest.mock.patch(
+                "chronos.config.os.replace", side_effect=KeyboardInterrupt
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            save(_sample_config(name="overwriting-account"), path)
+        self.assertEqual(path.read_bytes(), original_bytes)
         leftovers = [p for p in self.tmp.iterdir() if p.name.startswith(".tmp-")]
         self.assertEqual(leftovers, [])

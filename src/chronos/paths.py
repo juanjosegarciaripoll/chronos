@@ -101,6 +101,15 @@ def oauth_token_path(account_name: str) -> Path:
     return oauth_token_dir() / f"{account_name}.json"
 
 
+def sync_lock_path() -> Path:
+    """Path to the lockfile that gates concurrent `chronos sync` runs.
+
+    Lives in the user data dir alongside the index and mirror so it
+    shares their lifecycle (kept across reboots, scoped per-user).
+    """
+    return user_data_dir() / "sync.lock"
+
+
 def bundled_docs_path() -> Path | None:
     if not getattr(sys, "frozen", False):
         return None

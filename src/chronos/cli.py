@@ -49,6 +49,7 @@ from chronos.domain import (
     VTodo,
 )
 from chronos.index_store import SqliteIndexRepository
+from chronos.locking import SyncLockError, acquire_sync_lock
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.oauth import (
     OAuthError,
@@ -61,6 +62,7 @@ from chronos.paths import (
     default_index_path,
     default_mirror_path,
     oauth_token_path,
+    sync_lock_path,
     user_data_dir,
 )
 from chronos.protocols import (
@@ -586,6 +588,15 @@ def _dispatch_oauth(
 
 
 def cmd_sync(ctx: CliContext) -> int:
+    try:
+        with acquire_sync_lock(sync_lock_path()):
+            return _cmd_sync_locked(ctx)
+    except SyncLockError as exc:
+        ctx.stderr.write(f"{exc}\n")
+        return 2
+
+
+def _cmd_sync_locked(ctx: CliContext) -> int:
     factory = ctx.session_factory or _default_session_factory
     fails = 0
     for account in ctx.config.accounts:
@@ -837,6 +848,15 @@ def build_sync_runner(ctx: CliContext) -> Callable[[], Sequence[SyncResult]]:
     factory = ctx.session_factory or _default_session_factory
 
     def run() -> Sequence[SyncResult]:
+        try:
+            with acquire_sync_lock(sync_lock_path()):
+                return _run_locked()
+        except SyncLockError as exc:
+            # Surface the lock contention as a SyncResult so the TUI's
+            # banner shows the message instead of crashing the worker.
+            return (_failure_result("(sync)", str(exc)),)
+
+    def _run_locked() -> Sequence[SyncResult]:
         results: list[SyncResult] = []
         for account in ctx.config.accounts:
             try:

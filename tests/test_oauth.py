@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -263,6 +264,57 @@ class TokenStoreTest(unittest.TestCase):
                 "scope": "s",
             },
         )
+
+    def test_save_is_crash_safe_no_tmp_leftover(self) -> None:
+        # Successful save must not leave a `.tmp-*` file behind.
+        path = self.tmp / "tokens.json"
+        save_tokens(
+            path,
+            StoredTokens(
+                access_token="a",
+                refresh_token="r",
+                expiry_unix=1.5,
+                scope="s",
+            ),
+        )
+        leftovers = [p.name for p in self.tmp.iterdir() if p.name.startswith(".tmp-")]
+        self.assertEqual(leftovers, [])
+
+    def test_save_keyboard_interrupt_preserves_prior_file(self) -> None:
+        # If a Ctrl-C lands inside save_tokens, the prior token file
+        # must remain readable and complete; otherwise the next sync
+        # would fail to load tokens and force re-auth.
+        path = self.tmp / "tokens.json"
+        save_tokens(
+            path,
+            StoredTokens(
+                access_token="original",
+                refresh_token="original-rt",
+                expiry_unix=1.0,
+                scope="x",
+            ),
+        )
+        with (
+            unittest.mock.patch(
+                "chronos.oauth.os.replace", side_effect=KeyboardInterrupt
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            save_tokens(
+                path,
+                StoredTokens(
+                    access_token="overwriting",
+                    refresh_token="overwriting-rt",
+                    expiry_unix=2.0,
+                    scope="x",
+                ),
+            )
+        # Prior file untouched.
+        loaded = load_tokens(path)
+        self.assertEqual(loaded.access_token, "original")
+        # No leftover tmp.
+        leftovers = [p.name for p in self.tmp.iterdir() if p.name.startswith(".tmp-")]
+        self.assertEqual(leftovers, [])
 
 
 class BearerTokenAuthTest(unittest.TestCase):
@@ -573,3 +625,48 @@ class LoopbackFlowTest(unittest.TestCase):
                 timeout_seconds=1,
             )
         self.assertIn("timed out", str(ctx.exception))
+
+    def test_keyboard_interrupt_releases_listening_port(self) -> None:
+        # Bind a real HTTPServer on 127.0.0.1:0, then raise
+        # KeyboardInterrupt out of `open_browser`. The `try/finally`
+        # in `run_loopback_flow` must call `server_close()` so the
+        # ephemeral port is released — otherwise the next OAuth
+        # attempt could fail to bind, or the OS keeps the port
+        # tied to a dead process.
+        import http.server as _http_server
+        import socket
+
+        captured: dict[str, _http_server.HTTPServer] = {}
+
+        def factory(
+            address: tuple[str, int],
+            handler_cls: type[_http_server.BaseHTTPRequestHandler],
+        ) -> _http_server.HTTPServer:
+            srv = _http_server.HTTPServer(address, handler_cls)
+            captured["server"] = srv
+            return srv
+
+        def boom(_url: str) -> bool:
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_loopback_flow(
+                client_id="c",
+                client_secret="s",
+                scope="x",
+                open_browser=boom,
+                server_factory=factory,
+                timeout_seconds=1,
+            )
+
+        # The listening socket must be closed: a fresh bind on the
+        # same port either succeeds (Linux/macOS, where SO_REUSEADDR
+        # lets the next bind grab a freed port immediately) or
+        # raises a clean OSError that doesn't mention the original
+        # process. Either way, server.fileno() is -1 once closed.
+        srv = captured["server"]
+        self.assertEqual(srv.socket.fileno(), -1)
+        # Sanity: another HTTPServer can bind to a fresh ephemeral
+        # port without colliding with the leftover state.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
