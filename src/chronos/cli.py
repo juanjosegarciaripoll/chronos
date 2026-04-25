@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import TextIO
 
 from chronos.authorization import Authorization
+from chronos.bootstrap import (
+    IsInteractiveFn,
+    PromptFn,
+    default_is_interactive,
+    default_prompt,
+    offer_bootstrap,
+    write_template,
+)
 from chronos.caldav_client import CalDAVError, CalDAVHttpSession
 from chronos.config import ConfigError
 from chronos.config import load as load_config
@@ -82,6 +90,8 @@ def main(
     *,
     context_factory: ContextFactory | None = None,
     open_editor: EditorFn | None = None,
+    prompt: PromptFn | None = None,
+    is_interactive: IsInteractiveFn | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -104,6 +114,20 @@ def main(
     if args.command == "oauth":
         return _dispatch_oauth(args, out, err, config_path=config_path)
 
+    # Data commands need a config. If none exists, offer to bootstrap one
+    # interactively; otherwise print a helpful message and exit. Tests
+    # that inject a `context_factory` bring their own config and bypass
+    # this check.
+    if context_factory is None and not config_path.exists():
+        return _handle_missing_config(
+            out,
+            err,
+            config_path=config_path,
+            prompt=prompt,
+            open_editor=open_editor,
+            is_interactive=is_interactive,
+        )
+
     # Data commands need a full context.
     owns_context = context_factory is None
     factory = context_factory or _default_context_factory
@@ -117,6 +141,32 @@ def main(
     finally:
         if owns_context:
             ctx.index.close()
+
+
+def _handle_missing_config(
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    config_path: Path,
+    prompt: PromptFn | None,
+    open_editor: EditorFn | None,
+    is_interactive: IsInteractiveFn | None,
+) -> int:
+    interactive = (is_interactive or default_is_interactive)()
+    if not interactive:
+        stderr.write(
+            f"config not found: {config_path}\n"
+            f"Run `chronos init` to create one, then "
+            f"`chronos account add ...` to configure an account.\n"
+        )
+        return 2
+    return offer_bootstrap(
+        stdout,
+        stderr,
+        config_path=config_path,
+        prompt=prompt or default_prompt,
+        open_editor=open_editor or _default_open_editor,
+    )
 
 
 def _default_context_factory(config_path: Path | None) -> CliContext:
@@ -639,14 +689,11 @@ def cmd_init(stdout: TextIO, stderr: TextIO, *, config_path: Path) -> int:
             "Use `chronos config edit` to modify it.\n"
         )
         return 1
-    minimal = AppConfig(
-        config_version=1,
-        use_utf8=False,
-        editor=None,
-        accounts=(),
+    write_template(config_path)
+    stdout.write(
+        f"Wrote template to {config_path}\n"
+        "Edit it directly, or run `chronos account add ...` to populate.\n"
     )
-    save_config(minimal, config_path)
-    stdout.write(f"Wrote {config_path}\n")
     return 0
 
 

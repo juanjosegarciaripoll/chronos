@@ -541,20 +541,17 @@ class DoctorCommandTest(CliTestCase):
 
 
 class ConfigLoadErrorTest(unittest.TestCase):
-    def test_missing_config_exits_two(self) -> None:
+    def test_missing_config_in_non_interactive_exits_two(self) -> None:
         stderr = io.StringIO()
-        import sys
-
-        original = sys.stderr
-        sys.stderr = stderr
-        try:
-            code = cli.main(
-                ["--config", "/nowhere/does/not/exist.toml", "doctor"],
-            )
-        finally:
-            sys.stderr = original
+        stdout = io.StringIO()
+        code = cli.main(
+            ["--config", "/nowhere/does/not/exist.toml", "doctor"],
+            is_interactive=lambda: False,
+            stdout=stdout,
+            stderr=stderr,
+        )
         self.assertEqual(code, 2)
-        self.assertIn("config error", stderr.getvalue())
+        self.assertIn("config not found", stderr.getvalue())
 
 
 class ConfigEditingCliTestCase(unittest.TestCase):
@@ -585,23 +582,101 @@ class ConfigEditingCliTestCase(unittest.TestCase):
 
 
 class InitCommandTest(ConfigEditingCliTestCase):
-    def test_init_writes_minimal_config(self) -> None:
+    def test_init_writes_template(self) -> None:
         code = self._run(["init"])
         self.assertEqual(code, 0)
         self.assertTrue(self.config_path.exists())
-        self.assertIn("Wrote", self.stdout.getvalue())
-        # File is loadable.
+        self.assertIn("Wrote template", self.stdout.getvalue())
+        # The template parses to zero accounts (every example is commented).
         from chronos.config import load
 
         config = load(self.config_path)
         self.assertEqual(config.config_version, 1)
         self.assertEqual(config.accounts, ())
+        # And it carries the inline help so a curious user sees it.
+        body = self.config_path.read_text(encoding="utf-8")
+        self.assertIn("# # Basic auth", body)
+        self.assertIn("# # OAuth 2.0 device flow", body)
 
     def test_init_refuses_when_file_exists(self) -> None:
         self.config_path.write_text("config_version = 1\n", encoding="utf-8")
         code = self._run(["init"])
         self.assertEqual(code, 1)
         self.assertIn("already exists", self.stderr.getvalue())
+
+
+class FirstLaunchBootstrapTest(unittest.TestCase):
+    """Running a data command without a config offers to bootstrap one.
+
+    In a non-TTY environment we exit with a helpful message instead.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config_path = self.tmp / "config.toml"
+        self.stdout = io.StringIO()
+        self.stderr = io.StringIO()
+
+    def _scripted_prompt(self, answers: list[str]) -> Any:
+        iterator = iter(answers)
+
+        def prompt(_message: str) -> str:
+            return next(iterator)
+
+        return prompt
+
+    def test_non_interactive_prints_help_and_exits_2(self) -> None:
+        code = cli.main(
+            ["--config", str(self.config_path), "sync"],
+            is_interactive=lambda: False,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("config not found", self.stderr.getvalue())
+        self.assertIn("chronos init", self.stderr.getvalue())
+        self.assertFalse(self.config_path.exists())
+
+    def test_interactive_user_creates_template_and_skips_editor(self) -> None:
+        edits: list[Path] = []
+
+        code = cli.main(
+            ["--config", str(self.config_path), "tui"],
+            is_interactive=lambda: True,
+            prompt=self._scripted_prompt(["y", "n"]),  # create yes, edit no
+            open_editor=lambda p: edits.append(p),
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(self.config_path.exists())
+        self.assertEqual(edits, [])
+        self.assertIn("Wrote template", self.stdout.getvalue())
+
+    def test_interactive_user_declines(self) -> None:
+        code = cli.main(
+            ["--config", str(self.config_path), "list"],
+            is_interactive=lambda: True,
+            prompt=self._scripted_prompt(["n"]),
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(self.config_path.exists())
+        self.assertIn("Skipped", self.stdout.getvalue())
+
+    def test_init_command_works_without_prompt_in_missing_config_path(self) -> None:
+        # `chronos init` itself is a config-editing command, so the
+        # missing-config bootstrap flow MUST NOT trigger for it — that
+        # would prompt to create a template before letting init create
+        # one, which is silly. Verify by passing no prompt at all.
+        code = cli.main(
+            ["--config", str(self.config_path), "init"],
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(self.config_path.exists())
 
 
 class AccountAddCommandTest(ConfigEditingCliTestCase):
