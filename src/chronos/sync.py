@@ -3,11 +3,13 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
+import queue
+import threading
 import urllib.parse
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, cast
 
 from chronos.caldav_client import CalDAVConflictError, CalDAVError
 from chronos.domain import (
@@ -420,6 +422,27 @@ def _apply_server_deletions(
 
 _INGEST_PROGRESS_INTERVAL = 50
 
+# How many hrefs go into one `calendar-multiget` REPORT. Mirrors
+# `caldav_client._MULTIGET_BATCH_SIZE` deliberately: the session
+# already chunks internally, but the producer thread here pre-chunks
+# so it can hand each chunk to the consumer as soon as the network
+# returns rather than buffering the entire response set.
+_FETCH_CHUNK_SIZE = 100
+
+# Bound on the producer/consumer queue: at most this many fetched
+# chunks sit between the network worker and the ingest loop. With
+# `_FETCH_CHUNK_SIZE = 100` that's ~200 in-flight resources at peak;
+# enough to keep the consumer busy across one network round-trip,
+# small enough that a stalled consumer doesn't pile up megabytes of
+# ICS in memory.
+_FETCH_PIPELINE_BUFFER = 2
+
+
+# Sentinel returned to the consumer when the producer finishes
+# successfully. Anything else off the queue is either an exception
+# (re-raise on the consumer thread) or a chunk of fetched results.
+_PRODUCER_DONE = object()
+
 
 def _fetch_and_ingest(
     *,
@@ -432,40 +455,151 @@ def _fetch_and_ingest(
     now: datetime,
     errors: list[str],
 ) -> int:
+    """Stream chunks of `calendar-multiget` results into the local index.
+
+    Pipelined: a daemon producer thread issues `calendar_multiget` per
+    chunk and posts the results onto a bounded queue; the calling
+    (consumer) thread drains the queue and runs `_ingest_resource`,
+    which parses, writes the mirror file, and upserts SQLite rows.
+
+    SQLite writes stay on the consumer thread (the only writer), so
+    the existing `index.connection()` transactions and the per-
+    resource atomicity guarantees from the crash-safety milestone
+    carry over verbatim. The producer touches only the network
+    session, which is single-threaded by virtue of being driven by
+    one thread.
+
+    Cancellation: if the consumer raises (KeyboardInterrupt, ingest
+    bug, etc.) the `finally` block flips `cancel` and joins the
+    producer. The producer checks `cancel` between chunks and on
+    queue puts, so it returns within one outstanding network call.
+    Producer-side exceptions are funnelled through the queue and
+    re-raised on the consumer thread, preserving the previous
+    "exception in multiget aborts the calendar's sync" semantics.
+    """
     if not hrefs:
         return 0
-    fetched = session.calendar_multiget(calendar.url, list(hrefs))
-    total = len(fetched)
-    # Per-resource ingest is parse_vcalendar + mirror write + SQLite
-    # upsert(s); for ~5k events that's tens of seconds with no
-    # network in between. Log a heartbeat every
-    # `_INGEST_PROGRESS_INTERVAL` resources so big calendars don't
-    # look stuck after the multiget batches finish.
+
+    chunks = _chunk_hrefs(hrefs, _FETCH_CHUNK_SIZE)
+    total = len(hrefs)
+    total_chunks = len(chunks)
+
+    if total_chunks > 1:
+        logger.info(
+            "fetching %d resources from %s (%d batches of up to %d)",
+            total,
+            calendar.url,
+            total_chunks,
+            _FETCH_CHUNK_SIZE,
+        )
     if total >= _INGEST_PROGRESS_INTERVAL:
         logger.info("  ingesting %d resources locally...", total)
-    count = 0
-    for processed, (href, etag, ics) in enumerate(fetched, start=1):
+
+    chunk_queue: queue.Queue[object] = queue.Queue(maxsize=_FETCH_PIPELINE_BUFFER)
+    cancel = threading.Event()
+
+    def producer() -> None:
+        fetched_so_far = 0
         try:
-            count += _ingest_resource(
-                account=account,
-                calendar=calendar,
-                href=href,
-                etag=etag,
-                ics=ics,
-                mirror=mirror,
-                index=index,
-                now=now,
-            )
-        except IcalParseError as exc:
-            errors.append(f"{href}: {exc}")
-        if (
-            total >= _INGEST_PROGRESS_INTERVAL
-            and processed % _INGEST_PROGRESS_INTERVAL == 0
-        ):
-            logger.info("  ingest: %d/%d", processed, total)
-    if total >= _INGEST_PROGRESS_INTERVAL and total % _INGEST_PROGRESS_INTERVAL:
-        logger.info("  ingest: %d/%d", total, total)
+            for batch_index, chunk in enumerate(chunks, start=1):
+                if cancel.is_set():
+                    return
+                results = session.calendar_multiget(calendar.url, list(chunk))
+                fetched_so_far += len(chunk)
+                if total_chunks > 1:
+                    logger.info(
+                        "  fetch batch %d/%d: %d/%d resources fetched",
+                        batch_index,
+                        total_chunks,
+                        fetched_so_far,
+                        total,
+                    )
+                if not _put_or_cancel(chunk_queue, results, cancel):
+                    return
+        except BaseException as exc:  # noqa: BLE001 — funnel to consumer
+            _put_or_cancel(chunk_queue, exc, cancel)
+            return
+        _put_or_cancel(chunk_queue, _PRODUCER_DONE, cancel)
+
+    producer_thread = threading.Thread(
+        target=producer, name="chronos-multiget-producer", daemon=True
+    )
+    producer_thread.start()
+
+    count = 0
+    processed = 0
+    try:
+        while True:
+            item = chunk_queue.get()
+            if item is _PRODUCER_DONE:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            chunk_results = cast(Sequence[tuple[str, str, bytes]], item)
+            for href, etag, ics in chunk_results:
+                processed += 1
+                try:
+                    count += _ingest_resource(
+                        account=account,
+                        calendar=calendar,
+                        href=href,
+                        etag=etag,
+                        ics=ics,
+                        mirror=mirror,
+                        index=index,
+                        now=now,
+                    )
+                except IcalParseError as exc:
+                    errors.append(f"{href}: {exc}")
+                if (
+                    total >= _INGEST_PROGRESS_INTERVAL
+                    and processed % _INGEST_PROGRESS_INTERVAL == 0
+                ):
+                    logger.info("  ingest: %d/%d", processed, total)
+    finally:
+        cancel.set()
+        # Drain the queue so a producer blocked on `put` can see the
+        # cancel flag and exit promptly. We don't care about the items
+        # we drop — they'd have been ingested otherwise, but we're
+        # already on an error path or exiting cleanly.
+        while True:
+            try:
+                chunk_queue.get_nowait()
+            except queue.Empty:
+                break
+        producer_thread.join()
+
+    if (
+        total >= _INGEST_PROGRESS_INTERVAL
+        and processed
+        and processed % _INGEST_PROGRESS_INTERVAL
+    ):
+        logger.info("  ingest: %d/%d", processed, total)
     return count
+
+
+def _chunk_hrefs(hrefs: Sequence[str], size: int) -> list[Sequence[str]]:
+    return [hrefs[i : i + size] for i in range(0, len(hrefs), size)]
+
+
+def _put_or_cancel(
+    chunk_queue: queue.Queue[object], item: object, cancel: threading.Event
+) -> bool:
+    """Block-put `item` onto `chunk_queue`, returning early if cancelled.
+
+    `queue.Queue.put` blocks indefinitely when the queue is full; that
+    would wedge the producer if the consumer raised and stopped
+    draining. Polling with a short timeout lets the producer notice
+    cancellation between attempts.
+    """
+    while True:
+        if cancel.is_set():
+            return False
+        try:
+            chunk_queue.put(item, timeout=0.1)
+            return True
+        except queue.Full:
+            continue
 
 
 def _ingest_resource(

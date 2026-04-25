@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 import tempfile
+import threading
 import unittest
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from chronos.domain import (
     AccountConfig,
@@ -824,3 +826,126 @@ class CrashSafetyResumeTest(SyncTestCase):
         self._run()
         rows_after = self.index.list_calendar_components(self.calendar_ref)
         self.assertEqual(len(rows_after), 3)
+
+
+class FetchIngestPipelineTest(SyncTestCase):
+    """`_fetch_and_ingest` runs the network fetch on a producer thread
+    and the parse + mirror-write + index-upsert on the main (consumer)
+    thread, drained through a bounded queue. The tests below pin that
+    behaviour: pipelining actually happens (deterministic, not a
+    timing assertion), producer-side exceptions surface on the
+    consumer, and multi-chunk fetches stay correct.
+    """
+
+    def _seed(self, count: int) -> None:
+        for i in range(count):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}r{i:04d}.ics",
+                ics=_ics_with_uid(f"r{i}@example.com"),
+                etag=f"etag-{i}",
+            )
+
+    def test_producer_advances_during_consumer_ingest(self) -> None:
+        # 150 resources with `_FETCH_CHUNK_SIZE = 100` is two chunks.
+        # The blocking-event handshake below deadlocks (and times out)
+        # if the network fetch is stuck behind ingest — i.e. if the
+        # second `calendar_multiget` only fires after the first chunk
+        # has been fully drained. Pipelining lets the producer make
+        # call 2 while the consumer is still on the first ingest.
+        self._seed(150)
+
+        original_multiget = self.session.calendar_multiget
+        call_count = 0
+        producer_made_second_call = threading.Event()
+
+        def instrumented_multiget(
+            calendar_url: str, hrefs: Sequence[str]
+        ) -> Sequence[tuple[str, str, bytes]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                producer_made_second_call.set()
+            return original_multiget(calendar_url, hrefs)
+
+        self.session.calendar_multiget = instrumented_multiget  # type: ignore[method-assign]
+
+        from chronos import sync as sync_module
+
+        original_ingest = sync_module._ingest_resource
+        first_ingest_called = threading.Event()
+
+        def gated_ingest(**kwargs: object) -> int:
+            if not first_ingest_called.is_set():
+                first_ingest_called.set()
+                # Refuse to return until the producer has independently
+                # dispatched its second multiget. With pipelining the
+                # event flips well within the timeout; without it the
+                # event never flips and we deadlock here.
+                if not producer_made_second_call.wait(timeout=5.0):
+                    raise AssertionError(
+                        "producer never made a second multiget call: "
+                        "fetch + ingest are running serially"
+                    )
+            return original_ingest(**kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(
+            sync_module, "_ingest_resource", side_effect=gated_ingest
+        ):
+            result = self._run()
+
+        self.assertEqual(result.components_added, 150)
+        self.assertEqual(call_count, 2)
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(len(rows), 150)
+
+    def test_producer_exception_propagates_to_caller(self) -> None:
+        # A non-interrupt exception raised inside a producer-thread
+        # `calendar_multiget` call must surface on the calling thread
+        # as the same exception type, not get swallowed in the worker.
+        self._seed(3)
+
+        from chronos.caldav_client import CalDAVError
+
+        def boom(
+            calendar_url: str, hrefs: Sequence[str]
+        ) -> Sequence[tuple[str, str, bytes]]:
+            del calendar_url, hrefs
+            raise CalDAVError("upstream 503")
+
+        self.session.calendar_multiget = boom  # type: ignore[method-assign]
+
+        # CalDAVError gets caught at the per-calendar level in
+        # sync_account and recorded as an error string, not raised —
+        # so the propagation we care about is "the producer's
+        # exception reaches `_fetch_and_ingest`'s caller, which
+        # bubbles to `_slow_path_reconcile`, which bubbles to the
+        # outer try/except in `sync_account`".
+        result = self._run()
+
+        self.assertEqual(result.components_added, 0)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("upstream 503", result.errors[0])
+        # No state written, so the next sync re-enters the slow path.
+        self.assertIsNone(self.index.get_sync_state(self.calendar_ref))
+
+    def test_multi_chunk_fetch_ingests_every_resource(self) -> None:
+        # Smoke test that the chunk → queue → drain loop reassembles
+        # results across multiple chunks without dropping or
+        # duplicating any.
+        self._seed(250)
+        result = self._run()
+        self.assertEqual(result.components_added, 250)
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(len(rows), 250)
+
+    def test_producer_thread_does_not_outlive_sync(self) -> None:
+        # Verifies `_fetch_and_ingest`'s `finally` actually joins the
+        # producer thread — a daemon thread that lingers across syncs
+        # would leak file descriptors and confuse later tests.
+        self._seed(150)
+        before = {t.name for t in threading.enumerate()}
+        self._run()
+        after = {t.name for t in threading.enumerate()}
+        leaked = {n for n in after - before if n.startswith("chronos-multiget-")}
+        self.assertEqual(leaked, set())
