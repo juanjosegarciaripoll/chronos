@@ -60,8 +60,8 @@ use_utf8 = false
 
 # # Google Calendar via OAuth 2.0. Only the client_id/client_secret from
 # # your Google Cloud project are required; the CalDAV URL, username, and
-# # OAuth scope are filled in by chronos. After saving, run:
-# #   chronos oauth authorize --account google
+# # OAuth scope are filled in by chronos. The first `chronos sync` will
+# # walk you through the device flow and store the tokens.
 # [[accounts]]
 # name = "google"
 # [accounts.credential]

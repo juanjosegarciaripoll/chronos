@@ -1253,6 +1253,71 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
         self.assertTrue((self.tmp / "g-tokens.json").exists())
 
 
+class CliAuthorizerTest(unittest.TestCase):
+    """`_default_cli_authorizer` runs the OAuth device flow over sys.stdout
+    when interactive, and surfaces a clean error otherwise."""
+
+    def test_raises_when_no_tty(self) -> None:
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import OAuthError
+
+        spec = OAuthCredential(client_id="c", client_secret="s", scope="x")
+        with (
+            mock.patch("chronos.cli.sys.stdin") as stdin,
+            mock.patch("chronos.cli.sys.stdout") as stdout,
+        ):
+            stdin.isatty.return_value = False
+            stdout.isatty.return_value = False
+            with self.assertRaises(OAuthError) as ctx:
+                cli._default_cli_authorizer(  # pyright: ignore[reportPrivateUsage]
+                    "google", spec, Path("/unused")
+                )
+        self.assertIn("TTY", str(ctx.exception))
+
+    def test_delegates_to_default_device_flow_when_interactive(self) -> None:
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import StoredTokens
+
+        spec = OAuthCredential(client_id="c", client_secret="s", scope="x")
+        tokens = StoredTokens(
+            access_token="at", refresh_token="rt", expiry_unix=1.0, scope="x"
+        )
+        flow = mock.MagicMock(return_value=tokens)
+        with (
+            mock.patch("chronos.cli.sys.stdin") as stdin,
+            mock.patch("chronos.cli.sys.stdout") as stdout,
+            mock.patch("chronos.cli._default_device_flow", flow),
+        ):
+            stdin.isatty.return_value = True
+            stdout.isatty.return_value = True
+            result = cli._default_cli_authorizer(  # pyright: ignore[reportPrivateUsage]
+                "google", spec, Path("/unused")
+            )
+        self.assertIs(result, tokens)
+        flow.assert_called_once()
+        # And the user is told what's happening before the URL prints.
+        write_calls = [c.args[0] for c in stdout.write.call_args_list]
+        self.assertTrue(any("OAuth authorization required" in w for w in write_calls))
+
+
+class TuiUnsupportedAuthorizerTest(unittest.TestCase):
+    """The TUI swap-in authorizer always raises, with a message that tells
+    the user to quit and run sync from CLI."""
+
+    def test_raises_with_run_chronos_sync_message(self) -> None:
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import OAuthError
+
+        spec = OAuthCredential(client_id="c", client_secret="s", scope="x")
+        with self.assertRaises(OAuthError) as ctx:
+            cli._tui_unsupported_authorizer(  # pyright: ignore[reportPrivateUsage]
+                "google", spec, Path("/unused")
+            )
+        message = str(ctx.exception)
+        self.assertIn("TUI", message)
+        self.assertIn("chronos sync", message)
+
+
 class ConfigEditCommandTest(ConfigEditingCliTestCase):
     def test_edit_applies_user_changes(self) -> None:
         self._run(["init"])

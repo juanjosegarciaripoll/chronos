@@ -186,7 +186,7 @@ def load_tokens(path: Path) -> StoredTokens:
     if not path.exists():
         raise OAuthError(
             f"no stored tokens at {path}. "
-            "Run `chronos oauth authorize --account <name>` first."
+            "Run `chronos sync` from an interactive terminal to authorize."
         )
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):

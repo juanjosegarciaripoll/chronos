@@ -26,7 +26,6 @@ use_utf8 = false
 # credential = { backend = "google", client_id = "12345.apps.googleusercontent.com", client_secret = "GOCSPX-..." }
 # # The "google" backend defaults the CalDAV URL, OAuth scope, and
 # # username for you. Only the client_id/client_secret from your
-# # Google Cloud project are required. Run
-# #   chronos oauth authorize --account google
-# # once to obtain access/refresh tokens, which are stored under the
+# # Google Cloud project are required. The first `chronos sync` walks
+# # you through the device flow and stores the tokens under the
 # # OS-standard user data directory (tokens/<account>.json), not here.

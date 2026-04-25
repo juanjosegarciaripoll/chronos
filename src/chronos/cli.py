@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import shlex
 import shutil
@@ -182,11 +183,64 @@ def _default_context_factory(config_path: Path | None) -> CliContext:
         config=config,
         mirror=mirror,
         index=index,
-        creds=DefaultCredentialsProvider(),
+        creds=DefaultCredentialsProvider(
+            interactive_authorizer=_default_cli_authorizer
+        ),
         stdout=sys.stdout,
         stderr=sys.stderr,
         now=datetime.now(UTC),
     )
+
+
+def _default_cli_authorizer(
+    account_name: str, spec: OAuthCredential, _token_path: Path
+) -> StoredTokens:
+    """Run the OAuth device flow inline when sync hits an unauthorized account.
+
+    Wired into `_default_context_factory` so plain `chronos sync` "just
+    works" the first time: print the URL + code on stdout, poll until
+    the user authorizes, return the tokens (the caller saves them).
+
+    Refuses to prompt when stdin/stdout aren't a TTY — cron / scripted
+    invocations get a clean error rather than blocking on input. Network
+    or HTTP failures from the device endpoint are surfaced loudly on
+    stdout (not just stderr) so the user notices them right after the
+    "authorization required" preface.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise OAuthError(
+            f"account {account_name!r} needs OAuth authorization, but "
+            "stdin/stdout aren't a TTY. Re-run from an interactive "
+            "terminal."
+        )
+    sys.stdout.write(
+        f"\n[{account_name}] OAuth authorization required. "
+        "Requesting device code from the OAuth provider...\n"
+    )
+    sys.stdout.flush()
+    try:
+        return _default_device_flow(spec, sys.stdout)
+    except OAuthError as exc:
+        sys.stdout.write(
+            f"\n[{account_name}] OAuth setup failed: {exc}\n"
+            "  - Verify client_id and client_secret in config.toml.\n"
+            "  - For Google: the OAuth client must be of type 'TVs and "
+            "Limited Input devices' for the device flow to work; the "
+            "Web/Desktop types reject it.\n"
+        )
+        sys.stdout.flush()
+        raise
+    except Exception as exc:
+        # Network/HTTP errors from niquests are not OAuthError; convert
+        # them so the credentials provider's standard wrapping applies.
+        sys.stdout.write(
+            f"\n[{account_name}] OAuth setup failed (network/HTTP "
+            f"error): {type(exc).__name__}: {exc}\n"
+        )
+        sys.stdout.flush()
+        raise OAuthError(
+            f"network/HTTP error reaching OAuth provider: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -651,17 +705,37 @@ def cmd_tui(ctx: CliContext) -> int:
     # Textual into the import graph.
     from chronos.tui import ChronosApp, TuiServices
 
+    # The TUI owns the terminal, so the OAuth device flow can't print
+    # to stdout. Swap in a creds provider whose authorizer surfaces a
+    # clear "go authorize from CLI" message instead of blocking on a
+    # prompt the user can't see.
+    tui_ctx = dataclasses.replace(
+        ctx,
+        creds=DefaultCredentialsProvider(
+            interactive_authorizer=_tui_unsupported_authorizer
+        ),
+    )
     services = TuiServices(
-        config=ctx.config,
-        mirror=ctx.mirror,
-        index=ctx.index,
-        creds=ctx.creds,
-        now=lambda: ctx.now,
-        sync_runner=build_sync_runner(ctx),
+        config=tui_ctx.config,
+        mirror=tui_ctx.mirror,
+        index=tui_ctx.index,
+        creds=tui_ctx.creds,
+        now=lambda: tui_ctx.now,
+        sync_runner=build_sync_runner(tui_ctx),
     )
     app = ChronosApp(services)
     app.run()
     return 0
+
+
+def _tui_unsupported_authorizer(
+    account_name: str, _spec: OAuthCredential, _token_path: Path
+) -> StoredTokens:
+    raise OAuthError(
+        f"account {account_name!r} needs OAuth authorization, but the "
+        "TUI can't run the device flow inline. Quit the TUI and run "
+        "`chronos sync` once to authorize, then come back."
+    )
 
 
 def build_sync_runner(ctx: CliContext) -> Callable[[], Sequence[SyncResult]]:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from chronos.authorization import Authorization
 from chronos.domain import (
@@ -16,10 +17,16 @@ from chronos.domain import (
     OAuthCredential,
     PlaintextCredential,
 )
-from chronos.oauth import OAuthError, build_bearer_auth
+from chronos.oauth import OAuthError, StoredTokens, build_bearer_auth, save_tokens
 from chronos.paths import oauth_token_path
 
 _COMMAND_TIMEOUT_SECONDS = 30
+
+
+# Returns fresh tokens for an account, typically by running the OAuth
+# device flow. Raises `OAuthError` if it can't (e.g. no TTY in CLI, or
+# the TUI is owning the terminal).
+InteractiveAuthorizer = Callable[[str, OAuthCredential, Path], StoredTokens]
 
 
 class CredentialResolutionError(RuntimeError):
@@ -37,15 +44,27 @@ class DefaultCredentialsProvider:
         as the basic-auth password.
       - KeyringCredential: deferred in v1 (requires the `keyring`
         package).
+      - OAuthCredential / GoogleCredential: load tokens from
+        `paths.oauth_token_path(account)`. If the file is missing and
+        an `interactive_authorizer` is configured, run it to obtain
+        fresh tokens and save them. Otherwise raise.
     """
 
-    def __init__(self, env: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        env: Mapping[str, str] | None = None,
+        *,
+        interactive_authorizer: InteractiveAuthorizer | None = None,
+    ) -> None:
         self._env = env if env is not None else os.environ
+        self._authorizer = interactive_authorizer
 
     def build_auth(self, account: AccountConfig) -> Authorization:
         spec = account.credential
         if isinstance(spec, OAuthCredential):
-            return _build_oauth_authorization(account.name, spec)
+            return _build_oauth_authorization(
+                account.name, spec, interactive_authorizer=self._authorizer
+            )
         if isinstance(spec, GoogleCredential):
             return _build_oauth_authorization(
                 account.name,
@@ -55,6 +74,7 @@ class DefaultCredentialsProvider:
                     scope=GOOGLE_OAUTH_SCOPE,
                     token_path=None,
                 ),
+                interactive_authorizer=self._authorizer,
             )
         password = self._resolve_password(account.name, spec)
         return Authorization(basic=(account.username, password))
@@ -88,9 +108,23 @@ class DefaultCredentialsProvider:
 
 
 def _build_oauth_authorization(
-    account_name: str, spec: OAuthCredential
+    account_name: str,
+    spec: OAuthCredential,
+    *,
+    interactive_authorizer: InteractiveAuthorizer | None,
 ) -> Authorization:
     token_path = spec.token_path or oauth_token_path(account_name)
+    if not token_path.exists():
+        if interactive_authorizer is None:
+            raise CredentialResolutionError(
+                f"{account_name}: no stored OAuth tokens at {token_path}. "
+                "Run `chronos sync` from an interactive terminal to authorize."
+            )
+        try:
+            tokens = interactive_authorizer(account_name, spec, token_path)
+        except OAuthError as exc:
+            raise CredentialResolutionError(f"{account_name}: {exc}") from exc
+        save_tokens(token_path, tokens)
     try:
         bearer = build_bearer_auth(
             client_id=spec.client_id,
@@ -133,4 +167,5 @@ def _resolve_command(account_name: str, spec: CommandCredential) -> str:
 __all__ = [
     "CredentialResolutionError",
     "DefaultCredentialsProvider",
+    "InteractiveAuthorizer",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -141,6 +142,11 @@ class GoogleBackendTest(unittest.TestCase):
 
         from chronos.domain import GOOGLE_OAUTH_SCOPE, GoogleCredential
 
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        token_path = tmp / "tokens.json"
+        # Presence is enough; build_bearer_auth is mocked below.
+        token_path.write_text("{}", encoding="utf-8")
+
         provider = DefaultCredentialsProvider(env={})
         account = _account(
             GoogleCredential(client_id="cid", client_secret="cs"), username=""
@@ -153,7 +159,7 @@ class GoogleBackendTest(unittest.TestCase):
             ) as mock_build,
             patch(
                 "chronos.credentials.oauth_token_path",
-                return_value=Path("/tmp/chronos-acct-token.json"),
+                return_value=token_path,
             ),
         ):
             auth = provider.build_auth(account)
@@ -161,8 +167,115 @@ class GoogleBackendTest(unittest.TestCase):
             client_id="cid",
             client_secret="cs",
             scope=GOOGLE_OAUTH_SCOPE,
-            token_path=Path("/tmp/chronos-acct-token.json"),
+            token_path=token_path,
         )
         self.assertIsNone(auth.basic)
         self.assertIs(auth.http_auth, bearer)
         self.assertIs(auth.on_commit, bearer.persist)
+
+
+class InteractiveAuthorizerTest(unittest.TestCase):
+    """Missing OAuth tokens trigger the configured authorizer; without one,
+    the provider raises a clean error pointing at the CLI sync path."""
+
+    def test_missing_tokens_calls_authorizer_and_persists(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import StoredTokens
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        token_path = tmp / "tokens.json"
+        self.assertFalse(token_path.exists())
+
+        captured: dict[str, object] = {}
+        fresh_tokens = StoredTokens(
+            access_token="at",
+            refresh_token="rt",
+            expiry_unix=1e12,
+            scope="https://example/scope",
+        )
+
+        def authorizer(
+            account_name: str, spec: OAuthCredential, path: Path
+        ) -> StoredTokens:
+            captured["account"] = account_name
+            captured["spec"] = spec
+            captured["path"] = path
+            return fresh_tokens
+
+        provider = DefaultCredentialsProvider(env={}, interactive_authorizer=authorizer)
+        account = _account(
+            OAuthCredential(
+                client_id="cid",
+                client_secret="cs",
+                scope="https://example/scope",
+                token_path=token_path,
+            ),
+        )
+        bearer = MagicMock()
+        bearer.persist = MagicMock()
+        with patch(
+            "chronos.credentials.build_bearer_auth", return_value=bearer
+        ) as mock_build:
+            auth = provider.build_auth(account)
+
+        # The authorizer was called with the account context.
+        self.assertEqual(captured["account"], "acct")
+        self.assertEqual(captured["path"], token_path)
+        # And the returned tokens were persisted to the expected path.
+        self.assertTrue(token_path.exists())
+        # build_bearer_auth runs after persistence so it sees real tokens.
+        mock_build.assert_called_once()
+        self.assertIs(auth.http_auth, bearer)
+
+    def test_missing_tokens_without_authorizer_raises_clean_error(self) -> None:
+        from chronos.domain import OAuthCredential
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        token_path = tmp / "absent.json"
+
+        provider = DefaultCredentialsProvider(env={})  # no authorizer
+        account = _account(
+            OAuthCredential(
+                client_id="c",
+                client_secret="s",
+                scope="x",
+                token_path=token_path,
+            ),
+        )
+        with self.assertRaises(CredentialResolutionError) as ctx:
+            provider.build_auth(account)
+        message = str(ctx.exception)
+        self.assertIn("no stored OAuth tokens", message)
+        self.assertIn("chronos sync", message)
+
+    def test_authorizer_failure_surfaces_as_credential_error(self) -> None:
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import OAuthError, StoredTokens
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        token_path = tmp / "absent.json"
+
+        def failing_authorizer(
+            _name: str, _spec: OAuthCredential, _path: Path
+        ) -> StoredTokens:
+            raise OAuthError("user declined authorization")
+
+        provider = DefaultCredentialsProvider(
+            env={}, interactive_authorizer=failing_authorizer
+        )
+        account = _account(
+            OAuthCredential(
+                client_id="c",
+                client_secret="s",
+                scope="x",
+                token_path=token_path,
+            ),
+        )
+        with self.assertRaises(CredentialResolutionError) as ctx:
+            provider.build_auth(account)
+        self.assertIn("user declined", str(ctx.exception))
+        # The empty-handed authorizer must NOT have left a token file
+        # behind: persistence only happens on success.
+        self.assertFalse(token_path.exists())
