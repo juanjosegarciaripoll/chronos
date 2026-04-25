@@ -4,7 +4,7 @@ Actionable backlog. Top of file is next up; bottom is later. Each milestone is a
 
 ## Current state
 
-Milestones 0–8 shipped. `chronos tui` opens the Textual UI against the same mirror + index the CLI uses; day / week / month / agenda / todo views, create / edit / trash flows, sync confirm, and search are wired end-to-end. Next up is **Milestone 9 — MCP server**.
+Milestones 0–8 shipped. `chronos tui` opens the Textual UI against the same mirror + index the CLI uses; day / week / month / agenda / todo views, create / edit / trash flows, sync confirm, and search are wired end-to-end. Sync against real Google + CSIC accounts works; per-calendar / per-batch / per-ingest progress is visible at INFO. Next up is **Milestone 9 — Crash safety**, then Milestone 10 (MCP server) and 11 (Packaging).
 
 ## Milestone 0 — Project scaffolding
 
@@ -115,14 +115,41 @@ Reprioritised from the original "TUI" slot. Google and Microsoft dropped basic-a
 
 **Acceptance:** all five views navigable; create / edit / trash flows work end-to-end against a seeded repo; TUI tests green; project-wide branch coverage ≥ 88%.
 
-## Milestone 9 — MCP server
+## Milestone 9 — Crash safety
+
+Audit and harden every persistence path so an interrupt (Ctrl-C / SIGINT, terminal close, OS reboot, OOM kill) at any point during sync leaves chronos in a coherent on-disk state, and the next run resumes correctly. Sync against a real Google or Nextcloud account already takes minutes for big calendars; users will Ctrl-C, and the v1 promise is that doing so is safe.
+
+**Atomicity audit** (mostly verification — most paths are already correct):
+
+- `storage.VdirMirrorRepository.write` / `move` / `delete` — confirm every write is temp-file + `os.replace` + chmod, never an in-place truncate. Add a conformance test that asserts no `*.tmp` file is left behind after a successful write, and that a simulated crash mid-write (raise inside the temp-file context) leaves either the prior file intact or no file at all — never a half-written one.
+- `index_store.SqliteIndexRepository.connection()` — confirm every multi-row update (`_ingest_resource`'s component upserts, `populate_occurrences`'s per-master expansion, `_apply_server_deletions`) goes through the context manager so an interrupt either commits the whole batch or rolls it back. Add a test that raises `KeyboardInterrupt` inside the `connection()` block and asserts no partial rows survive.
+- `oauth.save_tokens` — already temp-file + `os.replace`; add a leftover-tmp test.
+- `config.save` (used by `chronos account add` / `config edit`) — same audit + test.
+
+**Sync resumability:**
+
+- Document the load-bearing invariant in `sync.py`: CTag + sync-token are written to `calendar_sync_state` only after `_sync_calendar` returns successfully. Mid-sync interrupts leave the prior CTag in place, so the next run re-enters the slow path and reconverges. Add a test that runs `_sync_calendar` against a `FakeCalDAVSession` that raises mid-batch, then runs it again and asserts the same end state as an uninterrupted run.
+- Push paths (`_push_pending`, `_push_trashed`): if PUT succeeded server-side but the response was lost, the local row stays at `href IS NULL` and re-pushing returns 412 (`If-None-Match: *` against the now-existing resource). Plan: on 412 from a new-resource PUT, do a calendar-query lookup, match by content hash, adopt the existing href + etag. Without this, a single dropped response can wedge a row in a retry loop.
+
+**Process-level guard:**
+
+- Add a lockfile at `paths.user_data_dir() / "sync.lock"` acquired by `cmd_sync` (and `build_sync_runner` for the TUI) and released on exit. Concurrent `chronos sync` invocations fail loudly with the holder's PID. Use `fcntl.flock` on POSIX and `msvcrt.locking` on Windows; detect and replace stale locks (holder PID dead).
+- The OAuth loopback flow's `HTTPServer` already has a `try/finally` that calls `server_close`; add an explicit test that Ctrl-C during the wait releases the port.
+
+**TUI:**
+
+- The TUI runs sync on a worker thread. Verify Ctrl-C / app-quit during sync neither corrupts state nor leaves Textual in a half-rendered screen. If the worker can't be interrupted cleanly mid-multiget, document that as a known limitation.
+
+**Acceptance:** every persistence write is atomic by inspection or by test; an interrupted-then-resumed sync reaches the same end state as an uninterrupted one (proven by a fault-injection test); concurrent `chronos sync` invocations are rejected; project-wide branch coverage ≥ 88% holds.
+
+## Milestone 10 — MCP server
 
 - `mcp_server.py` — read-only tools: `list_calendars`, `query_range(start, end)`, `search(query)`, `get_event(uid)`, `get_todo(uid)`.
 - MCP tests that stand up a server in-process and exercise each tool.
 
 **Acceptance:** MCP server starts cleanly; each tool returns expected payloads against a seeded index; no write tools present.
 
-## Milestone 10 — Packaging and release
+## Milestone 11 — Packaging and release
 
 - `chronos.spec` — PyInstaller spec.
 - `scripts/build.py` — orchestrates tests + docs + binary + archive + installer.
