@@ -4,7 +4,7 @@ import contextlib
 import urllib.parse
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from chronos.domain import (
@@ -24,10 +24,17 @@ from chronos.domain import (
 )
 from chronos.ical_parser import IcalParseError, ParsedComponent, parse_vcalendar
 from chronos.protocols import CalDAVSession, IndexRepository, MirrorRepository
+from chronos.recurrence import populate_occurrences
 from chronos.storage_indexing import synthetic_uid
 
 _MASS_DELETION_RATIO = 0.2
 _MASS_DELETION_MIN_BASELINE = 5
+
+# Window the `occurrences` cache covers after each sync. Wide enough to
+# include historical events the user might want to browse, narrow enough
+# that infinite-RRULE masters stay bounded by `recurrence.MAX_OCCURRENCES`.
+_OCCURRENCE_WINDOW_PAST = timedelta(days=365 * 30)
+_OCCURRENCE_WINDOW_FUTURE = timedelta(days=365 * 5)
 
 
 class SyncError(Exception):
@@ -151,6 +158,26 @@ def _sync_calendar(
             synced_at=now,
         )
     )
+
+    # Refresh the recurrence-expansion cache for this calendar so the
+    # TUI's view queries return rows. Skipped on a no-op fast path
+    # (nothing pushed, nothing pulled, nothing trashed) since the cache
+    # is still valid then.
+    if (
+        stats.path == "slow"
+        or stats.added
+        or stats.updated
+        or stats.removed
+        or stats.pushed
+        or stats.deleted_remote
+    ):
+        populate_occurrences(
+            index=index,
+            calendar=calendar_ref,
+            window_start=now - _OCCURRENCE_WINDOW_PAST,
+            window_end=now + _OCCURRENCE_WINDOW_FUTURE,
+        )
+
     return stats
 
 

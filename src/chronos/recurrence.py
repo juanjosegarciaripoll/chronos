@@ -105,7 +105,10 @@ def populate_occurrences(
 ) -> int:
     """Rebuild the `occurrences` cache for one calendar + window.
 
-    Returns the number of occurrence rows written.
+    Returns the number of occurrence rows written. Masters whose RRULE
+    expands to more than `max_occurrences` instances inside the window
+    are skipped (their cache row is left empty); they remain in the
+    `components` table for diagnostics.
     """
     components = index.list_calendar_components(calendar)
     masters = [c for c in components if c.ref.recurrence_id is None]
@@ -117,13 +120,18 @@ def populate_occurrences(
     total = 0
     with index.connection():
         for master in masters:
-            occurrences = expand(
-                master=master,
-                overrides=tuple(overrides_by_uid.get(master.ref.uid, ())),
-                window_start=window_start,
-                window_end=window_end,
-                max_occurrences=max_occurrences,
-            )
+            try:
+                occurrences = expand(
+                    master=master,
+                    overrides=tuple(overrides_by_uid.get(master.ref.uid, ())),
+                    window_start=window_start,
+                    window_end=window_end,
+                    max_occurrences=max_occurrences,
+                )
+            except RecurrenceExpansionError:
+                # One master's runaway RRULE shouldn't take the whole
+                # population down. Skip it; everything else stays cached.
+                continue
             index.set_occurrences(master.ref, occurrences)
             total += len(occurrences)
     return total

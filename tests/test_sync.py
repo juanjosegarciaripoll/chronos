@@ -421,6 +421,25 @@ class IdempotencyTest(SyncTestCase):
         self.assertEqual(second.components_updated, 0)
         self.assertEqual(second.components_removed, 0)
 
+    def test_sync_populates_occurrences_cache(self) -> None:
+        # Regression: after `sync_account` returns, the `occurrences`
+        # table must be populated for every synced calendar; otherwise
+        # the TUI's view queries return nothing.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}a.ics",
+            ics=_ics_with_uid("occ-a@example.com"),
+            etag="etag-a",
+        )
+        self._run()
+        occurrences = self.index.query_occurrences(
+            CalendarRef(ACCOUNT_NAME, CALENDAR_NAME),
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2027, 1, 1, tzinfo=UTC),
+        )
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0].ref.uid, "occ-a@example.com")
+
     def test_empty_server_etag_does_not_trigger_phantom_updates(self) -> None:
         # Regression: against servers that don't include getetag in
         # calendar-query responses (Exchange-style gateways), the slow
