@@ -36,7 +36,8 @@ Failures are root-caused, not papered over with ignores.
 - Sync tests use `FakeCalDAVSession`, a deterministic in-memory test double conforming to the `CalDAVSession` protocol. Tests never hit the network.
 - Storage tests run a conformance suite against every `MirrorRepository` implementation.
 - Index tests use real `SqliteIndexRepository` against a temp-dir database. No mocking.
-- TUI tests use Textual's `Pilot`, with `pytest-asyncio` in `asyncio_mode = "auto"`. Details come with the TUI work (see `TASKS.md` Milestone 6).
+- TUI tests use Textual's `Pilot`, with `pytest-asyncio` in `asyncio_mode = "auto"`. The flow plan lives in `ai/TUI_TESTING_PLAN.md`; the implementation is `tests/test_tui_flows.py`.
+- **Coverage** is measured with `pytest-cov` (branch). The default test command is `uv run python -m pytest --cov=chronos --cov-branch --cov-fail-under=85 tests/`. See `AGENTS.md §5` for the full policy: the floor is a ratchet, new code lands at 100%, exclusions are narrow / named / justified.
 - Corpus lives in `tests/corpus.py`. All test addresses, organisers, and attendees use `@example.com`. All test dates anchor to fixed 2026 reference dates so recurrence assertions are reproducible.
 
 ## 5. Test corpus

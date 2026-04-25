@@ -29,9 +29,9 @@ Read, in this order, before making any non-trivial change:
    uv run ruff format --check src/ tests/
    uv run mypy src/
    uv run basedpyright src/
-   uv run python -m pytest tests/
+   uv run python -m pytest --cov=chronos --cov-branch --cov-fail-under=85 tests/
    ```
-   All must pass. No exceptions.
+   All must pass. No exceptions. Coverage is a gate, not a report.
 3. **No speculative complexity.** No feature flags, no backwards-compatibility shims, no abstractions without a concrete caller. Three similar lines beat a premature abstraction.
 4. Approved runtime dependencies only (see `CONVENTIONS.md §7`). New runtime deps require explicit approval before the `uv add` runs.
 5. Keep `config-sample.toml`, `docs/`, and `ai/ARCHITECTURE.md` synchronised with code. If behaviour changes, one of these usually has to change too.
@@ -46,7 +46,27 @@ That single signal covers every local-side pending change (new event, moved even
 
 This is the CalDAV analogue of pony's `uid IS NULL` convention. See `SYNCHRONIZATION.md §7` for how it drives the reconciliation steps, and §C-9 of the conflict taxonomy for local-move handling.
 
-## 5. Building the standalone executable
+## 5. Coverage policy
+
+We measure **branch coverage** with `pytest-cov` on the `chronos` package. Three rules govern every change:
+
+1. **Floor is a ratchet.** `--cov-fail-under=85` is the CI floor. Never lower it. When project-wide branch coverage clears the next 5-point threshold (90, 95) by a comfortable margin in a green build, raise the floor in `pyproject.toml` to lock the gain in. The destination is 100%; the floor is the path.
+
+2. **New code lands at 100%.** A new module, function, or branch you add must be fully covered by tests in the same change. "Hard to test" is a design signal — refactor the code (extract a pure function, inject a dependency, narrow the `try` block) until it's testable. Don't ship behaviour without a test.
+
+3. **Exclusions are narrow, named, and justified.** A `# pragma: no cover` is allowed only with a trailing comment that names the reason. Acceptable reasons:
+   - **platform fork** — the *other* platform's branch (`if sys.platform == "win32":` from a POSIX test run, or vice versa).
+   - **`if TYPE_CHECKING:`** — never executed at runtime.
+   - **unreachable defensive guard** — `raise AssertionError("unreachable: ...")` paths whose precondition is enforced upstream.
+   - **`__main__` entry shim** — the `if __name__ == "__main__":` line in `__main__.py`.
+
+   Anything else (HTTP error branches, "could happen if the server returns a malformed response", I/O fallbacks) is testable with a fake — write the fake. `pragma: no cover` without a comment, or for any other reason, is rejected.
+
+`tests/` is excluded from measurement. Integration-only tests guarded by `CHRONOS_INTEGRATION=1` are excluded from the default run; coverage from them does not count toward the floor.
+
+When a PR drops coverage below the floor, the fix is a test, never a `pragma`. When a PR drops it above the floor but below the previous run, investigate before merging — silent regressions are how floors slip.
+
+## 6. Building the standalone executable
 
 Chronos builds as a PyInstaller bundle the same way pony does. Commands will be:
 
@@ -59,7 +79,7 @@ uv run python scripts/build.py --installer
 
 `scripts/build.py`, `chronos.spec`, and `docs/` are Milestone-8 deliverables (see `TASKS.md`). This section is a placeholder until they land — do not add build infrastructure ahead of its milestone.
 
-## 6. What NOT to do
+## 7. What NOT to do
 
 1. Don't mock the SQLite database in tests. Use real `SqliteIndexRepository` with a temp-dir path.
 2. Don't add `# type: ignore` without a specific diagnostic code (e.g. `# type: ignore[arg-type]`). Bare `ignore` is rejected.
@@ -71,3 +91,4 @@ uv run python scripts/build.py --installer
 8. No emojis in code, commits, or docs.
 9. Don't expand recurrences on write. RRULE expansion is a read-time concern served by the `occurrences` cache. See `RECURRENCE.md`.
 10. Don't invent synthetic UIDs on the write path. Synthetic UIDs exist only to defensively ingest malformed server data (see `SYNCHRONIZATION.md §C-8`).
+11. Don't lower the `--cov-fail-under` floor or sprinkle `# pragma: no cover` to make red builds green. The fix is a test (see §5).

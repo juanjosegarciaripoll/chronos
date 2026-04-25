@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import shlex
 import subprocess
@@ -36,6 +35,7 @@ from chronos.domain import (
     VTodo,
 )
 from chronos.index_store import SqliteIndexRepository
+from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.oauth import (
     OAuthError,
     StoredTokens,
@@ -452,10 +452,10 @@ def cmd_add(
     if not any(a.name == account_name for a in ctx.config.accounts):
         ctx.stderr.write(f"unknown account: {account_name}\n")
         return 2
-    resolved_uid = uid or _generate_uid(
+    resolved_uid = uid or generate_uid(
         account_name, calendar_name, summary, start, ctx.now
     )
-    ics = _build_event_ics(resolved_uid, summary, start, end, ctx.now)
+    ics = build_event_ics(resolved_uid, summary, start, end, ctx.now)
     ctx.mirror.write(ResourceRef(account_name, calendar_name, resolved_uid), ics)
     ref = ComponentRef(account_name, calendar_name, resolved_uid)
     component = VEvent(
@@ -505,7 +505,7 @@ def cmd_edit(
     if new_start is None:
         ctx.stderr.write("edit: missing DTSTART\n")
         return 2
-    new_ics = _build_event_ics(
+    new_ics = build_event_ics(
         current.ref.uid, new_summary, new_start, new_end, ctx.now
     )
     ctx.mirror.write(current.ref.resource, new_ics)
@@ -541,7 +541,7 @@ def cmd_rm(ctx: CliContext, *, uid: str) -> int:
         ctx.stderr.write(f"not found: {uid}\n")
         return 1
     for component in matches:
-        trashed = _trashed_copy(component, trashed_at=ctx.now)
+        trashed = trashed_copy(component, trashed_at=ctx.now)
         ctx.index.upsert_component(trashed)
     ctx.stdout.write(f"trashed {len(matches)}\n")
     return 0
@@ -861,97 +861,6 @@ def _find_by_uid(ctx: CliContext, uid: str) -> list[StoredComponent]:
             if component is not None:
                 matches.append(component)
     return matches
-
-
-def _trashed_copy(
-    component: StoredComponent, *, trashed_at: datetime
-) -> StoredComponent:
-    if isinstance(component, VEvent):
-        return VEvent(
-            ref=component.ref,
-            href=component.href,
-            etag=component.etag,
-            raw_ics=component.raw_ics,
-            summary=component.summary,
-            description=component.description,
-            location=component.location,
-            dtstart=component.dtstart,
-            dtend=component.dtend,
-            status=component.status,
-            local_flags=component.local_flags,
-            server_flags=component.server_flags,
-            local_status=LocalStatus.TRASHED,
-            trashed_at=trashed_at,
-            synced_at=component.synced_at,
-        )
-    return VTodo(
-        ref=component.ref,
-        href=component.href,
-        etag=component.etag,
-        raw_ics=component.raw_ics,
-        summary=component.summary,
-        description=component.description,
-        location=component.location,
-        dtstart=component.dtstart,
-        due=component.due,
-        status=component.status,
-        local_flags=component.local_flags,
-        server_flags=component.server_flags,
-        local_status=LocalStatus.TRASHED,
-        trashed_at=trashed_at,
-        synced_at=component.synced_at,
-    )
-
-
-def _build_event_ics(
-    uid: str,
-    summary: str,
-    dtstart: datetime,
-    dtend: datetime | None,
-    now: datetime,
-) -> bytes:
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//chronos//EN",
-        "BEGIN:VEVENT",
-        f"UID:{uid}",
-        f"DTSTAMP:{_fmt_dt(now)}",
-        f"DTSTART:{_fmt_dt(dtstart)}",
-    ]
-    if dtend is not None:
-        lines.append(f"DTEND:{_fmt_dt(dtend)}")
-    lines.extend(
-        [
-            f"SUMMARY:{_escape_text(summary)}",
-            "END:VEVENT",
-            "END:VCALENDAR",
-        ]
-    )
-    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
-
-
-def _fmt_dt(dt: datetime) -> str:
-    as_utc = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-    return as_utc.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _escape_text(value: str) -> str:
-    # Minimal RFC 5545 text escaping for SUMMARY fields.
-    return (
-        value.replace("\\", "\\\\")
-        .replace(",", "\\,")
-        .replace(";", "\\;")
-        .replace("\n", "\\n")
-    )
-
-
-def _generate_uid(
-    account: str, calendar: str, summary: str, start: datetime, now: datetime
-) -> str:
-    payload = f"{account}|{calendar}|{summary}|{start.isoformat()}|{now.isoformat()}"
-    digest = hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
-    return f"{digest[:16]}@chronos"
 
 
 def _parse_dt(raw: str) -> datetime:
