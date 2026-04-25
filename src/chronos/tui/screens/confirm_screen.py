@@ -5,7 +5,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Horizontal, Middle, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
 
@@ -33,7 +33,7 @@ class ConfirmScreen(ModalScreen[None]):
         self._on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
-        with Center(), Middle(), Vertical(id="confirm-box"):
+        with Vertical(id="confirm-box"):
             yield Label(self._prompt, classes="dialog-title")
             with Horizontal(classes="dialog-actions"):
                 yield Button("Yes", id="confirm-yes", variant="primary")

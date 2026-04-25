@@ -7,22 +7,14 @@ from collections.abc import Callable, Sequence
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Horizontal, Middle, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, Static
+from textual.widgets import Button, Label, RichLog, Static
 
 from chronos.domain import SyncResult
 
 SyncRunner = Callable[..., Sequence[SyncResult]]
 """Runner contract — accepts `cancel_event` keyword, returns per-account results."""
-
-
-_PROGRESS_LOG_LINES = 18
-"""How many of the most-recent log lines stay on screen at any time.
-
-Sized to fit comfortably in the dialog without a scrollbar dance.
-The rest of the history still lands in `tui.log` for post-hoc reading.
-"""
 
 
 class SyncProgressScreen(ModalScreen[None]):
@@ -52,15 +44,23 @@ class SyncProgressScreen(ModalScreen[None]):
         self._on_finished = on_finished
         self._cancel_event = threading.Event()
         self._handler: _LogToScreenHandler | None = None
-        self._messages: list[str] = []
         self._results: tuple[SyncResult, ...] = ()
         self._error: BaseException | None = None
         self._state: str = "running"
 
     def compose(self) -> ComposeResult:
-        with Center(), Middle(), Vertical(id="sync-progress-box"):
+        with Vertical(id="sync-progress-box"):
             yield Label("Syncing", id="sync-progress-title", classes="dialog-title")
-            yield Static("(starting…)", id="sync-progress-log")
+            # `RichLog` auto-scrolls as `write()` is called from
+            # `_append_message`. `max_lines` caps the in-memory
+            # backlog so a multi-thousand-event sync doesn't OOM.
+            yield RichLog(
+                id="sync-progress-log",
+                max_lines=500,
+                wrap=True,
+                markup=False,
+                highlight=False,
+            )
             yield Static("", id="sync-progress-summary")
             with Horizontal(classes="dialog-actions"):
                 yield Button("Cancel", id="sync-action", variant="warning")
@@ -91,10 +91,7 @@ class SyncProgressScreen(ModalScreen[None]):
         self.app.call_from_thread(self._append_message, message)  # pyright: ignore[reportUnknownMemberType]
 
     def _append_message(self, message: str) -> None:
-        self._messages.append(message)
-        if len(self._messages) > _PROGRESS_LOG_LINES:
-            del self._messages[: len(self._messages) - _PROGRESS_LOG_LINES]
-        self.query_one("#sync-progress-log", Static).update("\n".join(self._messages))
+        self.query_one("#sync-progress-log", RichLog).write(message)
 
     def _on_done(
         self,

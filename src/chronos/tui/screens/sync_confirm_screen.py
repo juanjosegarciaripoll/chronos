@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Horizontal, Middle, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
 
@@ -38,7 +38,7 @@ class SyncConfirmScreen(ModalScreen[None]):
         self._on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
-        with Center(), Middle(), Vertical(id="sync-confirm-box"):
+        with Vertical(id="sync-confirm-box"):
             yield Label("Sync the following accounts?", classes="dialog-title")
             if not self._accounts:
                 yield Label("(no accounts configured)", classes="dialog-empty")

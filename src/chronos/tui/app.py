@@ -71,17 +71,31 @@ class ChronosApp(App[None]):
         padding: 1;
     }
 
-    /* Modal dialog frame: a centred box with a thick accent border and
-       an action row at the bottom. ModalScreen already darkens the
-       backdrop, so a clean panel reads as "this is a dialog" without
-       extra effort. */
+    /* Modal dialogs: `align: center middle;` on the screen itself is
+       Textual's stock idiom for centring a single child container.
+       The dialog box then carries an explicit width so the centring
+       has something to act on (auto-width inside a flex parent
+       expands to fill, defeating the centre rule). */
+    SyncConfirmScreen, ConfirmScreen, SyncProgressScreen {
+        align: center middle;
+    }
     #sync-confirm-box, #confirm-box, #sync-progress-box {
         background: $surface;
         border: thick $accent;
         padding: 1 2;
-        width: auto;
-        max-width: 100;
         height: auto;
+    }
+    #sync-confirm-box {
+        width: 80;
+    }
+    #confirm-box {
+        width: 60;
+    }
+    /* Progress dialog: live log tail + summary line. Wider than the
+       confirm dialogs so per-batch fetch lines fit without wrapping. */
+    #sync-progress-box {
+        width: 100;
+        max-height: 80%;
     }
     #sync-confirm-box .dialog-title,
     #confirm-box .dialog-title,
@@ -104,16 +118,13 @@ class ChronosApp(App[None]):
     #sync-progress-box .dialog-actions Button {
         margin-left: 1;
     }
-    /* Progress dialog: live log tail + summary line. Width is wider
-       than the confirm dialogs so per-batch fetch lines fit. */
-    #sync-progress-box {
-        width: 90;
-    }
+    /* Scrollable progress log: bordered, scrolls automatically as
+       new lines come in via `RichLog.write`. */
     #sync-progress-log {
-        color: $text-muted;
-        height: auto;
-        max-height: 18;
-        margin-top: 1;
+        height: 18;
+        border: solid $accent;
+        background: $boost;
+        padding: 0 1;
     }
     #sync-progress-summary {
         margin-top: 1;
