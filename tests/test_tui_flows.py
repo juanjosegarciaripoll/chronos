@@ -66,7 +66,8 @@ from chronos.tui.widgets.date_picker import (
     InvalidDateError,
     parse_date_input,
 )
-from chronos.tui.widgets.event_list import component_ref_for_row
+from chronos.tui.widgets.event_list import EventList, component_ref_for_row
+from chronos.tui.widgets.event_view import EventView
 from tests import corpus
 
 ACCOUNT_NAME = "personal"
@@ -350,14 +351,14 @@ class FriendlyStartFormatTest(unittest.TestCase):
         result = format_friendly_start(
             datetime(2026, 4, 28, 9, 0, tzinfo=UTC), self.TODAY
         )
-        self.assertEqual(result, "Tuesday 09:00")
+        self.assertEqual(result, "Tue 09:00")
 
     def test_recent_past_uses_last_weekday(self) -> None:
         # 2026-04-22 is the prior Wednesday.
         result = format_friendly_start(
             datetime(2026, 4, 22, 9, 0, tzinfo=UTC), self.TODAY
         )
-        self.assertEqual(result, "Last Wednesday 09:00")
+        self.assertEqual(result, "Last Wed 09:00")
 
     def test_same_year_uses_short_date(self) -> None:
         result = format_friendly_start(
@@ -494,6 +495,52 @@ class RowFormattingTest(unittest.TestCase):
         self.assertEqual(cells[1], "")  # no end -> no duration
         self.assertEqual(cells[2], "(no summary)")
         self.assertEqual(cells[4], "")
+
+    def test_past_event_cells_are_dimmed_when_now_is_supplied(self) -> None:
+        # Regression: in the agenda view, events whose end has already
+        # passed should render muted so the user's eye is drawn to
+        # what's still upcoming.
+        from rich.text import Text
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        event = _empty_event(ref)
+        row = OccurrenceRow(
+            occurrence=Occurrence(
+                ref=ref,
+                start=datetime(2026, 4, 24, 9, tzinfo=UTC),
+                end=datetime(2026, 4, 24, 10, tzinfo=UTC),
+                recurrence_id=None,
+                is_override=False,
+            ),
+            component=event,
+        )
+        now = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
+        cells = format_event_row(row, self.TODAY, now=now)
+        for cell in cells:
+            self.assertIsInstance(cell, Text)
+            assert isinstance(cell, Text)
+            self.assertEqual(cell.style, "dim")
+
+    def test_in_progress_event_is_not_dimmed(self) -> None:
+        # An event that started before `now` but hasn't ended yet is
+        # still happening — keep it bright so it stays visible.
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        event = _empty_event(ref)
+        row = OccurrenceRow(
+            occurrence=Occurrence(
+                ref=ref,
+                start=datetime(2026, 4, 25, 8, 30, tzinfo=UTC),
+                end=datetime(2026, 4, 25, 10, 0, tzinfo=UTC),
+                recurrence_id=None,
+                is_override=False,
+            ),
+            component=event,
+        )
+        now = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
+        cells = format_event_row(row, self.TODAY, now=now)
+        # All cells are plain strings — no dim wrapping.
+        for cell in cells:
+            self.assertIsInstance(cell, str)
 
     def test_format_todo_row_renders_due_and_status(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, PERSONAL_CAL, "y")
@@ -883,6 +930,51 @@ class TodayAndTodosKeysSwappedTest(TuiFlowTestCase):
             await pilot.press("shift+t")
             await pilot.pause()
             self.assertEqual(screen._view, ViewKind.TODOS)
+
+
+class DetailPaneTracksCursorTest(TuiFlowTestCase):
+    async def test_arrow_down_refreshes_detail_pane(self) -> None:
+        # Regression: moving the cursor through the event list left
+        # the detail pane stuck on whatever row was current at the
+        # last `refresh_view`. Pressing `down` must swap the rendered
+        # detail to match the newly-highlighted row.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("a")  # Agenda has multiple rows seeded.
+            await pilot.pause()
+
+            event_list = screen.query_one(EventList)
+            event_list.focus()
+            await pilot.pause()
+
+            first_component = screen._currently_selected_component()
+            self.assertIsNotNone(first_component)
+
+            await pilot.press("down")
+            await pilot.pause()
+
+            second_component = screen._currently_selected_component()
+            self.assertIsNotNone(second_component)
+            assert first_component is not None and second_component is not None
+            self.assertNotEqual(
+                (first_component.ref.uid, first_component.ref.recurrence_id),
+                (second_component.ref.uid, second_component.ref.recurrence_id),
+                "down arrow did not move the cursor to a different row",
+            )
+
+            event_view = screen.query_one(EventView)
+            # The EventView is a `Static`; `.content` holds the text it
+            # last rendered. Compare against the freshly-selected
+            # component to prove the detail pane really did follow the
+            # cursor.
+            self.assertEqual(
+                str(event_view.content),
+                render_event_detail(second_component),
+            )
 
 
 class NewEventFlowTest(TuiFlowTestCase):

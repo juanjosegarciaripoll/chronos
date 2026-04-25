@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
+from typing import Any, cast
 
 from textual.widgets import DataTable
 
@@ -25,7 +26,13 @@ class EventList(DataTable[str]):
         self._mode: str | None = None
         self._refs: dict[str, ComponentRef] = {}
 
-    def show_events(self, rows: Sequence[OccurrenceRow], *, today: date) -> None:
+    def show_events(
+        self,
+        rows: Sequence[OccurrenceRow],
+        *,
+        today: date,
+        now: datetime | None = None,
+    ) -> None:
         self._reset(_EVENT_COLUMNS, "events")
         for row in rows:
             key = self._row_key(
@@ -33,7 +40,13 @@ class EventList(DataTable[str]):
                 row.occurrence.recurrence_id,
                 instance=row.occurrence.start.isoformat(),
             )
-            self.add_row(*format_event_row(row, today), key=key)
+            cells = format_event_row(row, today, now=now)
+            # DataTable accepts `Text` cells at runtime, but its public
+            # type stub only declares `str`. Past-event rows come back
+            # as `Text(..., style="dim")` so the row renders muted; the
+            # cast keeps the type-checker happy without lying about the
+            # element type at the source.
+            self.add_row(*cast(tuple[Any, ...], cells), key=key)
             self._refs[key] = row.component.ref
 
     def show_todos(self, todos: Sequence[VTodo]) -> None:

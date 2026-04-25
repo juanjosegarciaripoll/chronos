@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Label
+from textual.widgets import DataTable, Footer, Header, Label
 
 from chronos.domain import (
     CalendarRef,
@@ -204,7 +204,8 @@ class MainScreen(Screen[None]):
         # Friendly date labels (Today / Tomorrow / weekday) are anchored
         # on the user's actual today, not on the viewed date — looking
         # at a 2014 day still shows the absolute date, not "Today".
-        today = services.now().date()
+        now = services.now()
+        today = now.date()
         if self._view == ViewKind.DAY:
             title_label.update(day_title(self._viewed_date))
             rows = day_rows(
@@ -214,7 +215,7 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
             )
             self._last_rows = rows
-            event_list.show_events(rows, today=today)
+            event_list.show_events(rows, today=today, now=now)
         elif self._view == ViewKind.WEEK:
             title_label.update(week_title(self._viewed_date))
             rows = week_rows(
@@ -224,7 +225,7 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
             )
             self._last_rows = rows
-            event_list.show_events(rows, today=today)
+            event_list.show_events(rows, today=today, now=now)
         elif self._view == ViewKind.MONTH:
             title_label.update(month_title(self._viewed_date))
             rows = month_rows(
@@ -234,7 +235,7 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
             )
             self._last_rows = rows
-            event_list.show_events(rows, today=today)
+            event_list.show_events(rows, today=today, now=now)
         elif self._view == ViewKind.AGENDA:
             title_label.update(agenda_title(today))
             rows = agenda_rows(
@@ -244,7 +245,7 @@ class MainScreen(Screen[None]):
                 today=today,
             )
             self._last_rows = rows
-            event_list.show_events(rows, today=today)
+            event_list.show_events(rows, today=today, now=now)
         else:  # TODOS
             title_label.update(todo_title())
             self._last_rows = ()
@@ -260,6 +261,16 @@ class MainScreen(Screen[None]):
         component = self._currently_selected_component()
         view: EventView = self.query_one(EventView)
         view.show(component)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # Refresh the detail pane whenever the cursor moves in the
+        # event list. Without this, arrow-key navigation through the
+        # list left the detail pane stuck on the row that was current
+        # at the last `refresh_view`. There's only one DataTable on
+        # this screen (`EventList`), so we don't need to filter on
+        # `event.data_table`.
+        del event
+        self._refresh_detail()
 
     def _currently_selected_component(self) -> StoredComponent | None:
         event_list: EventList = self.query_one(EventList)

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 
+from rich.text import Text
+
 from chronos.domain import (
     AppConfig,
     CalendarRef,
@@ -163,9 +165,9 @@ def format_friendly_start(start: datetime, today: date) -> str:
     if delta == -1:
         return f"Yesterday {time_str}"
     if 1 < delta < 7:
-        return f"{moment.strftime('%A')} {time_str}"
+        return f"{moment.strftime('%a')} {time_str}"
     if -7 < delta < -1:
-        return f"Last {moment.strftime('%A')} {time_str}"
+        return f"Last {moment.strftime('%a')} {time_str}"
     if moment.year == today.year:
         return f"{moment.strftime('%a %d %b')} {time_str}"
     return f"{moment.strftime('%a %d %b %Y')} {time_str}"
@@ -191,13 +193,35 @@ def format_duration(start: datetime, end: datetime | None) -> str:
     return "".join(parts) or "0m"
 
 
-def format_event_row(row: OccurrenceRow, today: date) -> tuple[str, str, str, str, str]:
+def format_event_row(
+    row: OccurrenceRow,
+    today: date,
+    *,
+    now: datetime | None = None,
+) -> tuple[str | Text, str | Text, str | Text, str | Text, str | Text]:
+    """Five cells for the agenda/day/week/month DataTable.
+
+    When `now` is supplied and the occurrence has fully ended (its
+    `end`, or `start` if there's no end, is strictly before `now`),
+    every cell is wrapped in a Rich `Text` with a `dim` style so the
+    row renders muted. In-progress and future rows return plain
+    strings — DataTable accepts a mix of `str` and `Text` cells.
+    """
     when = format_friendly_start(row.occurrence.start, today)
     duration = format_duration(row.occurrence.start, row.occurrence.end)
     summary = row.component.summary or "(no summary)"
     calendar = row.component.ref.calendar_name
     location = row.component.location or ""
-    return when, duration, summary, calendar, location
+    if now is None or not _occurrence_is_past(row.occurrence, now):
+        return when, duration, summary, calendar, location
+    cells = (when, duration, summary, calendar, location)
+    dimmed = tuple(Text(c, style="dim") for c in cells)
+    return dimmed[0], dimmed[1], dimmed[2], dimmed[3], dimmed[4]
+
+
+def _occurrence_is_past(occurrence: Occurrence, now: datetime) -> bool:
+    boundary = occurrence.end or occurrence.start
+    return boundary < now
 
 
 def format_todo_row(todo: VTodo) -> tuple[str, str, str, str]:
