@@ -252,8 +252,14 @@ def format_event_row(
     today: date,
     *,
     now: datetime | None = None,
-) -> tuple[str | Text, str | Text, str | Text, str | Text, str | Text]:
-    """Five cells for the agenda DataTable.
+) -> tuple[str | Text, str | Text, str | Text, str | Text, str | Text, str | Text]:
+    """Six cells for the agenda DataTable: Day, Time, Duration,
+    Summary, Calendar, Location.
+
+    Day and Time are split into separate columns so `EventList` can
+    blank the Day cell on rows that share the previous row's day,
+    producing a paper-agenda look where each day is announced once.
+    The view title carries the year, so the Day cell never repeats it.
 
     When `now` is supplied and the occurrence has fully ended (its
     `end`, or `start` if there's no end, is strictly before `now`),
@@ -262,27 +268,48 @@ def format_event_row(
     strings — DataTable accepts a mix of `str` and `Text` cells.
 
     VTodo rows (and any synthesised full-day occurrence) get a
-    📋 marker on the summary so they're visually distinct from
-    events, with the time column reading "Day name · all day" since
-    the hour-of-day component is meaningless for them.
+    📋 marker on the summary, "all day" in the Time column, and an
+    empty Duration cell so the eye doesn't see "1d" repeated for
+    every todo.
     """
     is_full_day = _is_full_day(row.occurrence)
     is_todo = isinstance(row.component, VTodo)
+    day = _format_event_day(row.occurrence.start, today)
     if is_full_day:
-        when = _format_all_day(row.occurrence.start, today)
-        duration = "all day"
+        event_time = "all day"
+        duration = ""
     else:
-        when = format_friendly_start(row.occurrence.start, today)
+        event_time = row.occurrence.start.astimezone(UTC).strftime("%H:%M")
         duration = format_duration(row.occurrence.start, row.occurrence.end)
     raw_summary = row.component.summary or "(no summary)"
     summary = f"📋 {raw_summary}" if is_todo else raw_summary
     calendar = row.component.ref.calendar_name
     location = row.component.location or ""
+    cells = (day, event_time, duration, summary, calendar, location)
     if now is None or not _occurrence_is_past(row.occurrence, now):
-        return when, duration, summary, calendar, location
-    cells = (when, duration, summary, calendar, location)
+        return cells
     dimmed = tuple(Text(c, style="dim") for c in cells)
-    return dimmed[0], dimmed[1], dimmed[2], dimmed[3], dimmed[4]
+    return dimmed[0], dimmed[1], dimmed[2], dimmed[3], dimmed[4], dimmed[5]
+
+
+def _format_event_day(start: datetime, today: date) -> str:
+    """Day label for the agenda Day column.
+
+    `Yesterday` / `Today` / `Tomorrow` for those three special days;
+    everything else as `DD MMM ddd` ("26 May Tue", "30 Apr Wed").
+    The format is fixed-width-ish (10 chars max) so the column
+    width pin in `EventList` stays predictable, and never includes
+    the year — the view title carries that.
+    """
+    moment = start.astimezone(UTC)
+    delta = (moment.date() - today).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    if delta == -1:
+        return "Yesterday"
+    return moment.strftime("%d %b %a")
 
 
 def _is_full_day(occurrence: Occurrence) -> bool:
@@ -296,27 +323,6 @@ def _is_full_day(occurrence: Occurrence) -> bool:
         and end_utc.time() == time.min
         and (end_utc - start_utc) >= timedelta(hours=23)
     )
-
-
-def _format_all_day(start: datetime, today: date) -> str:
-    """`format_friendly_start` minus the time portion — "Today",
-    "Tomorrow", "Tue", or a short date — used for full-day rows
-    where `HH:MM` would always be `00:00`."""
-    moment = start.astimezone(UTC)
-    delta = (moment.date() - today).days
-    if delta == 0:
-        return "Today"
-    if delta == 1:
-        return "Tomorrow"
-    if delta == -1:
-        return "Yesterday"
-    if 1 < delta < 7:
-        return moment.strftime("%a")
-    if -7 < delta < -1:
-        return f"Last {moment.strftime('%a')}"
-    if moment.year == today.year:
-        return moment.strftime("%a %d %b")
-    return moment.strftime("%a %d %b %Y")
 
 
 def _occurrence_is_past(occurrence: Occurrence, now: datetime) -> bool:

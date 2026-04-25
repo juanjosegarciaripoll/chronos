@@ -4,13 +4,48 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any, cast
 
+from rich.text import Text
 from textual.widgets import DataTable
 
 from chronos.domain import ComponentRef, StoredComponent, VTodo
 from chronos.tui.views import OccurrenceRow, format_event_row, format_todo_row
 
-_EVENT_COLUMNS = ("When", "Duration", "Summary", "Calendar", "Location")
-_TODO_COLUMNS = ("Due", "Summary", "Calendar", "Status")
+# (header, fixed width). `width=None` would mean "auto-size to the
+# wider of header / cell content", but Textual 8 sizes the column to
+# the header at `add_column` time and doesn't grow to fit later rows
+# — that's how we ended up with "Toda" / "Yest" truncations before.
+# Explicit widths chosen for worst-case content:
+#   Day      "30 Apr Wed"  → 10 chars
+#   Time     "all day"     → 7 chars
+#   Duration "1d23h"       → 5 chars (header "Duration" is the bound at 8)
+#   Calendar account-supplied label → ~16 covers most names
+# Summary and Location stay flexible so they absorb the residual
+# terminal width.
+_EVENT_COLUMNS_FULL: tuple[tuple[str, int | None], ...] = (
+    ("Day", 12),
+    ("Time", 8),
+    ("Duration", 8),
+    ("Summary", None),
+    ("Calendar", 16),
+    ("Location", None),
+)
+# Compact form for the Agenda view: Calendar and Location go away so
+# Summary gets the screen width. The detail pane on the right still
+# carries the calendar / location info for whichever row is selected,
+# so nothing is lost — the agenda just stops repeating it on every
+# line.
+_EVENT_COLUMNS_AGENDA: tuple[tuple[str, int | None], ...] = (
+    ("Day", 12),
+    ("Time", 8),
+    ("Duration", 8),
+    ("Summary", None),
+)
+_TODO_COLUMNS: tuple[tuple[str, int | None], ...] = (
+    ("Due", 22),
+    ("Summary", None),
+    ("Calendar", 16),
+    ("Status", 14),
+)
 
 
 class EventList(DataTable[str]):
@@ -32,8 +67,22 @@ class EventList(DataTable[str]):
         *,
         today: date,
         now: datetime | None = None,
+        compact: bool = False,
     ) -> None:
-        self._reset(_EVENT_COLUMNS, "events")
+        """Render `rows` as agenda-style entries.
+
+        `compact=True` drops the Calendar and Location columns —
+        used by the Agenda view, where the detail pane on the right
+        carries that info for the highlighted row.
+        """
+        columns = _EVENT_COLUMNS_AGENDA if compact else _EVENT_COLUMNS_FULL
+        self._reset(columns, "events")
+        # The Day cell is blanked on rows that share the previous
+        # row's day, so each day is announced once and the eye reads
+        # the column as a paper-agenda-style header. Rows are already
+        # sorted by start time in `gather_occurrences`, so a simple
+        # last-seen tracker is enough.
+        prev_day_plain: str | None = None
         for row in rows:
             key = self._row_key(
                 row.component.ref,
@@ -41,12 +90,24 @@ class EventList(DataTable[str]):
                 instance=row.occurrence.start.isoformat(),
             )
             cells = format_event_row(row, today, now=now)
+            day_cell = cells[0]
+            day_plain = day_cell.plain if isinstance(day_cell, Text) else day_cell
+            if day_plain == prev_day_plain:
+                day_cell = Text("", style="dim") if isinstance(day_cell, Text) else ""
+            else:
+                prev_day_plain = day_plain
+            full_row = (day_cell, *cells[1:])
+            # Slice to whichever column set is active so compact mode
+            # actually drops the trailing cells instead of feeding
+            # `add_row` more values than there are columns.
+            sliced = full_row[: len(columns)]
             # DataTable accepts `Text` cells at runtime, but its public
             # type stub only declares `str`. Past-event rows come back
             # as `Text(..., style="dim")` so the row renders muted; the
             # cast keeps the type-checker happy without lying about the
             # element type at the source.
-            self.add_row(*cast(tuple[Any, ...], cells), key=key)
+            rendered = cast(tuple[Any, ...], sliced)
+            self.add_row(*rendered, key=key)
             self._refs[key] = row.component.ref
 
     def show_todos(self, todos: Sequence[VTodo]) -> None:
@@ -67,11 +128,11 @@ class EventList(DataTable[str]):
             return None
         return self._refs.get(row_key.value)
 
-    def _reset(self, columns: tuple[str, ...], mode: str) -> None:
+    def _reset(self, columns: tuple[tuple[str, int | None], ...], mode: str) -> None:
         self.clear(columns=True)
         self._refs = {}
-        for column in columns:
-            self.add_column(column)
+        for label, width in columns:
+            self.add_column(label, width=width)
         self._mode = mode
 
     @staticmethod

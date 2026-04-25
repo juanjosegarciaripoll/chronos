@@ -324,7 +324,13 @@ class MainScreen(Screen[None]):
                 days=self._grid_days,
             )
         self._last_rows = rows
-        event_list.show_events(rows, today=today, now=now)
+        # Agenda gets the compact column set (no Calendar / Location)
+        # — the detail pane on the right still shows that info for
+        # the highlighted row, and freeing the columns lets Summary
+        # breathe.
+        event_list.show_events(
+            rows, today=today, now=now, compact=self._view == ViewKind.AGENDA
+        )
         self._refresh_detail()
 
     def _refresh_detail(self) -> None:

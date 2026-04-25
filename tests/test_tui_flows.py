@@ -450,7 +450,7 @@ class DurationFormatTest(unittest.TestCase):
 class RowFormattingTest(unittest.TestCase):
     TODAY = date(2026, 4, 25)
 
-    def test_format_event_row_has_five_columns_with_friendly_when(self) -> None:
+    def test_format_event_row_splits_day_and_time(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
         event = VEvent(
             ref=ref,
@@ -480,13 +480,38 @@ class RowFormattingTest(unittest.TestCase):
             component=event,
         )
         cells = format_event_row(row, self.TODAY)
-        # 2026-06-15 is well over a week out → short-date format.
-        self.assertIn("Jun", cells[0])
-        self.assertIn("09:00", cells[0])
-        self.assertEqual(cells[1], "1h")
-        self.assertEqual(cells[2], "Hello")
-        self.assertEqual(cells[3], WORK_CAL)
-        self.assertEqual(cells[4], "Room 1")
+        # 6 cells: Day, Time, Duration, Summary, Calendar, Location.
+        self.assertEqual(len(cells), 6)
+        # 2026-06-15 is a Monday, well outside the today/tomorrow/
+        # yesterday window → "DD MMM ddd" form.
+        self.assertEqual(cells[0], "15 Jun Mon")
+        self.assertEqual(cells[1], "09:00")
+        self.assertEqual(cells[2], "1h")
+        self.assertEqual(cells[3], "Hello")
+        self.assertEqual(cells[4], WORK_CAL)
+        self.assertEqual(cells[5], "Room 1")
+
+    def test_format_event_row_uses_friendly_words_for_today_tomorrow(self) -> None:
+        # `Yesterday` / `Today` / `Tomorrow` replace the absolute date
+        # in the Day column for those three days only — everything
+        # else uses the literal `DD MMM ddd` form.
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        event = _empty_event(ref)
+
+        for delta, label in ((-1, "Yesterday"), (0, "Today"), (1, "Tomorrow")):
+            start = datetime(2026, 4, 25 + delta, 9, tzinfo=UTC)
+            row = OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=start,
+                    end=start + timedelta(hours=1),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            )
+            cells = format_event_row(row, self.TODAY)
+            self.assertEqual(cells[0], label, f"delta={delta}")
 
     def test_format_event_row_handles_missing_summary_and_location(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
@@ -502,9 +527,10 @@ class RowFormattingTest(unittest.TestCase):
             component=event,
         )
         cells = format_event_row(row, self.TODAY)
-        self.assertEqual(cells[1], "")  # no end -> no duration
-        self.assertEqual(cells[2], "(no summary)")
-        self.assertEqual(cells[4], "")
+        self.assertEqual(cells[1], "09:00")  # Time
+        self.assertEqual(cells[2], "")  # no end -> no duration
+        self.assertEqual(cells[3], "(no summary)")
+        self.assertEqual(cells[5], "")  # no location
 
     def test_past_event_cells_are_dimmed_when_now_is_supplied(self) -> None:
         # Regression: in the agenda view, events whose end has already
