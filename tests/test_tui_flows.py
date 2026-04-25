@@ -30,20 +30,20 @@ from chronos.tui.app import ChronosApp, TuiServices
 from chronos.tui.screens.agenda_screen import (
     title_for as agenda_title,
 )
+from chronos.tui.screens.agenda_screen import (
+    window_for as agenda_window_for,
+)
 from chronos.tui.screens.confirm_screen import ConfirmScreen
 from chronos.tui.screens.day_view_screen import title_for as day_title
-from chronos.tui.screens.day_view_screen import window_for as day_window_for
 from chronos.tui.screens.event_detail_screen import EventDetailScreen
 from chronos.tui.screens.event_edit_screen import EditDraft, EventEditScreen
+from chronos.tui.screens.grid_view_screen import title_for as grid_title
+from chronos.tui.screens.grid_view_screen import window_for as grid_window_for
 from chronos.tui.screens.main_screen import MainScreen
-from chronos.tui.screens.month_view_screen import title_for as month_title
-from chronos.tui.screens.month_view_screen import window_for as month_window_for
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
-from chronos.tui.screens.todo_list_screen import title_for as todo_title
-from chronos.tui.screens.week_view_screen import title_for as week_title
-from chronos.tui.screens.week_view_screen import window_for as week_window_for
 from chronos.tui.views import (
+    AgendaWindow,
     CalendarSelection,
     OccurrenceRow,
     ViewKind,
@@ -184,29 +184,39 @@ class ViewScreenTitleTest(unittest.TestCase):
     def test_day_title_iso_date(self) -> None:
         self.assertEqual(day_title(date(2026, 4, 25)), "Day · 2026-04-25")
 
-    def test_week_title_includes_monday_and_sunday(self) -> None:
-        title = week_title(date(2026, 4, 25))
-        self.assertIn("2026-04-20", title)
-        self.assertIn("2026-04-26", title)
-
-    def test_month_title_uses_month_name(self) -> None:
-        self.assertEqual(month_title(date(2026, 4, 25)), "Month · April 2026")
-        self.assertEqual(month_title(date(2026, 12, 1)), "Month · December 2026")
-        self.assertEqual(month_title(date(2026, 1, 1)), "Month · January 2026")
-
-    def test_agenda_title_shows_window(self) -> None:
-        title = agenda_title(date(2026, 4, 25))
+    def test_grid_title_includes_start_and_end(self) -> None:
+        # Grid view defaults to 4 days starting from the viewed date.
+        title = grid_title(date(2026, 4, 25))
         self.assertIn("2026-04-25", title)
-        self.assertIn("2026-05-09", title)
+        self.assertIn("2026-04-28", title)
 
-    def test_todo_title_constant(self) -> None:
-        self.assertEqual(todo_title(), "Todos")
+    def test_agenda_title_reflects_window_mode(self) -> None:
+        # Day mode: just today.
+        day_title_text = agenda_title(date(2026, 4, 25), AgendaWindow.DAY)
+        self.assertIn("Day", day_title_text)
+        self.assertIn("2026-04-25", day_title_text)
+        # Week mode: aligned Mon–Sun (2026-04-20 to 2026-04-26).
+        week_title_text = agenda_title(date(2026, 4, 25), AgendaWindow.WEEK)
+        self.assertIn("Week", week_title_text)
+        self.assertIn("2026-04-20", week_title_text)
+        # Month mode: full April 2026.
+        month_title_text = agenda_title(date(2026, 4, 25), AgendaWindow.MONTH)
+        self.assertIn("Month", month_title_text)
+        self.assertIn("2026-04-01", month_title_text)
 
-    def test_view_window_helpers_match_views_module(self) -> None:
+    def test_agenda_window_for_uses_calendar_aligned_ranges(self) -> None:
         d = date(2026, 4, 25)
-        self.assertEqual(day_window_for(d), day_window(d))
-        self.assertEqual(week_window_for(d), week_window(d))
-        self.assertEqual(month_window_for(d), month_window(d))
+        self.assertEqual(agenda_window_for(d, AgendaWindow.DAY), day_window(d))
+        self.assertEqual(agenda_window_for(d, AgendaWindow.WEEK), week_window(d))
+        self.assertEqual(agenda_window_for(d, AgendaWindow.MONTH), month_window(d))
+
+    def test_grid_window_for_default_is_four_days(self) -> None:
+        from datetime import time as _time
+
+        start, end = grid_window_for(date(2026, 4, 25))
+        expected_start = datetime.combine(date(2026, 4, 25), _time.min, tzinfo=UTC)
+        self.assertEqual(start, expected_start)
+        self.assertEqual(end - start, timedelta(days=4))
 
 
 class GatherOccurrencesTest(unittest.TestCase):
@@ -819,33 +829,70 @@ class TuiFlowTestCase(unittest.IsolatedAsyncioTestCase):
         return services
 
 
-class FiveViewsNavigableTest(TuiFlowTestCase):
-    async def test_view_switch_keys_change_active_view(self) -> None:
+class ViewSwitchTest(TuiFlowTestCase):
+    """`Ctrl-A`, `Ctrl-D`, `Ctrl-G` flip between the three top-level views.
+    Inside the agenda view, `d` / `w` / `m` flip the agenda window
+    (day / week / month) without leaving agenda."""
+
+    async def test_ctrl_keys_switch_between_top_level_views(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             assert isinstance(pilot.app.screen, MainScreen)
 
-            await pilot.press("d")
+            await pilot.press("ctrl+d")
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.DAY)
 
-            await pilot.press("w")
+            await pilot.press("ctrl+g")
             await pilot.pause()
-            self.assertEqual(pilot.app.screen._view, ViewKind.WEEK)
+            self.assertEqual(pilot.app.screen._view, ViewKind.GRID)
 
-            await pilot.press("m")
-            await pilot.pause()
-            self.assertEqual(pilot.app.screen._view, ViewKind.MONTH)
-
-            await pilot.press("a")
+            await pilot.press("ctrl+a")
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.AGENDA)
 
-            await pilot.press("T")
+    async def test_d_w_m_tune_agenda_window_when_in_agenda(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertEqual(pilot.app.screen._view, ViewKind.TODOS)
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+a")
+            await pilot.pause()
+
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertEqual(screen._agenda_window, AgendaWindow.DAY)
+
+            await pilot.press("w")
+            await pilot.pause()
+            self.assertEqual(screen._agenda_window, AgendaWindow.WEEK)
+
+            await pilot.press("m")
+            await pilot.pause()
+            self.assertEqual(screen._agenda_window, AgendaWindow.MONTH)
+            # And the view is still agenda — d/w/m don't switch views.
+            self.assertEqual(screen._view, ViewKind.AGENDA)
+
+    async def test_d_w_m_are_noops_outside_agenda(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+d")  # Day view
+            await pilot.pause()
+            initial_window = screen._agenda_window
+            await pilot.press("m")
+            await pilot.pause()
+            # Pressing `m` outside agenda must not flip the agenda
+            # window AND must not switch the view.
+            self.assertEqual(screen._agenda_window, initial_window)
+            self.assertEqual(screen._view, ViewKind.DAY)
 
 
 class QuitBindingTest(TuiFlowTestCase):
@@ -876,175 +923,119 @@ class TodayResetsViewedDateTest(TuiFlowTestCase):
             self.assertEqual(screen._viewed_date, NOW.date())
 
 
-class TodayAndTodosKeysSwappedTest(TuiFlowTestCase):
-    """Regression: t / T were originally swapped (t=Todos, T=Today). The
-    user-friendly mapping is t=Today (lowercase, the most common
-    action), T=Todos (uppercase, the secondary view). And: some
-    terminals emit `shift+t` for the same physical keypress instead of
-    the uppercase character `T`, so we bind both forms.
-    """
+class TodayKeyTest(TuiFlowTestCase):
+    """`t` snaps `_viewed_date` back to today's date in any view."""
 
-    async def test_lowercase_t_jumps_to_today_from_day_view(self) -> None:
+    async def test_t_snaps_viewed_date_in_day_view(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            screen._view = ViewKind.DAY
+            await pilot.press("ctrl+d")
+            await pilot.pause()
             screen._viewed_date = date(1999, 1, 1)
             screen.refresh_view()
             await pilot.pause()
             await pilot.press("t")
             await pilot.pause()
-            # In day view: snaps viewed_date to now, view stays day.
             self.assertEqual(screen._viewed_date, NOW.date())
             self.assertEqual(screen._view, ViewKind.DAY)
 
-    async def test_lowercase_t_from_agenda_switches_to_day_view(self) -> None:
+
+class DateNavigationTest(TuiFlowTestCase):
+    """`n` / `p` shift the viewed date by one day in Day / Grid views.
+    `N` / `P` shift by the grid's chunk size — Grid view only. All
+    four are no-ops in Agenda."""
+
+    async def test_n_advances_one_day_in_day_view(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            # Agenda view ignores viewed_date, so action_today there
-            # would be invisible. We promote it to a view-switch so
-            # the user always sees today's events on press.
-            screen._view = ViewKind.AGENDA
-            screen._viewed_date = date(1999, 1, 1)
-            screen.refresh_view()
+            await pilot.press("ctrl+d")
             await pilot.pause()
-            await pilot.press("t")
+            start = screen._viewed_date
+            await pilot.press("n")
             await pilot.pause()
-            self.assertEqual(screen._view, ViewKind.DAY)
-            self.assertEqual(screen._viewed_date, NOW.date())
+            self.assertEqual(screen._viewed_date, start + timedelta(days=1))
 
-    async def test_lowercase_t_from_todos_switches_to_day_view(self) -> None:
+    async def test_p_retreats_one_day_in_day_view(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            screen._view = ViewKind.TODOS
-            screen._viewed_date = date(1999, 1, 1)
-            screen.refresh_view()
+            await pilot.press("ctrl+d")
             await pilot.pause()
-            await pilot.press("t")
+            start = screen._viewed_date
+            await pilot.press("p")
             await pilot.pause()
-            self.assertEqual(screen._view, ViewKind.DAY)
-            self.assertEqual(screen._viewed_date, NOW.date())
+            self.assertEqual(screen._viewed_date, start - timedelta(days=1))
 
-    async def test_uppercase_t_switches_to_todos(self) -> None:
+    async def test_capital_n_advances_one_chunk_in_grid_view(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            screen._view = ViewKind.AGENDA
-            screen._viewed_date = date(1999, 1, 1)
-            screen.refresh_view()
-            await pilot.pause()
-            await pilot.press("T")
-            await pilot.pause()
-            # action_view_todos: view switches, viewed_date untouched.
-            self.assertEqual(screen._view, ViewKind.TODOS)
-            self.assertEqual(screen._viewed_date, date(1999, 1, 1))
-
-    async def test_shift_plus_t_alias_also_switches_to_todos(self) -> None:
-        services = self.services()
-        app = ChronosApp(services)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            screen._view = ViewKind.AGENDA
-            screen.refresh_view()
-            await pilot.pause()
-            await pilot.press("shift+t")
-            await pilot.pause()
-            self.assertEqual(screen._view, ViewKind.TODOS)
-
-
-class NextPrevPeriodTest(TuiFlowTestCase):
-    """`N` / `P` advance and retreat the viewed date by one week or
-    one month, depending on the current view. They're no-ops elsewhere.
-    """
-
-    async def test_next_in_week_view_jumps_seven_days(self) -> None:
-        services = self.services()
-        app = ChronosApp(services)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            await pilot.press("w")
+            await pilot.press("ctrl+g")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("N")
             await pilot.pause()
-            self.assertEqual(screen._viewed_date, start + timedelta(days=7))
+            self.assertEqual(
+                screen._viewed_date, start + timedelta(days=screen._grid_days)
+            )
 
-    async def test_prev_in_week_view_retreats_seven_days(self) -> None:
+    async def test_capital_p_retreats_one_chunk_in_grid_view(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("w")
+            await pilot.press("ctrl+g")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("P")
             await pilot.pause()
-            self.assertEqual(screen._viewed_date, start - timedelta(days=7))
+            self.assertEqual(
+                screen._viewed_date, start - timedelta(days=screen._grid_days)
+            )
 
-    async def test_next_in_month_view_advances_one_calendar_month(self) -> None:
+    async def test_capital_n_in_day_view_is_a_noop(self) -> None:
+        # Day view has no chunk concept — capital N/P only act in
+        # Grid. `n`/`p` (lowercase) still work in Day.
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("m")
-            await pilot.pause()
-            screen._viewed_date = date(2026, 1, 31)  # exercise day clamp
-            screen.refresh_view()
-            await pilot.pause()
-            await pilot.press("N")
-            await pilot.pause()
-            # Feb has 28 days in 2026 → relativedelta clamps to 2026-02-28.
-            self.assertEqual(screen._viewed_date, date(2026, 2, 28))
-
-    async def test_prev_in_month_view_handles_year_rollover(self) -> None:
-        services = self.services()
-        app = ChronosApp(services)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            await pilot.press("m")
-            await pilot.pause()
-            screen._viewed_date = date(2026, 1, 15)
-            screen.refresh_view()
-            await pilot.pause()
-            await pilot.press("P")
-            await pilot.pause()
-            self.assertEqual(screen._viewed_date, date(2025, 12, 15))
-
-    async def test_next_in_agenda_view_is_a_noop(self) -> None:
-        services = self.services()
-        app = ChronosApp(services)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            await pilot.press("a")  # AGENDA ignores _viewed_date.
+            await pilot.press("ctrl+d")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("N")
+            await pilot.pause()
+            self.assertEqual(screen._viewed_date, start)
+
+    async def test_n_in_agenda_view_is_a_noop(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+a")
+            await pilot.pause()
+            start = screen._viewed_date
+            await pilot.press("n")
             await pilot.pause()
             self.assertEqual(screen._viewed_date, start)
 
@@ -1076,7 +1067,14 @@ class DetailPaneTracksCursorTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("a")  # Agenda has multiple rows seeded.
+            # Switch to Grid view positioned over the seeded dates
+            # so we have multiple rows to navigate. (Agenda's calendar-
+            # aligned WEEK around `NOW` doesn't catch the seeded May
+            # events.)
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            screen._viewed_date = date(2026, 5, 1)
+            screen.refresh_view()
             await pilot.pause()
 
             first_component = screen._currently_selected_component()
@@ -1111,7 +1109,9 @@ class NewEventFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("n")
+            # `+` opens the new-event editor. (Was `n` before the
+            # keymap reshuffle freed `n` for next-day navigation.)
+            await pilot.press("plus")
             await pilot.pause()
             assert isinstance(pilot.app.screen, EventEditScreen)
             edit = pilot.app.screen
@@ -1268,7 +1268,12 @@ class DeleteFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("a")  # agenda has multiple rows
+            # Grid view positioned over the seeded May events (the
+            # agenda's calendar-aligned WEEK around `NOW` is empty).
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            screen._viewed_date = date(2026, 5, 1)
+            screen.refresh_view()
             await pilot.pause()
             await pilot.press("D")
             await pilot.pause()
@@ -1307,14 +1312,20 @@ class HelpScreenTest(TuiFlowTestCase):
             console.print(renderable)
             text = buffer.getvalue()
             # Each section panel renders its title.
-            for section in ("Views", "Navigation", "Events", "Tools"):
+            for section in (
+                "Views",
+                "Agenda window",
+                "Navigation",
+                "Events",
+                "Tools",
+            ):
                 self.assertIn(section, text, section)
             # And a sample of the bindings that belong to each.
-            for fragment in ("Day", "Week", "Next", "Prev", "Delete", "Help", "Quit"):
+            for fragment in ("Agenda", "Day", "Grid", "Delete", "Help", "Quit"):
                 self.assertIn(fragment, text, fragment)
-            # Hidden aliases (shift+t, shift+n, shift+p, shift+d) must
-            # NOT show up; otherwise the help text is twice as long
-            # and reads as duplicates of the same shortcut.
+            # Aliases (shift+t, shift+n, shift+p, shift+d) must NOT
+            # show up; otherwise the help text is twice as long and
+            # reads as duplicates of the same shortcut.
             for alias in ("shift+n", "shift+p", "shift+d"):
                 self.assertNotIn(alias, text, alias)
 
@@ -1548,7 +1559,7 @@ class EditScreenValidationTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("n")
+            await pilot.press("plus")
             await pilot.pause()
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
@@ -1564,7 +1575,7 @@ class EditScreenValidationTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("n")
+            await pilot.press("plus")
             await pilot.pause()
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
@@ -1579,7 +1590,7 @@ class EditScreenValidationTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("n")
+            await pilot.press("plus")
             await pilot.pause()
             await pilot.press("escape")
             await pilot.pause()

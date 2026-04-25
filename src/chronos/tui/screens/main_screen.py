@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, cast
 
-from dateutil.relativedelta import relativedelta
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
@@ -37,29 +36,21 @@ from chronos.tui.screens.day_view_screen import (
 )
 from chronos.tui.screens.event_detail_screen import EventDetailScreen
 from chronos.tui.screens.event_edit_screen import EditDraft, EventEditScreen
+from chronos.tui.screens.grid_view_screen import (
+    DEFAULT_GRID_DAYS,
+)
+from chronos.tui.screens.grid_view_screen import (
+    rows_for as grid_rows,
+)
+from chronos.tui.screens.grid_view_screen import (
+    title_for as grid_title,
+)
 from chronos.tui.screens.help_screen import HelpScreen
-from chronos.tui.screens.month_view_screen import (
-    rows_for as month_rows,
-)
-from chronos.tui.screens.month_view_screen import (
-    title_for as month_title,
-)
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
 from chronos.tui.screens.sync_progress_screen import SyncProgressScreen
-from chronos.tui.screens.todo_list_screen import (
-    rows_for as todo_rows,
-)
-from chronos.tui.screens.todo_list_screen import (
-    title_for as todo_title,
-)
-from chronos.tui.screens.week_view_screen import (
-    rows_for as week_rows,
-)
-from chronos.tui.screens.week_view_screen import (
-    title_for as week_title,
-)
 from chronos.tui.views import (
+    AgendaWindow,
     CalendarSelection,
     OccurrenceRow,
     ViewKind,
@@ -94,7 +85,14 @@ class MainScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._view: ViewKind = ViewKind.AGENDA
+        # Within the Agenda view, `d`/`w`/`m` flip between
+        # day / week / month windows. Defaults to week — a useful
+        # at-a-glance horizon for most users.
+        self._agenda_window: AgendaWindow = AgendaWindow.WEEK
         self._viewed_date: date = date(2026, 4, 25)  # rebound in on_mount
+        # Multi-day grid chunk size. Phase 4 will swap this for a
+        # terminal-width-aware choice (3 when narrow, 4 when wide).
+        self._grid_days: int = DEFAULT_GRID_DAYS
         self._selection = CalendarSelection(refs=frozenset())
         self._last_rows: tuple[OccurrenceRow, ...] = ()
 
@@ -138,54 +136,69 @@ class MainScreen(Screen[None]):
 
     # View switches ----------------------------------------------------------
 
-    def action_view_day(self) -> None:
-        self._view = ViewKind.DAY
-        self.refresh_view()
-
-    def action_view_week(self) -> None:
-        self._view = ViewKind.WEEK
-        self.refresh_view()
-
-    def action_view_month(self) -> None:
-        self._view = ViewKind.MONTH
-        self.refresh_view()
-
     def action_view_agenda(self) -> None:
         self._view = ViewKind.AGENDA
         self.refresh_view()
 
-    def action_view_todos(self) -> None:
-        self._view = ViewKind.TODOS
+    def action_view_day(self) -> None:
+        self._view = ViewKind.DAY
         self.refresh_view()
+
+    def action_view_grid(self) -> None:
+        self._view = ViewKind.GRID
+        self.refresh_view()
+
+    # Agenda window tuners ----------------------------------------------------
+
+    def action_agenda_window_day(self) -> None:
+        if self._view != ViewKind.AGENDA:
+            return
+        self._agenda_window = AgendaWindow.DAY
+        self.refresh_view()
+
+    def action_agenda_window_week(self) -> None:
+        if self._view != ViewKind.AGENDA:
+            return
+        self._agenda_window = AgendaWindow.WEEK
+        self.refresh_view()
+
+    def action_agenda_window_month(self) -> None:
+        if self._view != ViewKind.AGENDA:
+            return
+        self._agenda_window = AgendaWindow.MONTH
+        self.refresh_view()
+
+    # Date-axis navigation ----------------------------------------------------
 
     def action_today(self) -> None:
-        # Always do something visible: snap viewed_date to now AND, if
-        # we're on a view that ignores viewed_date (agenda / todos),
-        # switch to the day view so the user actually sees "today".
         self._viewed_date = self._services().now().date()
-        if self._view in (ViewKind.AGENDA, ViewKind.TODOS):
-            self._view = ViewKind.DAY
+        # Agenda is anchored on the user's actual today, so it gets
+        # the rebind for free. The viewed_date update only matters
+        # in Day / Grid views.
         self.refresh_view()
 
-    def action_next_period(self) -> None:
-        self._step_period(direction=+1)
+    def action_next_day(self) -> None:
+        self._shift_viewed_date(timedelta(days=+1))
 
-    def action_prev_period(self) -> None:
-        self._step_period(direction=-1)
+    def action_prev_day(self) -> None:
+        self._shift_viewed_date(timedelta(days=-1))
 
-    def _step_period(self, *, direction: int) -> None:
-        # Advance / retreat the viewed date by the natural unit for
-        # the current view. Agenda + todos ignore `_viewed_date`, so
-        # `N` / `P` are no-ops there. Day view also doesn't act here
-        # — the user can hop ±1 day with `t` (today) and the date
-        # picker; binding day to N/P would clash with the user's
-        # explicit "week or month" framing.
-        if self._view == ViewKind.WEEK:
-            self._viewed_date = self._viewed_date + timedelta(days=7 * direction)
-        elif self._view == ViewKind.MONTH:
-            self._viewed_date = self._viewed_date + relativedelta(months=direction)
-        else:
+    def action_next_chunk(self) -> None:
+        if self._view != ViewKind.GRID:
             return
+        self._shift_viewed_date(timedelta(days=+self._grid_days))
+
+    def action_prev_chunk(self) -> None:
+        if self._view != ViewKind.GRID:
+            return
+        self._shift_viewed_date(timedelta(days=-self._grid_days))
+
+    def _shift_viewed_date(self, delta: timedelta) -> None:
+        # Day / Grid views ride the viewed date; Agenda doesn't, so
+        # n/p/N/P are no-ops there.
+        if self._view not in (ViewKind.DAY, ViewKind.GRID):
+            return
+        self._viewed_date = self._viewed_date + delta
         self.refresh_view()
 
     def action_quit(self) -> None:
@@ -269,7 +282,16 @@ class MainScreen(Screen[None]):
         # at a 2014 day still shows the absolute date, not "Today".
         now = services.now()
         today = now.date()
-        if self._view == ViewKind.DAY:
+        if self._view == ViewKind.AGENDA:
+            title_label.update(agenda_title(today, self._agenda_window))
+            rows = agenda_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+                today=today,
+                mode=self._agenda_window,
+            )
+        elif self._view == ViewKind.DAY:
             title_label.update(day_title(self._viewed_date))
             rows = day_rows(
                 index=services.index,
@@ -277,47 +299,17 @@ class MainScreen(Screen[None]):
                 selection=self._selection,
                 viewed=self._viewed_date,
             )
-            self._last_rows = rows
-            event_list.show_events(rows, today=today, now=now)
-        elif self._view == ViewKind.WEEK:
-            title_label.update(week_title(self._viewed_date))
-            rows = week_rows(
+        else:  # ViewKind.GRID
+            title_label.update(grid_title(self._viewed_date, self._grid_days))
+            rows = grid_rows(
                 index=services.index,
                 calendars=calendars,
                 selection=self._selection,
                 viewed=self._viewed_date,
+                days=self._grid_days,
             )
-            self._last_rows = rows
-            event_list.show_events(rows, today=today, now=now)
-        elif self._view == ViewKind.MONTH:
-            title_label.update(month_title(self._viewed_date))
-            rows = month_rows(
-                index=services.index,
-                calendars=calendars,
-                selection=self._selection,
-                viewed=self._viewed_date,
-            )
-            self._last_rows = rows
-            event_list.show_events(rows, today=today, now=now)
-        elif self._view == ViewKind.AGENDA:
-            title_label.update(agenda_title(today))
-            rows = agenda_rows(
-                index=services.index,
-                calendars=calendars,
-                selection=self._selection,
-                today=today,
-            )
-            self._last_rows = rows
-            event_list.show_events(rows, today=today, now=now)
-        else:  # TODOS
-            title_label.update(todo_title())
-            self._last_rows = ()
-            todos = todo_rows(
-                index=services.index,
-                calendars=calendars,
-                selection=self._selection,
-            )
-            event_list.show_todos(todos)
+        self._last_rows = rows
+        event_list.show_events(rows, today=today, now=now)
         self._refresh_detail()
 
     def _refresh_detail(self) -> None:

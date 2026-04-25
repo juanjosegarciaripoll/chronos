@@ -29,11 +29,35 @@ DEFAULT_AGENDA_DAYS = 14
 
 
 class ViewKind(StrEnum):
+    """Top-level view modes the user toggles via Ctrl-A / Ctrl-D / Ctrl-G.
+
+    Older versions had separate Day/Week/Month/Todos views. Those
+    collapsed into:
+
+    - `AGENDA` — flat list, window controlled by `AgendaWindow`
+    - `DAY`    — single-day timeline grid
+    - `GRID`   — multi-day timeline grid (3 or 4 days, terminal-width
+                 dependent)
+
+    VTodos are rendered inline as full-day items in every view; there
+    is no longer a dedicated Todos screen.
+    """
+
+    AGENDA = "agenda"
+    DAY = "day"
+    GRID = "grid"
+
+
+class AgendaWindow(StrEnum):
+    """Sub-mode of `ViewKind.AGENDA` controlled by `d` / `w` / `m`.
+
+    Maps to the same windowing helpers the standalone Day/Week/Month
+    views used to drive: `day_window`, `week_window`, `month_window`.
+    """
+
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
-    AGENDA = "agenda"
-    TODOS = "todos"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -105,17 +129,18 @@ def gather_occurrences(
 ) -> tuple[OccurrenceRow, ...]:
     """Query each calendar for occurrences in `window`, joining components.
 
-    Trashed components are dropped. Result is sorted by start time, then
-    by `(account, calendar, uid)` for deterministic output.
+    Trashed components are dropped. VTodos with a `due` (or `dtstart`)
+    inside the window are injected as synthetic full-day rows so the
+    user sees their tasks alongside events without a separate todos
+    view. Result is sorted by start time, then by
+    `(account, calendar, uid)` for deterministic output.
     """
     rows: list[OccurrenceRow] = []
     for calendar in calendars:
         if not selection.contains(calendar):
             continue
-        occurrences = index.query_occurrences(calendar, window[0], window[1])
-        if not occurrences:
-            continue
         components = {c.ref: c for c in index.list_calendar_components(calendar)}
+        occurrences = index.query_occurrences(calendar, window[0], window[1])
         for occ in occurrences:
             component = components.get(occ.ref)
             if component is None:
@@ -123,6 +148,35 @@ def gather_occurrences(
             if component.local_status == LocalStatus.TRASHED:
                 continue
             rows.append(OccurrenceRow(occurrence=occ, component=component))
+        # Inject VTodos as full-day rows. The `occurrences` cache
+        # only ever contains VEvents (sync's `populate_occurrences`
+        # iterates VEvent masters), so we don't double-count by
+        # adding VTodos here.
+        for component in components.values():
+            if not isinstance(component, VTodo):
+                continue
+            if component.local_status != LocalStatus.ACTIVE:
+                continue
+            anchor = component.due or component.dtstart
+            if anchor is None:
+                continue
+            if not (window[0] <= anchor < window[1]):
+                continue
+            day_start = datetime.combine(
+                anchor.astimezone(UTC).date(), time.min, tzinfo=UTC
+            )
+            rows.append(
+                OccurrenceRow(
+                    occurrence=Occurrence(
+                        ref=component.ref,
+                        start=day_start,
+                        end=day_start + timedelta(days=1),
+                        recurrence_id=None,
+                        is_override=False,
+                    ),
+                    component=component,
+                )
+            )
     rows.sort(key=_row_sort_key)
     return tuple(rows)
 
@@ -199,17 +253,29 @@ def format_event_row(
     *,
     now: datetime | None = None,
 ) -> tuple[str | Text, str | Text, str | Text, str | Text, str | Text]:
-    """Five cells for the agenda/day/week/month DataTable.
+    """Five cells for the agenda DataTable.
 
     When `now` is supplied and the occurrence has fully ended (its
     `end`, or `start` if there's no end, is strictly before `now`),
     every cell is wrapped in a Rich `Text` with a `dim` style so the
     row renders muted. In-progress and future rows return plain
     strings — DataTable accepts a mix of `str` and `Text` cells.
+
+    VTodo rows (and any synthesised full-day occurrence) get a
+    📋 marker on the summary so they're visually distinct from
+    events, with the time column reading "Day name · all day" since
+    the hour-of-day component is meaningless for them.
     """
-    when = format_friendly_start(row.occurrence.start, today)
-    duration = format_duration(row.occurrence.start, row.occurrence.end)
-    summary = row.component.summary or "(no summary)"
+    is_full_day = _is_full_day(row.occurrence)
+    is_todo = isinstance(row.component, VTodo)
+    if is_full_day:
+        when = _format_all_day(row.occurrence.start, today)
+        duration = "all day"
+    else:
+        when = format_friendly_start(row.occurrence.start, today)
+        duration = format_duration(row.occurrence.start, row.occurrence.end)
+    raw_summary = row.component.summary or "(no summary)"
+    summary = f"📋 {raw_summary}" if is_todo else raw_summary
     calendar = row.component.ref.calendar_name
     location = row.component.location or ""
     if now is None or not _occurrence_is_past(row.occurrence, now):
@@ -217,6 +283,40 @@ def format_event_row(
     cells = (when, duration, summary, calendar, location)
     dimmed = tuple(Text(c, style="dim") for c in cells)
     return dimmed[0], dimmed[1], dimmed[2], dimmed[3], dimmed[4]
+
+
+def _is_full_day(occurrence: Occurrence) -> bool:
+    """A row spans midnight-to-midnight UTC."""
+    if occurrence.end is None:
+        return False
+    start_utc = occurrence.start.astimezone(UTC)
+    end_utc = occurrence.end.astimezone(UTC)
+    return (
+        start_utc.time() == time.min
+        and end_utc.time() == time.min
+        and (end_utc - start_utc) >= timedelta(hours=23)
+    )
+
+
+def _format_all_day(start: datetime, today: date) -> str:
+    """`format_friendly_start` minus the time portion — "Today",
+    "Tomorrow", "Tue", or a short date — used for full-day rows
+    where `HH:MM` would always be `00:00`."""
+    moment = start.astimezone(UTC)
+    delta = (moment.date() - today).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    if delta == -1:
+        return "Yesterday"
+    if 1 < delta < 7:
+        return moment.strftime("%a")
+    if -7 < delta < -1:
+        return f"Last {moment.strftime('%a')}"
+    if moment.year == today.year:
+        return moment.strftime("%a %d %b")
+    return moment.strftime("%a %d %b %Y")
 
 
 def _occurrence_is_past(occurrence: Occurrence, now: datetime) -> bool:
@@ -341,6 +441,7 @@ def _detail_when(value: datetime | None, today: date) -> str:
 
 __all__ = [
     "DEFAULT_AGENDA_DAYS",
+    "AgendaWindow",
     "CalendarSelection",
     "OccurrenceRow",
     "ViewKind",

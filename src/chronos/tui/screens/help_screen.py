@@ -22,17 +22,33 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
         "Views",
         frozenset(
             {
-                "view_day",
-                "view_week",
-                "view_month",
                 "view_agenda",
-                "view_todos",
+                "view_day",
+                "view_grid",
+            }
+        ),
+    ),
+    (
+        "Agenda window",
+        frozenset(
+            {
+                "agenda_window_day",
+                "agenda_window_week",
+                "agenda_window_month",
             }
         ),
     ),
     (
         "Navigation",
-        frozenset({"today", "next_period", "prev_period"}),
+        frozenset(
+            {
+                "today",
+                "next_day",
+                "prev_day",
+                "next_chunk",
+                "prev_chunk",
+            }
+        ),
     ),
     (
         "Events",
@@ -119,7 +135,13 @@ class _Row:
 
 def _binding_row(binding: BindingType) -> _Row | None:
     if isinstance(binding, Binding):
-        if not binding.show:
+        # Drop the `shift+letter` aliases — they're terminal-quirk
+        # doubles of the bare uppercase keys, not separate shortcuts.
+        # `show=False` bindings are kept (`d`/`w`/`m` agenda tuners
+        # and `n`/`p`/`N`/`P` date-axis nav are hidden from the
+        # footer to keep it uncluttered, but a help screen that
+        # silently dropped them would defeat its own purpose).
+        if binding.key.startswith("shift+"):
             return None
         key = binding.key_display or binding.key
         return _Row(key, binding.action, binding.description)
