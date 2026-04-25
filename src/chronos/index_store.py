@@ -402,6 +402,20 @@ class SqliteIndexRepository:
                 ),
             )
 
+    def clear_all_sync_state(self) -> int:
+        """Drop every per-calendar sync token.
+
+        Used by `chronos sync --force` to put every calendar back on
+        the slow path: the next `_sync_calendar` sees no `prior_state`,
+        falls into `_slow_path_reconcile`, re-runs `calendar_query` +
+        `calendar_multiget`, and rebuilds the `occurrences` cache via
+        `populate_occurrences`. Returns the number of rows removed
+        (handy for the CLI to print a confirmation).
+        """
+        with self.connection() as conn:
+            cursor = conn.execute("DELETE FROM calendar_sync_state")
+            return cursor.rowcount or 0
+
 
 def _find_component_id(conn: sqlite3.Connection, ref: ComponentRef) -> int | None:
     cursor = conn.execute(

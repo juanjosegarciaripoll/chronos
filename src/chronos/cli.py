@@ -339,7 +339,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("sync", help="Synchronise configured accounts with their servers.")
+    sync_p = sub.add_parser(
+        "sync", help="Synchronise configured accounts with their servers."
+    )
+    sync_p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Drop every calendar's stored CTag before syncing so this run "
+            "re-enters the slow path for every calendar (re-fetches all "
+            "resources and rebuilds the local occurrences cache). Use this "
+            "to recover from a stale cache without manually editing SQLite."
+        ),
+    )
 
     list_p = sub.add_parser("list", help="List events and todos.")
     list_p.add_argument("--account", default=None)
@@ -482,7 +494,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
     command = str(args.command)
     if command == "sync":
-        return cmd_sync(ctx)
+        return cmd_sync(ctx, force=bool(getattr(args, "force", False)))
     if command == "list":
         return cmd_list(
             ctx,
@@ -595,9 +607,15 @@ def _dispatch_oauth(
 # Commands --------------------------------------------------------------------
 
 
-def cmd_sync(ctx: CliContext) -> int:
+def cmd_sync(ctx: CliContext, *, force: bool = False) -> int:
     try:
         with acquire_sync_lock(sync_lock_path()):
+            if force:
+                cleared = ctx.index.clear_all_sync_state()
+                ctx.stdout.write(
+                    f"--force: cleared sync state for {cleared} calendar(s); "
+                    "every calendar will re-enter the slow path.\n"
+                )
             return _cmd_sync_locked(ctx)
     except SyncLockError as exc:
         ctx.stderr.write(f"{exc}\n")

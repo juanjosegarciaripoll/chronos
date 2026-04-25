@@ -127,6 +127,43 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("personal:", self.stdout.getvalue())
         self.assertIn("+1", self.stdout.getvalue())
 
+    def test_sync_force_clears_sync_state_and_reruns_slow_path(self) -> None:
+        # `chronos sync --force` is the user-facing escape hatch when
+        # the local cache has drifted out of step with the components
+        # table. It clears every per-calendar CTag so the next run
+        # re-enters the slow path for every calendar (which, on its
+        # tail, calls `populate_occurrences` to rebuild the cache).
+        self._seed_server()
+        from chronos.authorization import Authorization
+        from chronos.domain import CalendarRef, SyncState
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        # Pre-seed a sync-state row so we can prove --force wipes it.
+        ctx.index.set_sync_state(
+            SyncState(
+                calendar=CalendarRef(account_name="personal", calendar_name="work"),
+                ctag="ctag-stale",
+                sync_token=None,
+                synced_at=ctx.now,
+            )
+        )
+
+        code = self._run(["sync", "--force"], context=ctx)
+        self.assertEqual(code, 0)
+        # The pre-seeded row was wiped, then the actual sync wrote a
+        # fresh state with the server's current CTag.
+        new_state = ctx.index.get_sync_state(
+            CalendarRef(account_name="personal", calendar_name="work")
+        )
+        assert new_state is not None
+        self.assertNotEqual(new_state.ctag, "ctag-stale")
+        # Confirmation line on stdout so the user sees the wipe.
+        self.assertIn("--force", self.stdout.getvalue())
+        self.assertIn("cleared sync state", self.stdout.getvalue())
+
     def test_sync_reports_credential_failure(self) -> None:
         bad_config = _config(
             _account(credential=EnvCredential(variable="UNSET_FOR_TEST"))
