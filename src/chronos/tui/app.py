@@ -67,8 +67,39 @@ class ChronosApp(App[None]):
         border-top: solid $accent;
         padding: 1;
     }
-    #event-edit, #search-dialog, #confirm-box, #sync-confirm-box {
+    #event-edit, #search-dialog {
         padding: 1;
+    }
+
+    /* Modal dialog frame: a centred box with a thick accent border and
+       an action row at the bottom. ModalScreen already darkens the
+       backdrop, so a clean panel reads as "this is a dialog" without
+       extra effort. */
+    #sync-confirm-box, #confirm-box {
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+        width: auto;
+        max-width: 80;
+        height: auto;
+    }
+    #sync-confirm-box .dialog-title,
+    #confirm-box .dialog-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #sync-confirm-box .dialog-empty {
+        color: $text-muted;
+    }
+    #sync-confirm-box .dialog-actions,
+    #confirm-box .dialog-actions {
+        margin-top: 1;
+        align-horizontal: right;
+        height: auto;
+    }
+    #sync-confirm-box .dialog-actions Button,
+    #confirm-box .dialog-actions Button {
+        margin-left: 1;
     }
     """
 

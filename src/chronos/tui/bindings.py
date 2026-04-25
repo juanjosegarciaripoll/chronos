@@ -68,14 +68,6 @@ def main_bindings() -> list[BindingType]:
     ]
 
 
-def confirm_bindings() -> list[BindingType]:
-    return [
-        Binding("y", "confirm", "Yes"),
-        Binding("n", "cancel", "No"),
-        Binding(KEY_BACK, "cancel", "Cancel", show=False),
-    ]
-
-
 def edit_bindings() -> list[BindingType]:
     return [
         Binding("ctrl+s", "save", "Save"),
@@ -120,7 +112,6 @@ __all__ = [
     "KEY_TODOS_ALT",
     "KEY_WEEK",
     "BindingType",
-    "confirm_bindings",
     "detail_bindings",
     "edit_bindings",
     "main_bindings",
