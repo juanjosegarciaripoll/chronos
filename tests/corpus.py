@@ -144,6 +144,47 @@ END:VEVENT
     )
 
 
+def recurring_until_naive_with_tzid() -> bytes:
+    """Real-world malformed shape: DTSTART has a TZID, UNTIL is naive.
+
+    RFC 5545 says UNTIL must be UTC when DTSTART is tz-aware, but
+    Google exports and legacy Outlook calendars routinely break this
+    rule. dateutil's rrulestr rejects it; chronos normalizes the
+    UNTIL to UTC before parsing.
+    """
+    return _vcalendar(
+        """
+BEGIN:VTIMEZONE
+TZID:Europe/Madrid
+BEGIN:STANDARD
+DTSTART:19701025T030000
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+TZNAME:CET
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:19700329T020000
+TZOFFSETFROM:+0100
+TZOFFSETTO:+0200
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+TZNAME:CEST
+END:DAYLIGHT
+END:VTIMEZONE
+""",
+        """
+BEGIN:VEVENT
+UID:until-naive-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART;TZID=Europe/Madrid:20260501T110000
+DTEND;TZID=Europe/Madrid:20260501T120000
+SUMMARY:Weekly meeting (malformed UNTIL)
+RRULE:FREQ=WEEKLY;BYDAY=FR;UNTIL=20260626T090000
+END:VEVENT
+""",
+    )
+
+
 def simple_todo() -> bytes:
     return _vcalendar(
         """

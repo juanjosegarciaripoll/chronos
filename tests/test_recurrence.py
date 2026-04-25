@@ -231,6 +231,57 @@ class UntilBoundedRrule(unittest.TestCase):
         last = occs[-1]
         self.assertEqual(last.start, datetime(2026, 6, 26, 9, 0, tzinfo=UTC))
 
+    def test_naive_until_with_tzid_dtstart_is_normalised(self) -> None:
+        # Regression: RFC 5545 says UNTIL must be UTC (carry `Z`) when
+        # DTSTART has a TZID, but Google + legacy Outlook routinely
+        # emit naive UNTIL. dateutil's rrulestr would raise
+        # `ValueError: RRULE UNTIL values must be specified in UTC...`
+        # mid-sync. chronos normalises the UNTIL to UTC before parsing
+        # so the recurrence still expands.
+        master = _event(
+            "until-naive-1@example.com",
+            corpus.recurring_until_naive_with_tzid(),
+            # DTSTART;TZID=Europe/Madrid:20260501T110000 = 09:00 UTC.
+            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        )
+        occs = expand(
+            master=master,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2027, 1, 1, tzinfo=UTC),
+        )
+        self.assertTrue(occs, "RRULE with naive UNTIL should still expand")
+        # UNTIL=20260626T090000 (treated as UTC) => Friday 26 June at
+        # 09:00 UTC is the last weekday occurrence inside the bound.
+        last = occs[-1]
+        self.assertEqual(last.start, datetime(2026, 6, 26, 9, 0, tzinfo=UTC))
+
+
+class MalformedRruleTest(unittest.TestCase):
+    def test_unparseable_rrule_raises_recurrence_error(self) -> None:
+        # If normalisation can't help (e.g. a syntactically broken
+        # RRULE), `expand` must funnel the failure through
+        # `RecurrenceExpansionError` so `populate_occurrences` can
+        # skip just this master instead of failing the whole sync.
+        from chronos.recurrence import RecurrenceExpansionError
+
+        broken_ics = corpus.recurring_until().replace(
+            b"RRULE:FREQ=WEEKLY;BYDAY=FR;UNTIL=20260626T090000Z\r\n",
+            b"RRULE:FREQ=NONSENSE\r\n",
+        )
+        master = _event(
+            "until-1@example.com",
+            broken_ics,
+            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        )
+        with self.assertRaises(RecurrenceExpansionError):
+            expand(
+                master=master,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2027, 1, 1, tzinfo=UTC),
+            )
+
 
 class ExdateOverrideTest(unittest.TestCase):
     def _master(self) -> VEvent:

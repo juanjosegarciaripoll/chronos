@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
@@ -239,7 +240,15 @@ def _build_ruleset(
 ) -> rruleset:
     ruleset = rruleset()
     if rrule_str is not None:
-        parsed = rrulestr(f"RRULE:{rrule_str}", dtstart=anchor)
+        normalized = _normalize_rrule_until(rrule_str)
+        try:
+            parsed = rrulestr(f"RRULE:{normalized}", dtstart=anchor)
+        except ValueError as exc:
+            # Surface the malformed RRULE through the expansion-error
+            # channel so `populate_occurrences` can skip just this
+            # master. Without this, one bad RRULE upstream fails the
+            # entire calendar's occurrence cache rebuild.
+            raise RecurrenceExpansionError(f"could not parse RRULE: {exc}") from exc
         if isinstance(parsed, rrule):
             ruleset.rrule(parsed)
     for rdate in rdates:
@@ -247,6 +256,35 @@ def _build_ruleset(
     for exdate in exdates:
         ruleset.exdate(exdate)
     return ruleset
+
+
+_NAIVE_UNTIL_DATETIME = re.compile(r"^\d{8}T\d{6}$")
+
+
+def _normalize_rrule_until(rrule_str: str) -> str:
+    """Add a `Z` suffix to a naive `UNTIL=YYYYMMDDTHHMMSS` value.
+
+    RFC 5545 §3.3.10 says that when DTSTART is timezone-aware, the
+    RRULE's UNTIL value MUST be expressed as UTC (i.e. carry a `Z`
+    suffix). `dateutil.rrule.rrulestr` enforces this — but Google
+    Calendar exports, legacy Outlook calendars, and several CalDAV
+    gateways routinely emit `UNTIL=YYYYMMDDTHHMMSS` with no `Z`.
+    Treat the bare datetime as UTC, the reading every other major
+    calendar client converges on, rather than dropping the recurrence.
+
+    Date-only UNTIL (`YYYYMMDD`) and values that already carry `Z` or
+    a timezone offset are left alone.
+    """
+    parts = rrule_str.split(";")
+    for i, part in enumerate(parts):
+        key, sep, value = part.partition("=")
+        if not sep or key.strip().upper() != "UNTIL":
+            continue
+        if _NAIVE_UNTIL_DATETIME.match(value):
+            parts[i] = f"{key}={value}Z"
+        # RRULE has at most one UNTIL; stop scanning either way.
+        break
+    return ";".join(parts)
 
 
 def _index_overrides(
