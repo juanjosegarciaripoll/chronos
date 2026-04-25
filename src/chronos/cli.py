@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -885,13 +886,37 @@ def cmd_oauth_authorize(
 
 
 def _default_open_editor(path: Path) -> None:
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
-    if not editor:
-        raise FileNotFoundError(
-            "Neither $EDITOR nor $VISUAL is set; cannot launch an editor."
-        )
-    cmd = [*shlex.split(editor), str(path)]
+    cmd = [*pick_editor(), str(path)]
     subprocess.run(cmd, check=True)
+
+
+def pick_editor(
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> list[str]:
+    """Resolve a command list for an interactive editor.
+
+    Priority follows POSIX convention plus a platform-default fallback:
+
+    1. `$VISUAL` (full-screen / GUI editors).
+    2. `$EDITOR` (line editors).
+    3. Platform default — `notepad` on Windows, `nano` if installed,
+       else `vi` (POSIX-required, present on every Unix).
+    """
+    real_env = env if env is not None else os.environ
+    real_platform = platform if platform is not None else sys.platform
+    real_which = which if which is not None else shutil.which
+    for var in ("VISUAL", "EDITOR"):
+        value = real_env.get(var)
+        if value:
+            return shlex.split(value)
+    if real_platform.startswith("win"):
+        return ["notepad"]
+    if real_which("nano") is not None:
+        return ["nano"]
+    return ["vi"]
 
 
 def _build_credential(

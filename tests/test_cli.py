@@ -1133,3 +1133,76 @@ class ConfigEditCommandTest(ConfigEditingCliTestCase):
             if p.name.startswith("chronos-edit-")
         ]
         self.assertEqual(leftovers, [])
+
+
+class PickEditorTest(unittest.TestCase):
+    """`pick_editor` resolves an editor command without ever raising.
+
+    Order of precedence (POSIX): VISUAL, then EDITOR, then a
+    platform-appropriate default. Tests inject env / platform / which
+    so they don't depend on the host OS or PATH.
+    """
+
+    def test_visual_takes_precedence_over_editor(self) -> None:
+        cmd = cli.pick_editor(
+            env={"VISUAL": "vim", "EDITOR": "ed"},
+            platform="linux",
+            which=lambda _: None,
+        )
+        self.assertEqual(cmd, ["vim"])
+
+    def test_editor_used_when_visual_unset(self) -> None:
+        cmd = cli.pick_editor(
+            env={"EDITOR": "ed"},
+            platform="linux",
+            which=lambda _: None,
+        )
+        self.assertEqual(cmd, ["ed"])
+
+    def test_visual_with_arguments_is_shlex_split(self) -> None:
+        cmd = cli.pick_editor(
+            env={"VISUAL": "code --wait"},
+            platform="darwin",
+            which=lambda _: None,
+        )
+        self.assertEqual(cmd, ["code", "--wait"])
+
+    def test_windows_default_is_notepad(self) -> None:
+        cmd = cli.pick_editor(
+            env={},
+            platform="win32",
+            which=lambda _: None,
+        )
+        self.assertEqual(cmd, ["notepad"])
+
+    def test_posix_prefers_nano_when_available(self) -> None:
+        cmd = cli.pick_editor(
+            env={},
+            platform="linux",
+            which=lambda name: "/usr/bin/nano" if name == "nano" else None,
+        )
+        self.assertEqual(cmd, ["nano"])
+
+    def test_posix_falls_back_to_vi_without_nano(self) -> None:
+        cmd = cli.pick_editor(
+            env={},
+            platform="linux",
+            which=lambda _: None,
+        )
+        self.assertEqual(cmd, ["vi"])
+
+    def test_macos_uses_same_posix_fallback(self) -> None:
+        cmd = cli.pick_editor(
+            env={},
+            platform="darwin",
+            which=lambda _: None,
+        )
+        self.assertEqual(cmd, ["vi"])
+
+    def test_uses_real_environment_when_unspecified(self) -> None:
+        # Smoke test the no-injection path: just verify it returns a
+        # non-empty list without raising. The exact contents depend on
+        # the test runner's environment.
+        cmd = cli.pick_editor()
+        self.assertTrue(cmd)
+        self.assertIsInstance(cmd[0], str)
