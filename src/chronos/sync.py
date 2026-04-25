@@ -6,7 +6,7 @@ import logging
 import queue
 import threading
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -133,7 +133,9 @@ def sync_account(
                 now=clock,
             )
         except SyncHaltError as exc:
-            errors.append(f"{calendar.calendar_name}: {exc}")
+            # The guard's message already includes the calendar name,
+            # so don't double-prefix it ("X: X: missing from server…").
+            errors.append(str(exc))
             continue
         except CalDAVError as exc:
             # One bad calendar (e.g. a server quirk on a single
@@ -353,6 +355,8 @@ def _slow_path_reconcile(
         calendar_ref=calendar_ref,
         baseline=len(local_by_href),
         removed=len(removed_hrefs),
+        local_hrefs=local_by_href.keys(),
+        server_hrefs=server_map.keys(),
     )
 
     errors: list[str] = []
@@ -428,16 +432,39 @@ def _slow_path_reconcile(
 
 
 def _guard_mass_deletion(
-    *, calendar_ref: CalendarRef, baseline: int, removed: int
+    *,
+    calendar_ref: CalendarRef,
+    baseline: int,
+    removed: int,
+    local_hrefs: Iterable[str],
+    server_hrefs: Iterable[str],
 ) -> None:
     if baseline <= _MASS_DELETION_MIN_BASELINE:
         return
-    if removed > _MASS_DELETION_RATIO * baseline:
-        raise SyncHaltError(
-            f"{calendar_ref.calendar_name}: {removed}/{baseline} resources "
-            f"missing from server (>{int(_MASS_DELETION_RATIO * 100)}%). "
-            "Refusing to delete locally without confirmation."
-        )
+    if removed <= _MASS_DELETION_RATIO * baseline:
+        return
+    # Hitting the guard at 100% (or close to it) is almost always an
+    # href-format mismatch — local and server hrefs are equivalent
+    # URLs but stringify differently (URL encoding, trailing slash,
+    # scheme/host, …). Log a small sample of each so the user can
+    # diagnose without rummaging through SQLite, and so we have
+    # something to look at when the report comes back.
+    local_sample = sorted(local_hrefs)[:5]
+    server_sample = sorted(server_hrefs)[:5]
+    logger.warning(
+        "%s: mass-deletion guard tripped (%d/%d). Local sample: %s. Server sample: %s",
+        calendar_ref.calendar_name,
+        removed,
+        baseline,
+        local_sample,
+        server_sample,
+    )
+    raise SyncHaltError(
+        f"{calendar_ref.calendar_name}: {removed}/{baseline} resources "
+        f"missing from server (>{int(_MASS_DELETION_RATIO * 100)}%). "
+        "Refusing to delete locally without confirmation. "
+        "See `tui.log` for sample hrefs."
+    )
 
 
 def _apply_server_deletions(
