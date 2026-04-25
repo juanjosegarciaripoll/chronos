@@ -18,3 +18,5 @@ wheels/
 
 # Generated docs
 site/
+
+.claude/
