@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+from datetime import date
+from typing import TYPE_CHECKING, cast
+
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
+from textual.widgets import Footer, Header, Label
+
+from chronos.domain import (
+    CalendarRef,
+    ComponentRef,
+    LocalStatus,
+    ResourceRef,
+    StoredComponent,
+    VEvent,
+)
+from chronos.mutations import build_event_ics, generate_uid, trashed_copy
+from chronos.tui.bindings import main_bindings
+from chronos.tui.screens.agenda_screen import (
+    rows_for as agenda_rows,
+)
+from chronos.tui.screens.agenda_screen import (
+    title_for as agenda_title,
+)
+from chronos.tui.screens.confirm_screen import ConfirmScreen
+from chronos.tui.screens.day_view_screen import (
+    rows_for as day_rows,
+)
+from chronos.tui.screens.day_view_screen import (
+    title_for as day_title,
+)
+from chronos.tui.screens.event_detail_screen import EventDetailScreen
+from chronos.tui.screens.event_edit_screen import EditDraft, EventEditScreen
+from chronos.tui.screens.month_view_screen import (
+    rows_for as month_rows,
+)
+from chronos.tui.screens.month_view_screen import (
+    title_for as month_title,
+)
+from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
+from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
+from chronos.tui.screens.todo_list_screen import (
+    rows_for as todo_rows,
+)
+from chronos.tui.screens.todo_list_screen import (
+    title_for as todo_title,
+)
+from chronos.tui.screens.week_view_screen import (
+    rows_for as week_rows,
+)
+from chronos.tui.screens.week_view_screen import (
+    title_for as week_title,
+)
+from chronos.tui.views import (
+    CalendarSelection,
+    OccurrenceRow,
+    ViewKind,
+    all_calendar_refs,
+)
+from chronos.tui.widgets.calendar_panel import CalendarPanel
+from chronos.tui.widgets.event_list import EventList
+from chronos.tui.widgets.event_view import EventView
+
+if TYPE_CHECKING:
+    from chronos.tui.app import ChronosApp, TuiServices
+
+
+class MainScreen(Screen[None]):
+    """The single screen the user spends 99% of their time in.
+
+    Three panes: calendar tree (left), view list (centre), detail
+    (right). View-switch and global actions are bound here per
+    `CONVENTIONS.md §11`.
+    """
+
+    BINDINGS = main_bindings()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._view: ViewKind = ViewKind.AGENDA
+        self._viewed_date: date = date(2026, 4, 25)  # rebound in on_mount
+        self._selection = CalendarSelection(refs=frozenset())
+        self._last_rows: tuple[OccurrenceRow, ...] = ()
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Horizontal(id="main-body"):
+            yield CalendarPanel()
+            with Vertical(id="centre-pane"):
+                yield Label("", id="view-title")
+                yield EventList(id="centre-list")
+            yield EventView(id="detail-pane")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        services = self._services()
+        self._viewed_date = services.now().date()
+        panel: CalendarPanel = self.query_one(CalendarPanel)
+        panel.populate(all_calendar_refs(services.config, services.mirror))
+        self.refresh_view()
+
+    # View switches ----------------------------------------------------------
+
+    def action_view_day(self) -> None:
+        self._view = ViewKind.DAY
+        self.refresh_view()
+
+    def action_view_week(self) -> None:
+        self._view = ViewKind.WEEK
+        self.refresh_view()
+
+    def action_view_month(self) -> None:
+        self._view = ViewKind.MONTH
+        self.refresh_view()
+
+    def action_view_agenda(self) -> None:
+        self._view = ViewKind.AGENDA
+        self.refresh_view()
+
+    def action_view_todos(self) -> None:
+        self._view = ViewKind.TODOS
+        self.refresh_view()
+
+    def action_today(self) -> None:
+        self._viewed_date = self._services().now().date()
+        self.refresh_view()
+
+    # Mutating actions -------------------------------------------------------
+
+    def action_new_event(self) -> None:
+        services = self._services()
+        calendars = all_calendar_refs(services.config, services.mirror)
+        if not calendars:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                "No calendars available. Add an account first."
+            )
+            return
+        default = self._first_selected(calendars)
+        screen = EventEditScreen(
+            calendars=calendars,
+            existing=None,
+            default_calendar=default,
+            on_save=self._save_event,
+        )
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def action_edit_event(self) -> None:
+        component = self._currently_selected_component()
+        if component is None:
+            return
+        self._edit_specific(component)
+
+    def action_open_event(self) -> None:
+        component = self._currently_selected_component()
+        if component is None:
+            return
+        self._open_specific(component)
+
+    def action_trash_event(self) -> None:
+        component = self._currently_selected_component()
+        if component is None:
+            return
+        self.trash_with_confirm(component)
+
+    def trash_with_confirm(self, component: StoredComponent) -> None:
+        prompt = f"Trash {component.summary or component.ref.uid!r}?"
+        confirm = ConfirmScreen(prompt, lambda: self._trash(component))
+        self.app.push_screen(confirm)  # pyright: ignore[reportUnknownMemberType]
+
+    def action_sync(self) -> None:
+        services = self._services()
+        screen = SyncConfirmScreen(services.config.accounts, self._run_sync)
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def action_search(self) -> None:
+        services = self._services()
+        components: list[StoredComponent] = []
+        for ref in all_calendar_refs(services.config, services.mirror):
+            components.extend(services.index.list_calendar_components(ref))
+        screen = SearchDialogScreen(components, on_select=self._open_specific)
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    # Internals --------------------------------------------------------------
+
+    def refresh_view(self) -> None:
+        services = self._services()
+        calendars = all_calendar_refs(services.config, services.mirror)
+        title_label: Label = self.query_one("#view-title", Label)
+        event_list: EventList = self.query_one(EventList)
+        if self._view == ViewKind.DAY:
+            title_label.update(day_title(self._viewed_date))
+            rows = day_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+                viewed=self._viewed_date,
+            )
+            self._last_rows = rows
+            event_list.show_events(rows)
+        elif self._view == ViewKind.WEEK:
+            title_label.update(week_title(self._viewed_date))
+            rows = week_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+                viewed=self._viewed_date,
+            )
+            self._last_rows = rows
+            event_list.show_events(rows)
+        elif self._view == ViewKind.MONTH:
+            title_label.update(month_title(self._viewed_date))
+            rows = month_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+                viewed=self._viewed_date,
+            )
+            self._last_rows = rows
+            event_list.show_events(rows)
+        elif self._view == ViewKind.AGENDA:
+            today = services.now().date()
+            title_label.update(agenda_title(today))
+            rows = agenda_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+                today=today,
+            )
+            self._last_rows = rows
+            event_list.show_events(rows)
+        else:  # TODOS
+            title_label.update(todo_title())
+            self._last_rows = ()
+            todos = todo_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+            )
+            event_list.show_todos(todos)
+        self._refresh_detail()
+
+    def _refresh_detail(self) -> None:
+        component = self._currently_selected_component()
+        view: EventView = self.query_one(EventView)
+        view.show(component)
+
+    def _currently_selected_component(self) -> StoredComponent | None:
+        event_list: EventList = self.query_one(EventList)
+        ref = event_list.selected_ref()
+        if ref is None:
+            return None
+        return self._services().index.get_component(ref)
+
+    def _services(self) -> TuiServices:
+        # ChronosApp constructs MainScreen and always sets `.services`.
+        # `self.app` is typed as App[Any]; cast it to our concrete
+        # subclass so the attribute lookup is statically checked. We
+        # import the type only under TYPE_CHECKING — `app.py` imports
+        # MainScreen, so a runtime import would cycle.
+        return cast("ChronosApp", self.app).services
+
+    def _save_event(self, draft: EditDraft) -> None:
+        services = self._services()
+        now = services.now()
+        if draft.existing is None:
+            uid = generate_uid(
+                draft.target.account_name,
+                draft.target.calendar_name,
+                draft.summary,
+                draft.dtstart,
+                now,
+            )
+            ref = ComponentRef(
+                draft.target.account_name, draft.target.calendar_name, uid
+            )
+            ics = build_event_ics(uid, draft.summary, draft.dtstart, draft.dtend, now)
+            services.mirror.write(
+                ResourceRef(draft.target.account_name, draft.target.calendar_name, uid),
+                ics,
+            )
+            component = VEvent(
+                ref=ref,
+                href=None,
+                etag=None,
+                raw_ics=ics,
+                summary=draft.summary,
+                description=None,
+                location=None,
+                dtstart=draft.dtstart,
+                dtend=draft.dtend,
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=None,
+            )
+            services.index.upsert_component(component)
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Created {draft.summary!r}"
+            )
+        else:
+            existing = draft.existing
+            ics = build_event_ics(
+                existing.ref.uid, draft.summary, draft.dtstart, draft.dtend, now
+            )
+            services.mirror.write(existing.ref.resource, ics)
+            updated = VEvent(
+                ref=existing.ref,
+                href=existing.href,
+                etag=existing.etag,
+                raw_ics=ics,
+                summary=draft.summary,
+                description=existing.description,
+                location=existing.location,
+                dtstart=draft.dtstart,
+                dtend=draft.dtend,
+                status=existing.status,
+                local_flags=existing.local_flags,
+                server_flags=existing.server_flags,
+                local_status=existing.local_status,
+                trashed_at=existing.trashed_at,
+                synced_at=existing.synced_at,
+            )
+            services.index.upsert_component(updated)
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Updated {draft.summary!r}"
+            )
+        self.refresh_view()
+
+    def _trash(self, component: StoredComponent) -> None:
+        services = self._services()
+        trashed = trashed_copy(component, trashed_at=services.now())
+        services.index.upsert_component(trashed)
+        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+            f"Trashed {component.summary or component.ref.uid!r}"
+        )
+        self.refresh_view()
+
+    def _edit_specific(self, component: StoredComponent) -> None:
+        services = self._services()
+        calendars = all_calendar_refs(services.config, services.mirror)
+        screen = EventEditScreen(
+            calendars=calendars,
+            existing=component,
+            default_calendar=component.ref.calendar,
+            on_save=self._save_event,
+        )
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def _open_specific(self, component: StoredComponent) -> None:
+        screen = EventDetailScreen(component, on_edit=self._edit_specific)
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def _run_sync(self) -> None:
+        services = self._services()
+        runner = services.sync_runner
+        if runner is None:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                "Sync from inside the TUI is not wired in this build."
+            )
+            return
+        results = runner()
+        added = sum(r.components_added for r in results)
+        updated = sum(r.components_updated for r in results)
+        removed = sum(r.components_removed for r in results)
+        error_count = sum(len(r.errors) for r in results)
+        suffix = f" ({error_count} error(s))" if error_count else ""
+        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+            f"Sync complete: +{added} ~{updated} -{removed}{suffix}",
+            severity="error" if error_count else "information",
+        )
+        self.refresh_view()
+
+    def _first_selected(self, calendars: tuple[CalendarRef, ...]) -> CalendarRef:
+        for ref in calendars:
+            if self._selection.contains(ref):
+                return ref
+        return calendars[0]
+
+
+__all__ = ["MainScreen"]

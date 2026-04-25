@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from textual.binding import Binding
+
+# Textual's `Screen.BINDINGS` is an invariant list typed as
+# `list[Binding | tuple[str, str] | tuple[str, str, str]]`. We always
+# return `Binding` instances, but the helpers' declared type has to
+# match the wider element type so subclasses can assign their result.
+BindingType = Binding | tuple[str, str] | tuple[str, str, str]
+
+# Per-screen bindings live next to each screen. This module exposes the
+# constants that more than one screen needs to keep in sync — view-switch
+# keys, the universal "today" reset, the universal "quit" key.
+
+KEY_DAY = "d"
+KEY_WEEK = "w"
+KEY_MONTH = "m"
+KEY_AGENDA = "a"
+KEY_TODOS = "t"
+KEY_TODAY = "T"
+KEY_NEW = "n"
+KEY_EDIT = "e"
+KEY_TRASH = "x"
+KEY_SYNC = "s"
+KEY_SEARCH = "/"
+KEY_QUIT = "q"
+KEY_OPEN = "enter"
+KEY_BACK = "escape"
+
+
+def main_bindings() -> list[BindingType]:
+    """Bindings owned by `MainScreen`. Each view registers itself here."""
+    return [
+        Binding(KEY_DAY, "view_day", "Day"),
+        Binding(KEY_WEEK, "view_week", "Week"),
+        Binding(KEY_MONTH, "view_month", "Month"),
+        Binding(KEY_AGENDA, "view_agenda", "Agenda"),
+        Binding(KEY_TODOS, "view_todos", "Todos"),
+        Binding(KEY_TODAY, "today", "Today"),
+        Binding(KEY_NEW, "new_event", "New"),
+        Binding(KEY_EDIT, "edit_event", "Edit"),
+        Binding(KEY_OPEN, "open_event", "Open", show=False),
+        Binding(KEY_TRASH, "trash_event", "Trash"),
+        Binding(KEY_SYNC, "sync", "Sync"),
+        Binding(KEY_SEARCH, "search", "Search"),
+        Binding(KEY_QUIT, "quit", "Quit"),
+    ]
+
+
+def confirm_bindings() -> list[BindingType]:
+    return [
+        Binding("y", "confirm", "Yes"),
+        Binding("n", "cancel", "No"),
+        Binding(KEY_BACK, "cancel", "Cancel", show=False),
+    ]
+
+
+def edit_bindings() -> list[BindingType]:
+    return [
+        Binding("ctrl+s", "save", "Save"),
+        Binding(KEY_BACK, "cancel", "Cancel"),
+    ]
+
+
+def detail_bindings() -> list[BindingType]:
+    return [
+        Binding(KEY_BACK, "close", "Back"),
+        Binding(KEY_EDIT, "edit", "Edit"),
+    ]
+
+
+def search_bindings() -> list[BindingType]:
+    return [
+        Binding(KEY_OPEN, "submit", "Search"),
+        Binding(KEY_BACK, "cancel", "Cancel"),
+    ]
+
+
+__all__ = [
+    "KEY_AGENDA",
+    "KEY_BACK",
+    "KEY_DAY",
+    "KEY_EDIT",
+    "KEY_MONTH",
+    "KEY_NEW",
+    "KEY_OPEN",
+    "KEY_QUIT",
+    "KEY_SEARCH",
+    "KEY_SYNC",
+    "KEY_TODAY",
+    "KEY_TODOS",
+    "KEY_TRASH",
+    "KEY_WEEK",
+    "BindingType",
+    "confirm_bindings",
+    "detail_bindings",
+    "edit_bindings",
+    "main_bindings",
+    "search_bindings",
+]

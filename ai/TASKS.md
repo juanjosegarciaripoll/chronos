@@ -4,7 +4,7 @@ Actionable backlog. Top of file is next up; bottom is later. Each milestone is a
 
 ## Current state
 
-Milestones 0–7 shipped. `chronos init && account add && oauth authorize && sync && list` works end-to-end against Nextcloud/Radicale/Apple (basic auth) and against Google Calendar (OAuth 2.0 device flow). Next up is **Milestone 8 — TUI**.
+Milestones 0–8 shipped. `chronos tui` opens the Textual UI against the same mirror + index the CLI uses; day / week / month / agenda / todo views, create / edit / trash flows, sync confirm, and search are wired end-to-end. Next up is **Milestone 9 — MCP server**.
 
 ## Milestone 0 — Project scaffolding
 
@@ -103,14 +103,17 @@ Reprioritised from the original "TUI" slot. Google and Microsoft dropped basic-a
 
 **Acceptance:** a user who has created a Google Cloud OAuth client can `chronos account add --credential-backend oauth`, `chronos oauth authorize`, `chronos sync` against Google Calendar with no hand-editing of `config.toml`.
 
-## Milestone 8 — TUI
+## Milestone 8 — TUI (shipped)
 
-- `tui/app.py` + `tui/bindings.py` + the screen / widget files in `ARCHITECTURE.md §1`.
-- Day, week, month, agenda, todo-list views.
-- Screen-owned bindings; footer shows current screen only (`CONVENTIONS.md §11`).
-- Add `ai/TUI_TESTING_PLAN.md` **when the TUI lands, not before**; then implement `tests/test_tui_flows.py` per that plan.
+- `tui/app.py` (ChronosApp + TuiServices), `tui/bindings.py` (per-screen builders), `tui/views.py` (pure projection helpers), and the screen + widget files in `ARCHITECTURE.md §1`.
+- Day, week, month, agenda, todo-list views — keys `d / w / m / a / t`, with `T` returning to today.
+- Three-pane layout: calendar tree, view list, detail pane. Screen-owned bindings; footer shows current screen only (`CONVENTIONS.md §11`).
+- Mutating flows: `n` new, `e` edit, `x` trash (via `ConfirmScreen`), `s` sync (via `SyncConfirmScreen` + injected `sync_runner`), `/` search.
+- Shared write helpers extracted to `mutations.py` so CLI and TUI use the same `build_event_ics` / `generate_uid` / `trashed_copy`.
+- `chronos tui` CLI command wires the app to a real `TuiServices`.
+- `ai/TUI_TESTING_PLAN.md` documents the two-layer test approach. `tests/test_tui_flows.py` exercises the pure helpers (Layer 1) and drives `ChronosApp` headlessly via `App.run_test()` / `Pilot` for the eight named flows (Layer 2).
 
-**Acceptance:** all five views navigable; create / edit / trash flows work end-to-end against a seeded repo; TUI tests green.
+**Acceptance:** all five views navigable; create / edit / trash flows work end-to-end against a seeded repo; TUI tests green; project-wide branch coverage ≥ 88%.
 
 ## Milestone 9 — MCP server
 

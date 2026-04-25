@@ -167,6 +167,120 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("simulated network failure", self.stderr.getvalue())
 
 
+class BuildSyncRunnerTest(CliTestCase):
+    """`build_sync_runner` is the closure handed to the TUI's `_run_sync`.
+
+    It mirrors `cmd_sync`'s flow but returns per-account `SyncResult`s
+    instead of writing to stdout, with errors folded into the result's
+    `errors` tuple so a single bad account doesn't take the whole sync
+    down.
+    """
+
+    def _seed_server(self) -> None:
+        self.session.add_calendar(url="https://cal.example.com/work/", name="work")
+        self.session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+    def test_happy_path_returns_one_result_per_account(self) -> None:
+        self._seed_server()
+        from chronos.authorization import Authorization
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        runner = cli.build_sync_runner(ctx)
+        results = runner()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].account_name, "personal")
+        self.assertEqual(results[0].errors, ())
+        self.assertEqual(results[0].components_added, 1)
+
+    def test_credential_failure_lands_in_errors(self) -> None:
+        bad_config = _config(
+            _account(credential=EnvCredential(variable="UNSET_FOR_TEST"))
+        )
+        ctx = self._ctx(config=bad_config, creds_env={})
+        runner = cli.build_sync_runner(ctx)
+        results = runner()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].errors[0].count("UNSET_FOR_TEST"), 1)
+        self.assertEqual(results[0].components_added, 0)
+
+    def test_caldav_error_lands_in_errors(self) -> None:
+        from chronos.authorization import Authorization
+        from chronos.caldav_client import CalDAVError
+
+        def broken_factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> FakeCalDAVSession:
+            session = FakeCalDAVSession()
+
+            def _raise_principal() -> str:
+                raise CalDAVError("simulated network failure")
+
+            session.discover_principal = _raise_principal  # type: ignore[method-assign]
+            return session
+
+        ctx = self._ctx(session_factory=broken_factory)
+        runner = cli.build_sync_runner(ctx)
+        results = runner()
+        self.assertEqual(len(results), 1)
+        self.assertIn("simulated network failure", results[0].errors[0])
+
+    def test_session_factory_not_implemented_lands_in_errors(self) -> None:
+        from chronos.authorization import Authorization
+
+        def unimplemented_factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> FakeCalDAVSession:
+            raise NotImplementedError("session factory not configured")
+
+        ctx = self._ctx(session_factory=unimplemented_factory)
+        runner = cli.build_sync_runner(ctx)
+        results = runner()
+        self.assertEqual(len(results), 1)
+        self.assertIn("session factory not configured", results[0].errors[0])
+
+    def test_oauth_on_commit_called_on_success(self) -> None:
+        self._seed_server()
+
+        from chronos.authorization import Authorization
+        from chronos.credentials import CredentialResolutionError
+
+        committed: list[int] = []
+
+        class StubCreds:
+            def build_auth(self, _account: AccountConfig) -> Authorization:
+                return Authorization(
+                    basic=("user@example.com", "pw"),
+                    on_commit=lambda: committed.append(1),
+                )
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = cli.CliContext(
+            config=_config(),
+            mirror=self.mirror,
+            index=self.index,
+            creds=StubCreds(),  # type: ignore[arg-type]
+            stdout=self.stdout,
+            stderr=self.stderr,
+            now=NOW,
+            session_factory=factory,
+        )
+        runner = cli.build_sync_runner(ctx)
+        runner()
+        self.assertEqual(committed, [1])
+        # Silence unused-import lint for the type-only import above.
+        _ = CredentialResolutionError
+
+
 class ListCommandTest(CliTestCase):
     def _seed_index(self, uid: str, *, summary: str = "Meeting") -> None:
         ref = ComponentRef("personal", "work", uid)

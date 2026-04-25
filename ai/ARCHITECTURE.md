@@ -27,29 +27,34 @@ src/chronos/
   sync.py                    # Two-phase CalDAV sync engine (plan / execute)
   credentials.py             # Plaintext / env / command / encrypted backends
   services.py                # Doctor diagnostics, mirror integrity scan
+  mutations.py               # Shared write helpers: build_event_ics,
+                             #   generate_uid, trashed_copy. Used by CLI + TUI.
   fixture_flow.py            # Deterministic dev ingest (for local testing)
   mcp_server.py              # Read-only MCP tools (list_calendars, query_range,
                              #   search, get_event, get_todo)
   tui/
-    app.py                   # ChronosApp
-    bindings.py              # Global keybinding constants
+    app.py                   # ChronosApp + TuiServices dependency bundle
+    bindings.py              # Per-screen binding builders + key constants
+    views.py                 # Pure projection helpers: window math,
+                             #   gather_occurrences, search_components,
+                             #   render_event_detail. No Textual imports.
     screens/
-      main_screen.py         # Owns view-switch bindings (day/week/month/agenda/todo)
-      day_view_screen.py
-      week_view_screen.py
-      month_view_screen.py
-      agenda_screen.py
-      todo_list_screen.py
-      event_detail_screen.py
-      event_edit_screen.py
-      sync_confirm_screen.py
-      search_dialog_screen.py
-      confirm_screen.py
+      main_screen.py         # Three-pane layout; owns view-switch + global bindings
+      day_view_screen.py     # title_for / window_for / rows_for helpers
+      week_view_screen.py    # idem
+      month_view_screen.py   # idem
+      agenda_screen.py       # idem
+      todo_list_screen.py    # title_for / rows_for
+      event_detail_screen.py # Read-only modal with [back] [edit]
+      event_edit_screen.py   # Form for create/edit; emits EditDraft
+      sync_confirm_screen.py # Pre-sync confirmation, on_confirm callback
+      search_dialog_screen.py# Live in-memory search over loaded components
+      confirm_screen.py      # Generic [y]/[n] modal
     widgets/
       calendar_panel.py      # Collapsible per-account calendar tree
-      event_list.py          # Sortable DataTable for events/todos
-      event_view.py          # Read-only event/todo detail
-      date_picker.py
+      event_list.py          # DataTable of events/todos, keyed by ref+instance
+      event_view.py          # Read-only event/todo detail (Static)
+      date_picker.py         # Input + parse_date_input helper
 ```
 
 All modules above are described in `TASKS.md` milestones; don't treat their existence as a given before the corresponding milestone is complete.
@@ -74,9 +79,9 @@ All writes go through a single `connection()` context manager that batches withi
 
 **Sync** (`sync.py`, `caldav_client.py`). Two-phase (plan, then execute). CTag-gated path selection: fast path (zero-I/O beyond PROPFIND), medium path (sync-collection REPORT), slow path (full calendar-query REPORT + etag compare). `href IS NULL` is the only local-mutation signal. Conflict taxonomy lives in `SYNCHRONIZATION.md §10`.
 
-**TUI** (`tui/`). Textual. Each screen owns its `BINDINGS` list; the footer shows only the current screen's bindings. Screens use the public Textual API exclusively — `self.app.push_screen`, `self.app.notify`. Screens never call `self.app._private_method`. Views are pure projections of `IndexRepository` queries.
+**TUI** (`tui/`). Textual. `ChronosApp` is a thin host; everything lives in `MainScreen` (three panes: calendar tree, view list, detail). Each screen owns its `BINDINGS` list; the footer shows only the current screen's bindings. Screens use the public Textual API exclusively — `self.app.push_screen`, `self.app.notify`. Screens never call `self.app._private_method`. The hard logic — window arithmetic, occurrence joining, search, detail rendering — lives in `tui/views.py` as pure functions, and is unit-tested without a Textual app. Mutating actions go through `ConfirmScreen` (trash) or `EventEditScreen` (create/edit), both of which take callbacks rather than references to the app.
 
-**CLI** (`cli.py`). `argparse` dispatch to subcommands. Same repositories as the TUI; nothing TUI-specific leaks in.
+**CLI** (`cli.py`). `argparse` dispatch to subcommands. Same repositories as the TUI; nothing TUI-specific leaks in. Write helpers shared with the TUI (`build_event_ics`, `generate_uid`, `trashed_copy`) live in `mutations.py`.
 
 **MCP** (`mcp_server.py`). Read-only tools backed by the same `IndexRepository`. No write or mutating tools without explicit approval.
 

@@ -31,6 +31,7 @@ from chronos.domain import (
     PlaintextCredential,
     ResourceRef,
     StoredComponent,
+    SyncResult,
     VEvent,
     VTodo,
 )
@@ -177,6 +178,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="Run diagnostics on the local state.")
 
+    sub.add_parser("tui", help="Launch the Textual UI.")
+
     sub.add_parser(
         "init",
         help="Write a minimal config.toml if none exists at the target path.",
@@ -285,6 +288,8 @@ def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
         return cmd_rm(ctx, uid=args.uid)
     if command == "doctor":
         return cmd_doctor(ctx)
+    if command == "tui":
+        return cmd_tui(ctx)
     ctx.stderr.write(f"unknown command: {command}\n")
     return 2
 
@@ -505,9 +510,7 @@ def cmd_edit(
     if new_start is None:
         ctx.stderr.write("edit: missing DTSTART\n")
         return 2
-    new_ics = build_event_ics(
-        current.ref.uid, new_summary, new_start, new_end, ctx.now
-    )
+    new_ics = build_event_ics(current.ref.uid, new_summary, new_start, new_end, ctx.now)
     ctx.mirror.write(current.ref.resource, new_ics)
     updated = VEvent(
         ref=current.ref,
@@ -556,6 +559,77 @@ def cmd_doctor(ctx: CliContext) -> int:
     )
     ctx.stdout.write(format_report(report))
     return report.exit_code
+
+
+def cmd_tui(ctx: CliContext) -> int:
+    # Imported lazily so `chronos --help` and other commands don't pull
+    # Textual into the import graph.
+    from chronos.tui import ChronosApp, TuiServices
+
+    services = TuiServices(
+        config=ctx.config,
+        mirror=ctx.mirror,
+        index=ctx.index,
+        creds=ctx.creds,
+        now=lambda: ctx.now,
+        sync_runner=build_sync_runner(ctx),
+    )
+    app = ChronosApp(services)
+    app.run()
+    return 0
+
+
+def build_sync_runner(ctx: CliContext) -> Callable[[], Sequence[SyncResult]]:
+    """Closure that runs `sync_account` over every configured account.
+
+    Mirrors `cmd_sync`, but returns the per-account `SyncResult`s
+    instead of writing to stdout. Per-account exceptions are caught
+    and reported in the result's `errors` tuple so a single bad
+    credential doesn't take the whole sync down.
+    """
+    factory = ctx.session_factory or _default_session_factory
+
+    def run() -> Sequence[SyncResult]:
+        results: list[SyncResult] = []
+        for account in ctx.config.accounts:
+            try:
+                auth = ctx.creds.build_auth(account)
+            except CredentialResolutionError as exc:
+                results.append(_failure_result(account.name, str(exc)))
+                continue
+            try:
+                session = factory(account, auth)
+            except NotImplementedError as exc:
+                results.append(_failure_result(account.name, str(exc)))
+                continue
+            try:
+                result = sync_account(
+                    account=account,
+                    session=session,
+                    mirror=ctx.mirror,
+                    index=ctx.index,
+                    now=ctx.now,
+                )
+            except CalDAVError as exc:
+                results.append(_failure_result(account.name, f"CalDAV: {exc}"))
+                continue
+            if auth.on_commit is not None:
+                auth.on_commit()
+            results.append(result)
+        return tuple(results)
+
+    return run
+
+
+def _failure_result(account_name: str, message: str) -> SyncResult:
+    return SyncResult(
+        account_name=account_name,
+        calendars_synced=0,
+        components_added=0,
+        components_updated=0,
+        components_removed=0,
+        errors=(message,),
+    )
 
 
 def cmd_init(stdout: TextIO, stderr: TextIO, *, config_path: Path) -> int:
