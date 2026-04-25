@@ -62,6 +62,10 @@ class ChronosApp(App[None]):
     #centre-pane { width: 1fr; }
     #view-title { padding: 0 1; color: $text-muted; }
     EventList { height: 2fr; }
+    /* The timeline takes the full centre-pane height in Day / Grid
+       views — `MainScreen.refresh_view` toggles its `display` along
+       with EventList / EventView based on the active view. */
+    TimelineGrid { height: 1fr; }
     #detail-pane {
         height: 1fr;
         border-top: solid $accent;

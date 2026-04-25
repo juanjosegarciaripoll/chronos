@@ -1123,18 +1123,20 @@ class DetailPaneTracksCursorTest(TuiFlowTestCase):
         # Regression: moving the cursor through the event list left
         # the detail pane stuck on whatever row was current at the
         # last `refresh_view`. Pressing `down` must swap the rendered
-        # detail to match the newly-highlighted row.
+        # detail to match the newly-highlighted row. Agenda only —
+        # Day / Grid hide the inline detail pane and show the detail
+        # in a modal `EventDetailScreen` on Enter instead.
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            # Switch to Grid view positioned over the seeded dates
-            # so we have multiple rows to navigate. (Agenda's calendar-
-            # aligned WEEK around `NOW` doesn't catch the seeded May
-            # events.)
-            await pilot.press("ctrl+g")
+            # Park the agenda anchor over the seeded May events
+            # (the default WEEK around `NOW` is empty otherwise).
+            await pilot.press("ctrl+a")
+            await pilot.pause()
+            await pilot.press("m")  # Month window catches more rows
             await pilot.pause()
             screen._viewed_date = date(2026, 5, 1)
             screen.refresh_view()
@@ -1331,9 +1333,11 @@ class DeleteFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            # Grid view positioned over the seeded May events (the
-            # agenda's calendar-aligned WEEK around `NOW` is empty).
-            await pilot.press("ctrl+g")
+            # Agenda Month window over the seeded May events (the
+            # default WEEK around `NOW` is empty).
+            await pilot.press("ctrl+a")
+            await pilot.pause()
+            await pilot.press("m")
             await pilot.pause()
             screen._viewed_date = date(2026, 5, 1)
             screen.refresh_view()
@@ -1756,3 +1760,235 @@ class CalendarPanelToggleTest(TuiFlowTestCase):
             await pilot.press("enter")
             await pilot.pause()
             self.assertNotIn(picked, screen._selection.refs)
+
+
+class TimelineGridHelpersTest(unittest.TestCase):
+    """Pure-function helpers under TimelineGrid: header, slot label,
+    hour-range expansion, and per-cell event resolution. Easier to
+    pin behaviour here than through a Pilot test for every edge case.
+    """
+
+    def test_day_header_uses_friendly_words_for_three_special_days(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _day_header
+
+        today = date(2026, 4, 25)  # Saturday
+        self.assertEqual(_day_header(today, today), "Today Sat")
+        self.assertEqual(_day_header(today + timedelta(days=1), today), "Tomorrow Sun")
+        self.assertEqual(_day_header(today - timedelta(days=1), today), "Yesterday Fri")
+
+    def test_day_header_for_arbitrary_dates_uses_short_form(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _day_header
+
+        today = date(2026, 4, 25)
+        self.assertEqual(_day_header(date(2026, 5, 4), today), "Mon 04 May")
+        self.assertEqual(_day_header(date(2026, 6, 15), today), "Mon 15 Jun")
+
+    def test_slot_time_label_zero_pads(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _format_slot_time
+
+        self.assertEqual(_format_slot_time(0), "00:00")
+        self.assertEqual(_format_slot_time(7 * 60 + 30), "07:30")
+        self.assertEqual(_format_slot_time(23 * 60 + 30), "23:30")
+
+    def test_compute_hour_range_default_when_all_events_inside(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _compute_hour_range
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        event = _empty_event(ref)
+        rows = (
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+                    end=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            ),
+        )
+        start, end = _compute_hour_range([(date(2026, 5, 1), rows)])
+        self.assertEqual((start, end), (6, 22))
+
+    def test_compute_hour_range_widens_for_late_events(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _compute_hour_range
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        event = _empty_event(ref)
+        rows = (
+            # Early at 04:30 + late at 23:00; range must expand.
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 4, 30, tzinfo=UTC),
+                    end=datetime(2026, 5, 1, 5, 30, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            ),
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
+                    end=datetime(2026, 5, 1, 23, 45, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            ),
+        )
+        start, end = _compute_hour_range([(date(2026, 5, 1), rows)])
+        self.assertEqual(start, 4)
+        self.assertEqual(end, 24)  # 23:45 ends → 24
+
+    def test_cell_for_slot_picks_matching_event(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _cell_for_slot
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "standup")
+        event = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=b"",
+            summary="Standup",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        rows = (
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                    end=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            ),
+        )
+        # Slot 09:00 → event lands here.
+        cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        self.assertEqual(cell, "Standup")
+        self.assertEqual(hit, ref)
+        # Slot 09:30 → empty (event already ended; nothing starts here).
+        cell_empty, hit_empty = _cell_for_slot(date(2026, 5, 1), 9 * 60 + 30, rows)
+        self.assertEqual(cell_empty, "")
+        self.assertIsNone(hit_empty)
+
+    def test_cell_for_slot_appends_plus_when_overlapping(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _cell_for_slot
+
+        ref_a = ComponentRef(ACCOUNT_NAME, WORK_CAL, "a")
+        ref_b = ComponentRef(ACCOUNT_NAME, WORK_CAL, "b")
+        rows = tuple(
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                    end=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=VEvent(
+                    ref=ref,
+                    href=None,
+                    etag=None,
+                    raw_ics=b"",
+                    summary=label,
+                    description=None,
+                    location=None,
+                    dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                    dtend=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+                    status=None,
+                    local_flags=frozenset(),
+                    server_flags=frozenset(),
+                    local_status=LocalStatus.ACTIVE,
+                    trashed_at=None,
+                    synced_at=None,
+                ),
+            )
+            for ref, label in ((ref_a, "Meeting A"), (ref_b, "Meeting B"))
+        )
+        cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        # First event wins the visible spot; the `+1` indicates one
+        # other event overlaps in the same slot.
+        self.assertEqual(cell, "Meeting A +1")
+        self.assertEqual(hit, ref_a)
+
+
+class TimelineGridFlowTest(TuiFlowTestCase):
+    async def test_day_view_swaps_in_timeline_and_hides_detail_pane(self) -> None:
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            event_list = screen.query_one(EventList)
+            detail = screen.query_one(EventView)
+            self.assertTrue(timeline.display)
+            self.assertFalse(event_list.display)
+            self.assertFalse(detail.display)
+
+    async def test_grid_view_passes_four_day_columns(self) -> None:
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            # Time column + 4 day columns = 5 columns total.
+            self.assertEqual(len(timeline.columns), 5)
+
+    async def test_enter_on_event_cell_pushes_detail_modal(self) -> None:
+        # The agenda has an inline detail pane; in Day / Grid views
+        # the detail must appear as a separate modal screen so the
+        # timeline gets the full centre-pane height. Pressing Enter
+        # on a cell that holds an event opens that modal.
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            screen._viewed_date = date(2026, 5, 1)  # has the simple_event seed
+            screen.refresh_view()
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            # Find the first cell that resolves to an event.
+            for row_idx in range(timeline.row_count):
+                for col_idx in range(1, len(timeline.columns)):
+                    if timeline.cell_ref(row_idx, col_idx) is not None:
+                        timeline.cursor_coordinate = (row_idx, col_idx)  # type: ignore[assignment]
+                        break
+                else:
+                    continue
+                break
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            # Modal `EventDetailScreen` is now on top of MainScreen.
+            self.assertIsInstance(pilot.app.screen, EventDetailScreen)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 from typing import TYPE_CHECKING, cast
 
 from dateutil.relativedelta import relativedelta
@@ -60,6 +60,7 @@ from chronos.tui.views import (
 from chronos.tui.widgets.calendar_panel import CalendarPanel
 from chronos.tui.widgets.event_list import EventList
 from chronos.tui.widgets.event_view import EventView
+from chronos.tui.widgets.timeline_grid import TimelineGrid
 
 if TYPE_CHECKING:
     from chronos.tui.app import ChronosApp, TuiServices
@@ -104,6 +105,7 @@ class MainScreen(Screen[None]):
             with Vertical(id="centre-pane"):
                 yield Label("", id="view-title")
                 yield EventList(id="centre-list")
+                yield TimelineGrid(id="centre-timeline")
                 yield EventView(id="detail-pane")
         yield Footer()
 
@@ -292,6 +294,8 @@ class MainScreen(Screen[None]):
         calendars = all_calendar_refs(services.config, services.mirror)
         title_label: Label = self.query_one("#view-title", Label)
         event_list: EventList = self.query_one(EventList)
+        timeline: TimelineGrid = self.query_one(TimelineGrid)
+        detail: EventView = self.query_one(EventView)
         # Friendly date labels (Today / Tomorrow / weekday) are anchored
         # on the user's actual today, not on the viewed date — looking
         # at a 2014 day still shows the absolute date, not "Today".
@@ -306,7 +310,25 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
                 mode=self._agenda_window,
             )
-        elif self._view == ViewKind.DAY:
+            self._last_rows = rows
+            # Agenda layout: compact list on top, inline detail pane
+            # on the bottom. Timeline is hidden.
+            event_list.display = True
+            timeline.display = False
+            detail.display = True
+            event_list.show_events(rows, today=today, now=now, compact=True)
+            self._refresh_detail()
+            return
+
+        # Day / Grid: timeline takes the centre. The list and the
+        # inline detail pane both go away — the detail pane only
+        # appears when the user explicitly opens an entry (Enter on
+        # a cell), via the modal `EventDetailScreen`.
+        event_list.display = False
+        detail.display = False
+        timeline.display = True
+
+        if self._view == ViewKind.DAY:
             title_label.update(day_title(self._viewed_date))
             rows = day_rows(
                 index=services.index,
@@ -314,6 +336,7 @@ class MainScreen(Screen[None]):
                 selection=self._selection,
                 viewed=self._viewed_date,
             )
+            timeline.show_days([(self._viewed_date, rows)], today=today)
         else:  # ViewKind.GRID
             title_label.update(grid_title(self._viewed_date, self._grid_days))
             rows = grid_rows(
@@ -323,15 +346,20 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
                 days=self._grid_days,
             )
+            # Group the flat row list back into per-day buckets the
+            # widget expects.
+            buckets: list[tuple[date, list[OccurrenceRow]]] = [
+                (self._viewed_date + timedelta(days=offset), [])
+                for offset in range(self._grid_days)
+            ]
+            for occ_row in rows:
+                day_index = (
+                    occ_row.occurrence.start.astimezone(UTC).date() - self._viewed_date
+                ).days
+                if 0 <= day_index < self._grid_days:
+                    buckets[day_index][1].append(occ_row)
+            timeline.show_days(buckets, today=today)
         self._last_rows = rows
-        # Agenda gets the compact column set (no Calendar / Location)
-        # — the detail pane on the right still shows that info for
-        # the highlighted row, and freeing the columns lets Summary
-        # breathe.
-        event_list.show_events(
-            rows, today=today, now=now, compact=self._view == ViewKind.AGENDA
-        )
-        self._refresh_detail()
 
     def _refresh_detail(self) -> None:
         component = self._currently_selected_component()
@@ -340,18 +368,41 @@ class MainScreen(Screen[None]):
         view.show(component, today=today)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        # Refresh the detail pane whenever the cursor moves in the
-        # event list. Without this, arrow-key navigation through the
-        # list left the detail pane stuck on the row that was current
-        # at the last `refresh_view`. There's only one DataTable on
-        # this screen (`EventList`), so we don't need to filter on
-        # `event.data_table`.
-        del event
+        # Refresh the detail pane when the cursor moves in the event
+        # list (Agenda view). The TimelineGrid is also a DataTable,
+        # but Day/Grid views hide the inline detail pane — the user
+        # opens detail explicitly with Enter (handled by
+        # `on_timeline_grid_selected`) — so skip the refresh when the
+        # event came from the timeline.
+        # `event.data_table` / `event.control` are partially-typed
+        # in basedpyright (the `DataTable[Unknown]` generic param).
+        # `cast` flattens it to the bare widget for the identity
+        # check that decides which DataTable raised the event.
+        from textual.widget import Widget
+
+        sender = cast(Widget, event.control)
+        if sender is self.query_one(TimelineGrid):
+            return
         self._refresh_detail()
 
+    def on_timeline_grid_selected(self, event: TimelineGrid.Selected) -> None:
+        component = self._services().index.get_component(event.ref)
+        if component is None:
+            return
+        self._open_specific(component)
+
     def _currently_selected_component(self) -> StoredComponent | None:
-        event_list: EventList = self.query_one(EventList)
-        ref = event_list.selected_ref()
+        # Different views surface "what's highlighted" through
+        # different widgets. Agenda uses the row cursor on EventList;
+        # Day / Grid use the cell cursor on TimelineGrid (and only
+        # cells that hold an event resolve to a ref).
+        if self._view == ViewKind.AGENDA:
+            event_list: EventList = self.query_one(EventList)
+            ref = event_list.selected_ref()
+        else:
+            timeline: TimelineGrid = self.query_one(TimelineGrid)
+            coord = timeline.cursor_coordinate
+            ref = timeline.cell_ref(coord.row, coord.column)
         if ref is None:
             return None
         return self._services().index.get_component(ref)
