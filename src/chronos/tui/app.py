@@ -14,6 +14,15 @@ from chronos.protocols import (
 )
 from chronos.tui.screens.main_screen import MainScreen
 
+SyncRunner = Callable[..., Sequence[SyncResult]]
+"""Runs every configured account's sync.
+
+Called as `runner()` for a one-shot run, or `runner(cancel_event=evt)`
+to allow the caller (the TUI worker) to interrupt mid-flight. The
+runtime accepts the kwarg unconditionally; the simple test fakes that
+ignore it are valid implementations of the Protocol.
+"""
+
 
 @dataclass
 class TuiServices:
@@ -31,7 +40,7 @@ class TuiServices:
     index: IndexRepository
     creds: CredentialsProvider
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
-    sync_runner: Callable[[], Sequence[SyncResult]] | None = None
+    sync_runner: SyncRunner | None = None
 
 
 class ChronosApp(App[None]):
@@ -71,4 +80,4 @@ class ChronosApp(App[None]):
         self.push_screen(MainScreen())  # pyright: ignore[reportUnknownMemberType]
 
 
-__all__ = ["ChronosApp", "TuiServices"]
+__all__ = ["ChronosApp", "SyncRunner", "TuiServices"]

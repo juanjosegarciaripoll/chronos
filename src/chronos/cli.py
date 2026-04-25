@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -73,7 +74,7 @@ from chronos.protocols import (
 )
 from chronos.services import format_report, run_doctor
 from chronos.storage import VdirMirrorRepository
-from chronos.sync import sync_account
+from chronos.sync import SyncCancelled, sync_account
 
 SessionFactory = Callable[[AccountConfig, Authorization], CalDAVSession]
 ContextFactory = Callable[[Path | None], "CliContext"]
@@ -848,8 +849,53 @@ def cmd_tui(ctx: CliContext) -> int:
         sync_runner=build_sync_runner(tui_ctx),
     )
     app = ChronosApp(services)
-    app.run()
+    with _redirect_logs_to_file():
+        app.run()
     return 0
+
+
+def _redirect_logs_to_file() -> _LogRedirector:
+    """Route the root logger to `tui.log` for the duration of the TUI.
+
+    Sync emits per-calendar / per-batch progress at INFO; with the
+    default stderr handler still in place those lines paint over
+    Textual's screen and corrupt the rendering. The file handler
+    keeps the user's logs available (`tail -f $XDG_DATA_HOME/chronos/
+    tui.log`) without touching stderr while the app owns the terminal.
+    """
+    log_path = user_data_dir() / "tui.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    return _LogRedirector(log_path)
+
+
+class _LogRedirector:
+    def __init__(self, log_path: Path) -> None:
+        self._log_path = log_path
+        self._previous_handlers: list[logging.Handler] = []
+        self._previous_level = logging.WARNING
+        self._file_handler: logging.FileHandler | None = None
+
+    def __enter__(self) -> _LogRedirector:
+        root = logging.getLogger()
+        self._previous_handlers = list(root.handlers)
+        self._previous_level = root.level
+        handler = logging.FileHandler(self._log_path, mode="a", encoding="utf-8")
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        handler.addFilter(_DropH3DowngradeFilter())
+        self._file_handler = handler
+        root.handlers = [handler]
+        # Sync's progress logs are at INFO; lift the root level so
+        # they actually land in the file even if the parent CLI
+        # invocation defaulted to WARNING.
+        root.setLevel(min(self._previous_level, logging.INFO))
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        root = logging.getLogger()
+        if self._file_handler is not None:
+            self._file_handler.close()
+        root.handlers = self._previous_handlers
+        root.setLevel(self._previous_level)
 
 
 def _tui_unsupported_authorizer(
@@ -862,28 +908,41 @@ def _tui_unsupported_authorizer(
     )
 
 
-def build_sync_runner(ctx: CliContext) -> Callable[[], Sequence[SyncResult]]:
+def build_sync_runner(
+    ctx: CliContext,
+) -> Callable[..., Sequence[SyncResult]]:
     """Closure that runs `sync_account` over every configured account.
 
     Mirrors `cmd_sync`, but returns the per-account `SyncResult`s
     instead of writing to stdout. Per-account exceptions are caught
     and reported in the result's `errors` tuple so a single bad
     credential doesn't take the whole sync down.
+
+    The runner accepts an optional `cancel_event` keyword. The TUI
+    sets this event from another thread to interrupt a long-running
+    sync; `sync_account` checks it at calendar boundaries and raises
+    `SyncCancelled`, which the runner translates into a per-account
+    error rather than letting it tear through the worker.
     """
     factory = ctx.session_factory or _default_session_factory
 
-    def run() -> Sequence[SyncResult]:
+    def run(*, cancel_event: threading.Event | None = None) -> Sequence[SyncResult]:
         try:
             with acquire_sync_lock(sync_lock_path()):
-                return _run_locked()
+                return _run_locked(cancel_event)
         except SyncLockError as exc:
             # Surface the lock contention as a SyncResult so the TUI's
             # banner shows the message instead of crashing the worker.
             return (_failure_result("(sync)", str(exc)),)
 
-    def _run_locked() -> Sequence[SyncResult]:
+    def _run_locked(
+        cancel_event: threading.Event | None,
+    ) -> Sequence[SyncResult]:
         results: list[SyncResult] = []
         for account in ctx.config.accounts:
+            if cancel_event is not None and cancel_event.is_set():
+                results.append(_failure_result(account.name, "sync cancelled"))
+                continue
             try:
                 auth = ctx.creds.build_auth(account)
             except CredentialResolutionError as exc:
@@ -904,7 +963,11 @@ def build_sync_runner(ctx: CliContext) -> Callable[[], Sequence[SyncResult]]:
                     mirror=ctx.mirror,
                     index=ctx.index,
                     now=ctx.now,
+                    cancel_event=cancel_event,
                 )
+            except SyncCancelled:
+                results.append(_failure_result(account.name, "sync cancelled"))
+                continue
             except CalDAVError as exc:
                 results.append(_failure_result(account.name, f"CalDAV: {exc}"))
                 continue

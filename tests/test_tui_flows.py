@@ -1234,7 +1234,7 @@ class DeleteFlowTest(TuiFlowTestCase):
 
 
 class HelpScreenTest(TuiFlowTestCase):
-    async def test_f1_opens_help_listing_visible_bindings(self) -> None:
+    async def test_f1_opens_help_grouped_by_area(self) -> None:
         from chronos.tui.screens.help_screen import HelpScreen
 
         services = self.services()
@@ -1246,12 +1246,26 @@ class HelpScreenTest(TuiFlowTestCase):
             self.assertIsInstance(pilot.app.screen, HelpScreen)
             help_screen = pilot.app.screen
             assert isinstance(help_screen, HelpScreen)
-            from textual.widgets import Static
+            # The renderable is a `rich.console.Group` — render it to
+            # a plain-text capture so we can assert on the section
+            # headers and bound keys without spelling out the full
+            # ANSI output.
+            from io import StringIO
 
-            body = help_screen.query_one("#help-body", Static)
-            text = str(body.content)
-            # A handful of public bindings must appear.
-            for fragment in ("Day", "Week", "Month", "Delete", "Help", "Quit"):
+            from rich.console import Console
+
+            renderable = help_screen._render_help()
+            buffer = StringIO()
+            console = Console(
+                file=buffer, force_terminal=False, width=80, color_system=None
+            )
+            console.print(renderable)
+            text = buffer.getvalue()
+            # Each section panel renders its title.
+            for section in ("Views", "Navigation", "Events", "Tools"):
+                self.assertIn(section, text, section)
+            # And a sample of the bindings that belong to each.
+            for fragment in ("Day", "Week", "Next", "Prev", "Delete", "Help", "Quit"):
                 self.assertIn(fragment, text, fragment)
             # Hidden aliases (shift+t, shift+n, shift+p, shift+d) must
             # NOT show up; otherwise the help text is twice as long
@@ -1290,7 +1304,7 @@ class SyncFlowTest(TuiFlowTestCase):
     async def test_sync_runner_called_on_confirmation(self) -> None:
         calls: list[int] = []
 
-        def runner() -> Sequence[SyncResult]:
+        def runner(**_kwargs: object) -> Sequence[SyncResult]:
             calls.append(1)
             return (
                 SyncResult(
@@ -1312,11 +1326,15 @@ class SyncFlowTest(TuiFlowTestCase):
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
             await pilot.pause()
+            # Sync now runs on a Textual worker. Wait for it to settle
+            # before asserting on `calls`.
+            await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
+            await pilot.pause()
 
         self.assertEqual(calls, [1])
 
     async def test_sync_runner_errors_show_in_notification(self) -> None:
-        def runner() -> Sequence[SyncResult]:
+        def runner(**_kwargs: object) -> Sequence[SyncResult]:
             return (
                 SyncResult(
                     account_name=ACCOUNT_NAME,
@@ -1352,6 +1370,61 @@ class SyncFlowTest(TuiFlowTestCase):
             await pilot.pause()
             # No assertion on notify text; the path executed without
             # raising is the contract.
+
+    async def test_escape_during_sync_sets_cancel_event(self) -> None:
+        # Regression: previously sync ran on the UI thread and a stuck
+        # sync could only be killed by exiting the whole app. With the
+        # worker, Esc flips the cancel event so the runner sees it on
+        # its next polling boundary.
+        import threading
+
+        gate = threading.Event()  # block the runner until we cancel
+        observed: dict[str, threading.Event | None] = {"cancel": None}
+
+        def runner(
+            *, cancel_event: threading.Event | None = None
+        ) -> Sequence[SyncResult]:
+            observed["cancel"] = cancel_event
+            # Wait until the test releases us, then bail out.
+            gate.wait(timeout=5.0)
+            return (
+                SyncResult(
+                    account_name=ACCOUNT_NAME,
+                    calendars_synced=0,
+                    components_added=0,
+                    components_updated=0,
+                    components_removed=0,
+                    errors=("sync cancelled",),
+                ),
+            )
+
+        services = self.services(sync_runner=runner)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, SyncConfirmScreen)
+            await pilot.press("y")
+            await pilot.pause()
+            # Sync worker is now blocked inside `runner`. The screen
+            # is back on MainScreen (sync confirm popped on confirm).
+            self.assertIsInstance(pilot.app.screen, MainScreen)
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            self.assertIsNotNone(screen._sync_cancel)
+            await pilot.press("escape")
+            await pilot.pause()
+            # The cancel event the runner received is the same one Esc
+            # toggled, and it's set.
+            cancel = observed["cancel"]
+            assert cancel is not None
+            self.assertTrue(cancel.is_set())
+            # Release the runner so the worker can finish cleanly.
+            gate.set()
+            await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
+            await pilot.pause()
+            self.assertIsNone(screen._sync_cancel)
 
 
 class SearchFlowTest(TuiFlowTestCase):

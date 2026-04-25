@@ -52,6 +52,18 @@ class SyncHaltError(SyncError):
     """Raised when the engine refuses to proceed without user confirmation."""
 
 
+class SyncCancelled(SyncError):  # noqa: N818 — describes an event, not an error condition
+    """Raised when the caller's `cancel_event` was set mid-sync.
+
+    Distinct from `KeyboardInterrupt` so the TUI's worker can tell a
+    user-initiated cancel apart from an unexpected exception. The
+    on-disk state stays consistent because the cancel is observed at
+    calendar boundaries — every calendar that completed before the
+    flag was set has its CTag written; the rest are simply skipped
+    until the next sync.
+    """
+
+
 @dataclass(frozen=True, kw_only=True)
 class CalendarSyncStats:
     calendar: CalendarRef
@@ -71,9 +83,20 @@ def sync_account(
     mirror: MirrorRepository,
     index: IndexRepository,
     now: datetime | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> SyncResult:
+    """Sync one account's calendars.
+
+    `cancel_event`, when set by another thread, makes the engine bail
+    out at the next calendar boundary by raising `SyncCancelled`.
+    Per-calendar progress is preserved (each calendar that completed
+    before cancellation has its CTag written), so re-running sync
+    after a cancel converges normally.
+    """
     clock = now or datetime.now(UTC)
     logger.info("sync account %s", account.name)
+    if cancel_event is not None and cancel_event.is_set():
+        raise SyncCancelled
     principal_url = session.discover_principal()
     remote_calendars = session.list_calendars(principal_url)
     scoped = _scoped_calendars(remote_calendars, account)
@@ -94,6 +117,8 @@ def sync_account(
         )
     total = len(scoped)
     for index_pos, remote in enumerate(scoped, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise SyncCancelled
         calendar = _resolve_calendar(account, remote)
         logger.info(
             "[%s] (%d/%d) %s", account.name, index_pos, total, calendar.calendar_name
@@ -924,6 +949,7 @@ def _resolve_calendar(account: AccountConfig, remote: RemoteCalendar) -> Calenda
 
 __all__ = [
     "CalendarSyncStats",
+    "SyncCancelled",
     "SyncError",
     "SyncHaltError",
     "sync_account",

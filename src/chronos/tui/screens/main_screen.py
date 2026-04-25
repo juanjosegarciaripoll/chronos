@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import Sequence
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from dateutil.relativedelta import relativedelta
+from textual import work
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label
@@ -15,6 +19,7 @@ from chronos.domain import (
     LocalStatus,
     ResourceRef,
     StoredComponent,
+    SyncResult,
     VEvent,
 )
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
@@ -77,7 +82,12 @@ class MainScreen(Screen[None]):
     `CONVENTIONS.md §11`.
     """
 
-    BINDINGS = main_bindings()
+    BINDINGS = [
+        *main_bindings(),
+        # Esc only does something while a sync worker is running; the
+        # main screen has no other "back" affordance to clobber.
+        Binding("escape", "cancel_sync", "Cancel sync", show=False),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -85,6 +95,10 @@ class MainScreen(Screen[None]):
         self._viewed_date: date = date(2026, 4, 25)  # rebound in on_mount
         self._selection = CalendarSelection(refs=frozenset())
         self._last_rows: tuple[OccurrenceRow, ...] = ()
+        # Set when a `_run_sync` worker is in flight; the worker
+        # checks it between calendars and bails out via
+        # `SyncCancelled`. Cleared once the worker returns.
+        self._sync_cancel: threading.Event | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -417,16 +431,6 @@ class MainScreen(Screen[None]):
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _run_sync(self) -> None:
-        # v1 runs sync synchronously on the UI thread — the TUI is
-        # frozen for its duration. That is acceptable because sync is
-        # crash-safe: the lockfile (acquired inside `runner`) is
-        # released on any exception, mirror writes are temp-file +
-        # rename, and SQLite ingests are per-resource transactions.
-        # If the user hits Ctrl-C, KeyboardInterrupt propagates up
-        # and Textual exits — leaving a coherent on-disk state, but
-        # taking the TUI down with it. Running sync in a Textual
-        # worker so Ctrl-C only cancels the sync (not the app) is
-        # tracked in `ai/TASKS.md` followups.
         services = self._services()
         runner = services.sync_runner
         if runner is None:
@@ -434,17 +438,74 @@ class MainScreen(Screen[None]):
                 "Sync from inside the TUI is not wired in this build."
             )
             return
-        results = runner()
+        if self._sync_cancel is not None:
+            # An earlier sync hasn't returned yet. Don't stack workers.
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                "A sync is already in progress."
+            )
+            return
+        self._sync_cancel = threading.Event()
+        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+            "Syncing… press Esc to cancel."
+        )
+        self._spawn_sync_worker(runner, self._sync_cancel)
+
+    @work(thread=True, exclusive=True, group="chronos-sync")
+    def _spawn_sync_worker(
+        self,
+        runner: Any,
+        cancel_event: threading.Event,
+    ) -> None:
+        # Run on a Textual worker thread so the UI thread stays
+        # responsive (and so log output redirected to `tui.log` can't
+        # bleed onto the screen mid-render). Results come back via
+        # `call_from_thread` so the post-sync notify + view refresh
+        # happen on the UI thread.
+        try:
+            results = runner(cancel_event=cancel_event)
+        except Exception as exc:  # noqa: BLE001 — surface every failure
+            self.app.call_from_thread(self._sync_finished, None, exc)  # pyright: ignore[reportUnknownMemberType]
+            return
+        self.app.call_from_thread(self._sync_finished, results, None)  # pyright: ignore[reportUnknownMemberType]
+
+    def _sync_finished(
+        self,
+        results: Sequence[SyncResult] | None,
+        error: BaseException | None,
+    ) -> None:
+        cancelled = self._sync_cancel is not None and self._sync_cancel.is_set()
+        self._sync_cancel = None
+        if error is not None:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Sync failed: {error}", severity="error"
+            )
+            return
+        if results is None:
+            return
         added = sum(r.components_added for r in results)
         updated = sum(r.components_updated for r in results)
         removed = sum(r.components_removed for r in results)
         error_count = sum(len(r.errors) for r in results)
+        prefix = "Sync cancelled" if cancelled else "Sync complete"
         suffix = f" ({error_count} error(s))" if error_count else ""
         self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-            f"Sync complete: +{added} ~{updated} -{removed}{suffix}",
-            severity="error" if error_count else "information",
+            f"{prefix}: +{added} ~{updated} -{removed}{suffix}",
+            severity="warning"
+            if cancelled
+            else ("error" if error_count else "information"),
         )
         self.refresh_view()
+
+    def action_cancel_sync(self) -> None:
+        # Esc on the main screen only does something while sync is in
+        # flight: it sets the cancel event so the worker bails out
+        # at the next calendar boundary.
+        if self._sync_cancel is None:
+            return
+        self._sync_cancel.set()
+        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+            "Cancelling sync…"
+        )
 
     def _first_selected(self, calendars: tuple[CalendarRef, ...]) -> CalendarRef:
         for ref in calendars:
