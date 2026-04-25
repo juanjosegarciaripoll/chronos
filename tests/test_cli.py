@@ -127,6 +127,79 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("personal:", self.stdout.getvalue())
         self.assertIn("+1", self.stdout.getvalue())
 
+    def test_reset_deletes_index_and_mirror_with_yes_flag(self) -> None:
+        # Seed the mirror + index so there's something to delete.
+        self._seed_server()
+        from chronos.authorization import Authorization
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        # First sync populates everything.
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+        # Sanity: data is on disk.
+        self.assertTrue(self.index._path.exists())  # type: ignore[attr-defined]
+
+        index_path = self.index._path  # type: ignore[attr-defined]
+        # `VdirMirrorRepository` stores its root on `_root` (the
+        # constructor's `tmp / "mirror"`).
+        mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+
+        code = cli.cmd_reset(
+            ctx, yes=True, index_path=index_path, mirror_dir=mirror_dir
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(index_path.exists())
+        self.assertFalse(mirror_dir.exists())
+        self.assertIn("Reset complete", self.stdout.getvalue())
+
+    def test_reset_is_a_noop_when_nothing_exists(self) -> None:
+        # No prior sync — index file doesn't exist on disk, mirror
+        # dir doesn't exist either. Reset should print a friendly
+        # "nothing to do" line and return 0.
+        ctx = self._ctx()
+        # Close + unlink so the file genuinely isn't there.
+        ctx.index.close()
+        index_path = self.index._path  # type: ignore[attr-defined]
+        if index_path.exists():
+            index_path.unlink()
+        mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+        if mirror_dir.exists():
+            import shutil as _sh
+
+            _sh.rmtree(mirror_dir)
+
+        code = cli.cmd_reset(
+            ctx, yes=True, index_path=index_path, mirror_dir=mirror_dir
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to reset", self.stdout.getvalue())
+
+    def test_reset_refuses_without_yes_when_non_interactive(self) -> None:
+        self._seed_server()
+        from chronos.authorization import Authorization
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self._run(["sync"], context=ctx)
+        index_path = self.index._path  # type: ignore[attr-defined]
+        mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+
+        # Tests run with stdin/stdout not attached to a TTY, so the
+        # confirmation path takes the "refuse non-interactively"
+        # branch.
+        code = cli.cmd_reset(
+            ctx, yes=False, index_path=index_path, mirror_dir=mirror_dir
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Refusing to reset non-interactively", self.stderr.getvalue())
+        # Files are still there.
+        self.assertTrue(index_path.exists())
+        self.assertTrue(mirror_dir.exists())
+
     def test_sync_force_clears_sync_state_and_reruns_slow_path(self) -> None:
         # `chronos sync --force` is the user-facing escape hatch when
         # the local cache has drifted out of step with the components

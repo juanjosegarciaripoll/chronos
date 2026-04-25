@@ -61,6 +61,7 @@ from chronos.oauth import (
 from chronos.paths import (
     default_config_path,
     default_index_path,
+    default_mirror_dir,
     default_mirror_path,
     oauth_token_path,
     sync_lock_path,
@@ -353,6 +354,21 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    reset_p = sub.add_parser(
+        "reset",
+        help=(
+            "Delete the local SQLite index and vdir mirror so the next "
+            "`chronos sync` rebuilds them from scratch. Configuration and "
+            "OAuth tokens are preserved."
+        ),
+    )
+    reset_p.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt.",
+    )
+
     list_p = sub.add_parser("list", help="List events and todos.")
     list_p.add_argument("--account", default=None)
     list_p.add_argument("--calendar", default=None)
@@ -495,6 +511,8 @@ def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
     command = str(args.command)
     if command == "sync":
         return cmd_sync(ctx, force=bool(getattr(args, "force", False)))
+    if command == "reset":
+        return cmd_reset(ctx, yes=bool(getattr(args, "yes", False)))
     if command == "list":
         return cmd_list(
             ctx,
@@ -671,6 +689,81 @@ def _cmd_sync_locked(ctx: CliContext) -> int:
         for err in result.errors:
             ctx.stderr.write(f"[{account.name}] {err}\n")
     return 1 if fails else 0
+
+
+def cmd_reset(
+    ctx: CliContext,
+    *,
+    yes: bool = False,
+    index_path: Path | None = None,
+    mirror_dir: Path | None = None,
+) -> int:
+    """Wipe the local index + mirror.
+
+    This is the user-facing escape hatch for "my local cache is wedged
+    and `--force` isn't enough" — it deletes the SQLite index (plus
+    `-wal` / `-shm` sidecars) and the entire vdir mirror tree.
+    Configuration and OAuth tokens are deliberately untouched, so the
+    next `chronos sync` knows where to fetch from but starts with a
+    blank slate.
+
+    `index_path` and `mirror_dir` default to the platform-standard
+    locations from `paths.py`; tests inject tmpdir-rooted overrides.
+    """
+    target_index = index_path or default_index_path()
+    target_mirror = mirror_dir or default_mirror_dir()
+
+    targets: list[Path] = []
+    if target_index.exists():
+        targets.append(target_index)
+        for suffix in ("-wal", "-shm"):
+            sidecar = target_index.with_name(target_index.name + suffix)
+            if sidecar.exists():
+                targets.append(sidecar)
+    if target_mirror.exists():
+        targets.append(target_mirror)
+
+    if not targets:
+        ctx.stdout.write("Nothing to reset (no local index or mirror found).\n")
+        return 0
+
+    ctx.stdout.write("Reset will delete:\n")
+    for path in targets:
+        ctx.stdout.write(f"  {path}\n")
+    ctx.stdout.write(
+        "Configuration and OAuth tokens are preserved. "
+        "The next `chronos sync` will repopulate the index and mirror "
+        "from scratch.\n"
+    )
+
+    if not yes:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            ctx.stderr.write(
+                "Refusing to reset non-interactively. Pass --yes to confirm.\n"
+            )
+            return 1
+        ctx.stdout.write("Type 'yes' to confirm: ")
+        ctx.stdout.flush()
+        answer = sys.stdin.readline().strip().lower()
+        if answer != "yes":
+            ctx.stdout.write("Cancelled.\n")
+            return 1
+
+    # Close any open connections / file handles so Windows lets us
+    # delete the underlying files.
+    ctx.index.close()
+
+    for path in targets:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            # `-wal` / `-shm` may disappear between the targets snapshot
+            # and the unlink: SQLite checkpoints + cleans them up the
+            # moment we close the connection a few lines above.
+            path.unlink(missing_ok=True)
+
+    ctx.stdout.write("Reset complete. Run `chronos sync` to repopulate.\n")
+    return 0
 
 
 def cmd_list(
