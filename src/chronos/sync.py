@@ -404,6 +404,9 @@ def _apply_server_deletions(
     return removed
 
 
+_INGEST_PROGRESS_INTERVAL = 50
+
+
 def _fetch_and_ingest(
     *,
     account: AccountConfig,
@@ -418,8 +421,16 @@ def _fetch_and_ingest(
     if not hrefs:
         return 0
     fetched = session.calendar_multiget(calendar.url, list(hrefs))
+    total = len(fetched)
+    # Per-resource ingest is parse_vcalendar + mirror write + SQLite
+    # upsert(s); for ~5k events that's tens of seconds with no
+    # network in between. Log a heartbeat every
+    # `_INGEST_PROGRESS_INTERVAL` resources so big calendars don't
+    # look stuck after the multiget batches finish.
+    if total >= _INGEST_PROGRESS_INTERVAL:
+        logger.info("  ingesting %d resources locally...", total)
     count = 0
-    for href, etag, ics in fetched:
+    for processed, (href, etag, ics) in enumerate(fetched, start=1):
         try:
             count += _ingest_resource(
                 account=account,
@@ -433,6 +444,13 @@ def _fetch_and_ingest(
             )
         except IcalParseError as exc:
             errors.append(f"{href}: {exc}")
+        if (
+            total >= _INGEST_PROGRESS_INTERVAL
+            and processed % _INGEST_PROGRESS_INTERVAL == 0
+        ):
+            logger.info("  ingest: %d/%d", processed, total)
+    if total >= _INGEST_PROGRESS_INTERVAL and total % _INGEST_PROGRESS_INTERVAL:
+        logger.info("  ingest: %d/%d", total, total)
     return count
 
 

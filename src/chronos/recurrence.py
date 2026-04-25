@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
@@ -16,7 +17,11 @@ from chronos.domain import (
 )
 from chronos.protocols import IndexRepository
 
+logger = logging.getLogger(__name__)
+
 MAX_OCCURRENCES = 10_000
+
+_POPULATE_PROGRESS_INTERVAL = 50
 
 
 class RecurrenceExpansionError(ValueError):
@@ -118,8 +123,19 @@ def populate_occurrences(
             overrides_by_uid.setdefault(component.ref.uid, []).append(component)
 
     total = 0
+    n_masters = len(masters)
+    # Recurrence expansion + per-master SQLite write is silent
+    # otherwise; for a calendar with thousands of recurring masters
+    # this phase can dominate sync wall-time, so emit a heartbeat.
+    if n_masters >= _POPULATE_PROGRESS_INTERVAL:
+        logger.info(
+            "  expanding occurrences for %d master(s) in %s/%s...",
+            n_masters,
+            calendar.account_name,
+            calendar.calendar_name,
+        )
     with index.connection():
-        for master in masters:
+        for processed, master in enumerate(masters, start=1):
             try:
                 occurrences = expand(
                     master=master,
@@ -134,6 +150,26 @@ def populate_occurrences(
                 continue
             index.set_occurrences(master.ref, occurrences)
             total += len(occurrences)
+            if (
+                n_masters >= _POPULATE_PROGRESS_INTERVAL
+                and processed % _POPULATE_PROGRESS_INTERVAL == 0
+            ):
+                logger.info(
+                    "  expand: %d/%d masters, %d occurrences so far",
+                    processed,
+                    n_masters,
+                    total,
+                )
+    if (
+        n_masters >= _POPULATE_PROGRESS_INTERVAL
+        and n_masters % _POPULATE_PROGRESS_INTERVAL
+    ):
+        logger.info(
+            "  expand: %d/%d masters, %d occurrences",
+            n_masters,
+            n_masters,
+            total,
+        )
     return total
 
 
