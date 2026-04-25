@@ -144,3 +144,4 @@ Reprioritised from the original "TUI" slot. Google and Microsoft dropped basic-a
 - **THISANDFUTURE overrides** — currently treated as single-instance overrides (`RECURRENCE.md §5`). Revisit if recurrence editing proves clumsy.
 - **Multi-calendar server links** — Google-style duplicated resources across calendars. Deferred.
 - **Write contention** — SQLite `busy_timeout` only, no exclusive sync lock. Reassess if the TUI races the sync engine in practice.
+- **Per-account `mirror_path` is not honored at runtime** — `AccountConfig.mirror_path` is parsed from `config.toml` (or defaulted to `paths.default_mirror_path(name)`) and stored on the dataclass, but the CLI / TUI build a single `VdirMirrorRepository(default_mirror_dir())` and ignore the per-account value. As long as users take the default the on-disk layout coincides; custom values silently fall back. Either route through a per-account mirror map or drop the field; not blocking M9.

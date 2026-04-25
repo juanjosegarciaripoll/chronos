@@ -75,6 +75,15 @@ def default_mirror_dir() -> Path:
     return user_data_dir() / "mirror"
 
 
+def default_mirror_path(account_name: str) -> Path:
+    """Per-account mirror root used as the default in `config.toml`.
+
+    Matches the runtime layout `<default_mirror_dir>/<account>/...`,
+    so accounts that use this default produce no on-disk surprise.
+    """
+    return default_mirror_dir() / account_name
+
+
 def default_index_path() -> Path:
     return user_data_dir() / "index.sqlite3"
 

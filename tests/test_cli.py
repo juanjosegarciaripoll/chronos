@@ -716,6 +716,38 @@ class AccountAddCommandTest(ConfigEditingCliTestCase):
         assert isinstance(cred, PlaintextCredential)
         self.assertEqual(cred.password, "s3cret")
 
+    def test_add_account_without_mirror_path_uses_default(self) -> None:
+        from chronos.paths import default_mirror_path
+
+        self._run(["init"])
+        code = self._run(
+            [
+                "account",
+                "add",
+                "--name",
+                "personal",
+                "--url",
+                "https://caldav.example.com/dav/",
+                "--username",
+                "user@example.com",
+                "--credential-backend",
+                "plaintext",
+                "--credential-value",
+                "s3cret",
+            ]
+        )
+        self.assertEqual(code, 0)
+        from chronos.config import load
+
+        config = load(self.config_path)
+        self.assertEqual(
+            config.accounts[0].mirror_path, default_mirror_path("personal")
+        )
+        # The TOML on disk should NOT carry an explicit mirror_path line
+        # (it round-trips through the default).
+        body = self.config_path.read_text(encoding="utf-8")
+        self.assertNotIn("mirror_path", body)
+
     def test_add_env_account(self) -> None:
         code = self._run(
             [

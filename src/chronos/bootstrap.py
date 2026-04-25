@@ -53,11 +53,10 @@ use_utf8 = false
 # url = "https://caldav.example.com/dav/calendars/user/USER/"
 # username = "USER@example.com"
 # credential = { backend = "plaintext", password = "REPLACE-ME" }
-# mirror_path = "~/.local/share/chronos/mirror/personal"
-# trash_retention_days = 30
-# include = [".*"]
-# exclude = []
-# read_only = []
+# # mirror_path is optional; defaults to <user-data-dir>/mirror/<name>.
+# # mirror_path = "~/.local/share/chronos/mirror/personal"
+# # trash_retention_days defaults to 30.
+# # include / exclude are Python regexes (re.fullmatch); default include = [".*"].
 
 # # OAuth 2.0 device flow: Google Calendar, Microsoft / Outlook.
 # # After saving this file, run:
@@ -66,11 +65,6 @@ use_utf8 = false
 # name = "google"
 # url = "https://apidata.googleusercontent.com/caldav/v2/"
 # username = "you@gmail.com"
-# mirror_path = "~/.local/share/chronos/mirror/google"
-# trash_retention_days = 30
-# include = [".*"]
-# exclude = []
-# read_only = []
 # [accounts.credential]
 # backend = "oauth"
 # client_id = "REPLACE-ME.apps.googleusercontent.com"

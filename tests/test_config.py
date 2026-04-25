@@ -123,6 +123,24 @@ class ParseAccountTest(unittest.TestCase):
         self.assertNotIn("~", str(path))
         self.assertTrue(path.is_absolute())
 
+    def test_mirror_path_defaults_to_platform_path_when_omitted(self) -> None:
+        from chronos.paths import default_mirror_path
+
+        acct_data = dict(self.BASE_ACCOUNT)
+        del acct_data["mirror_path"]
+        config = parse(self._wrap(acct_data))
+        self.assertEqual(
+            config.accounts[0].mirror_path, default_mirror_path("personal")
+        )
+
+    def test_mirror_path_must_be_a_string_when_present(self) -> None:
+        acct_data = dict(self.BASE_ACCOUNT)
+        acct_data["mirror_path"] = 42
+        with self.assertRaises(ConfigError) as ctx:
+            parse(self._wrap(acct_data))
+        self.assertIn("mirror_path", str(ctx.exception))
+        self.assertIn("string", str(ctx.exception))
+
     def test_include_regex_compiled(self) -> None:
         acct_data = dict(self.BASE_ACCOUNT)
         acct_data["include"] = ["^personal-.*$", "^shared$"]
@@ -296,6 +314,51 @@ class DumpTest(unittest.TestCase):
     def test_dump_omits_none_editor(self) -> None:
         data = dump(_sample_config())
         self.assertNotIn("editor", data)
+
+    def test_dump_omits_mirror_path_when_default(self) -> None:
+        from chronos.paths import default_mirror_path
+
+        config = _sample_config()
+        config = AppConfig(
+            config_version=config.config_version,
+            use_utf8=config.use_utf8,
+            editor=config.editor,
+            accounts=(
+                AccountConfig(
+                    name=config.accounts[0].name,
+                    url=config.accounts[0].url,
+                    username=config.accounts[0].username,
+                    credential=config.accounts[0].credential,
+                    mirror_path=default_mirror_path("personal"),
+                    trash_retention_days=config.accounts[0].trash_retention_days,
+                    include=config.accounts[0].include,
+                    exclude=config.accounts[0].exclude,
+                    read_only=config.accounts[0].read_only,
+                ),
+            ),
+        )
+        data = dump(config)
+        accounts = data["accounts"]
+        assert isinstance(accounts, list)
+        self.assertNotIn("mirror_path", accounts[0])
+        # And the round-trip recovers the same path via the default.
+        reparsed = parse(data)
+        self.assertEqual(
+            reparsed.accounts[0].mirror_path, default_mirror_path("personal")
+        )
+
+    def test_dump_keeps_mirror_path_when_custom(self) -> None:
+        config = _sample_config()
+        # _sample_config uses /tmp/chronos/personal which is NOT the
+        # platform default; dump should keep it. Path serialisation is
+        # platform-specific (str() of a WindowsPath uses backslashes),
+        # so compare via Path equality.
+        data = dump(config)
+        accounts = data["accounts"]
+        assert isinstance(accounts, list)
+        self.assertEqual(
+            Path(str(accounts[0]["mirror_path"])), Path("/tmp/chronos/personal")
+        )
 
     def test_dump_includes_editor_when_set(self) -> None:
         config = _sample_config()

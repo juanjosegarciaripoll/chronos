@@ -20,7 +20,7 @@ from chronos.domain import (
     OAuthCredential,
     PlaintextCredential,
 )
-from chronos.paths import expand_path
+from chronos.paths import default_mirror_path, expand_path
 
 _DEFAULT_TRASH_RETENTION_DAYS = 30
 _DEFAULT_INCLUDE = (".*",)
@@ -76,7 +76,7 @@ def _parse_account(data: object, key: str) -> AccountConfig:
     credential = _parse_credential(
         account.get("credential"), f"{account_key}.credential"
     )
-    mirror_path = expand_path(_require_str(account, "mirror_path", account_key))
+    mirror_path = _parse_mirror_path(account, name, account_key)
     trash_retention_days = _optional_int(
         account,
         "trash_retention_days",
@@ -150,6 +150,27 @@ def _parse_credential(data: object, key: str) -> CredentialSpec:
         "(expected: plaintext, env, command, encrypted, oauth)",
         key,
     )
+
+
+def _parse_mirror_path(
+    account: dict[str, object], account_name: str, account_key: str
+) -> Path:
+    """Resolve `mirror_path` if present, else fall back to the platform default.
+
+    The default is `paths.default_mirror_path(account_name)` — i.e. a
+    subdirectory of the OS user-data directory named after the account.
+    Users who want a custom location override the field; users who don't
+    can omit it entirely.
+    """
+    raw = account.get("mirror_path")
+    if raw is None:
+        return default_mirror_path(account_name)
+    if not isinstance(raw, str):
+        raise ConfigError(
+            f"'mirror_path' must be a string, got {type(raw).__name__}",
+            account_key,
+        )
+    return expand_path(raw)
 
 
 def _parse_regex_list(data: object, key: str) -> tuple[re.Pattern[str], ...]:
@@ -262,17 +283,22 @@ def save(config: AppConfig, path: Path) -> None:
 
 
 def _dump_account(account: AccountConfig) -> dict[str, object]:
-    return {
+    out: dict[str, object] = {
         "name": account.name,
         "url": account.url,
         "username": account.username,
         "credential": _dump_credential(account.credential),
-        "mirror_path": str(account.mirror_path),
         "trash_retention_days": account.trash_retention_days,
         "include": [p.pattern for p in account.include],
         "exclude": [p.pattern for p in account.exclude],
         "read_only": [p.pattern for p in account.read_only],
     }
+    # Only emit mirror_path when the user picked a non-default location;
+    # accounts that took the default stay clean on round-trip through
+    # `chronos account add` / `config edit`.
+    if account.mirror_path != default_mirror_path(account.name):
+        out["mirror_path"] = str(account.mirror_path)
+    return out
 
 
 def _dump_credential(spec: CredentialSpec) -> dict[str, object]:

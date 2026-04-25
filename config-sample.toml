@@ -16,20 +16,16 @@ use_utf8 = false
 # url = "https://caldav.example.com/dav/principals/user@example.com/"
 # username = "user@example.com"
 # credential = { backend = "env", variable = "CHRONOS_PERSONAL_PASSWORD" }
-# mirror_path = "~/.local/share/chronos/mirror/personal"
-# trash_retention_days = 30
-#
-# # Calendar display names to sync (Python re.fullmatch).
-# include = [".*"]
-# exclude = []
-# read_only = []
+# # mirror_path is optional; defaults to <user-data-dir>/mirror/<name>.
+# # mirror_path = "~/.local/share/chronos/mirror/personal"
+# # trash_retention_days defaults to 30.
+# # include / exclude are Python regexes (re.fullmatch); default include = [".*"].
 
 # [[accounts]]
 # name = "google"
 # url = "https://apidata.googleusercontent.com/caldav/v2/you@gmail.com/events/"
 # username = "you@gmail.com"
 # credential = { backend = "oauth", client_id = "12345.apps.googleusercontent.com", client_secret = "GOCSPX-..." }
-# mirror_path = "~/.local/share/chronos/mirror/google"
 # # Run `chronos oauth authorize --account google` once to obtain
 # # access/refresh tokens. They are stored under the OS-standard user
 # # data directory (tokens/<account>.json), not in this file.

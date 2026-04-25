@@ -56,6 +56,7 @@ from chronos.oauth import (
 from chronos.paths import (
     default_config_path,
     default_index_path,
+    default_mirror_path,
     oauth_token_path,
     user_data_dir,
 )
@@ -273,7 +274,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default="https://www.googleapis.com/auth/calendar",
         help="OAuth scope; defaults to Google Calendar read+write.",
     )
-    account_add.add_argument("--mirror-path", type=Path, required=True)
+    account_add.add_argument(
+        "--mirror-path",
+        type=Path,
+        default=None,
+        help=(
+            "Where to mirror this account's .ics files. Defaults to "
+            "<user-data-dir>/mirror/<account-name>."
+        ),
+    )
     account_add.add_argument("--trash-retention-days", type=int, default=30)
 
     account_sub.add_parser("list", help="Show configured accounts.")
@@ -711,7 +720,7 @@ def cmd_account_add(
     oauth_client_id: str | None,
     oauth_client_secret: str | None,
     oauth_scope: str,
-    mirror_path: Path,
+    mirror_path: Path | None,
     trash_retention_days: int,
 ) -> int:
     try:
@@ -735,12 +744,13 @@ def cmd_account_add(
         return 2
     import re  # local import: avoid module-level coupling for one-shot CLI
 
+    resolved_mirror_path = mirror_path or default_mirror_path(name)
     new_account = AccountConfig(
         name=name,
         url=url,
         username=username,
         credential=credential,
-        mirror_path=mirror_path,
+        mirror_path=resolved_mirror_path,
         trash_retention_days=trash_retention_days,
         include=(re.compile(".*"),),
         exclude=(),
