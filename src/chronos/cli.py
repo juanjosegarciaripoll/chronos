@@ -522,6 +522,13 @@ def cmd_sync(ctx: CliContext) -> int:
             ctx.stderr.write(f"[{account.name}] {exc}\n")
             fails += 1
             continue
+        except CalDAVError as exc:
+            # The default factory may raise CalDAVError when constructing
+            # the session — e.g. Google email discovery failing — so the
+            # per-account loop must keep going instead of crashing.
+            ctx.stderr.write(f"[{account.name}] CalDAV error: {exc}\n")
+            fails += 1
+            continue
         try:
             result = sync_account(
                 account=account,
@@ -762,6 +769,9 @@ def build_sync_runner(ctx: CliContext) -> Callable[[], Sequence[SyncResult]]:
                 session = factory(account, auth)
             except NotImplementedError as exc:
                 results.append(_failure_result(account.name, str(exc)))
+                continue
+            except CalDAVError as exc:
+                results.append(_failure_result(account.name, f"CalDAV: {exc}"))
                 continue
             try:
                 result = sync_account(

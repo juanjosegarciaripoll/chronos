@@ -167,6 +167,24 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("CalDAV error", self.stderr.getvalue())
         self.assertIn("simulated network failure", self.stderr.getvalue())
 
+    def test_sync_catches_caldav_error_from_session_factory(self) -> None:
+        """A CalDAVError raised by the session factory itself (e.g. Google
+        email-discovery failing in the default factory) must be reported
+        per-account, not crash the whole sync."""
+        from chronos.authorization import Authorization
+        from chronos.caldav_client import CalDAVError
+
+        def broken_factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> FakeCalDAVSession:
+            raise CalDAVError("session construction blew up")
+
+        ctx = self._ctx(session_factory=broken_factory)
+        code = self._run(["sync"], context=ctx)
+        self.assertEqual(code, 1)
+        self.assertIn("CalDAV error", self.stderr.getvalue())
+        self.assertIn("session construction blew up", self.stderr.getvalue())
+
 
 class BuildSyncRunnerTest(CliTestCase):
     """`build_sync_runner` is the closure handed to the TUI's `_run_sync`.
@@ -246,6 +264,24 @@ class BuildSyncRunnerTest(CliTestCase):
         results = runner()
         self.assertEqual(len(results), 1)
         self.assertIn("session factory not configured", results[0].errors[0])
+
+    def test_session_factory_caldav_error_lands_in_errors(self) -> None:
+        """The default session factory may raise CalDAVError when
+        constructing the session (e.g. Google email-discovery failing).
+        That must land in the per-account errors tuple, not crash."""
+        from chronos.authorization import Authorization
+        from chronos.caldav_client import CalDAVError
+
+        def broken_factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> FakeCalDAVSession:
+            raise CalDAVError("session construction blew up")
+
+        ctx = self._ctx(session_factory=broken_factory)
+        runner = cli.build_sync_runner(ctx)
+        results = runner()
+        self.assertEqual(len(results), 1)
+        self.assertIn("session construction blew up", results[0].errors[0])
 
     def test_oauth_on_commit_called_on_success(self) -> None:
         self._seed_server()
