@@ -153,32 +153,39 @@ class TimelineGrid(DataTable[str]):
         slot_minutes_in_day: int,
         days: Sequence[tuple[date, Sequence[OccurrenceRow]]],
     ) -> None:
-        # Subsequent rows index after the all-day banner if it was
-        # added — `row_count` is the current total.
+        # Both 30-min slots of the same hour share the same stripe so the
+        # grid reads as hourly bands.  Rich Text styles only colour actual
+        # characters, not trailing whitespace, so every styled cell is
+        # padded to the declared column width.
         row_index = self.row_count
         shaded = (slot_minutes_in_day // 60) % 2 == 1
         time_text = _format_slot_time(slot_minutes_in_day)
         cells: list[Any] = [
-            Text(time_text, style=_SHADED_ROW_STYLE) if shaded else time_text
+            Text(time_text.ljust(_TIME_COL_WIDTH), style=_SHADED_ROW_STYLE)
+            if shaded
+            else time_text
         ]
         for col_idx, (day_date, events) in enumerate(days, start=1):
             content, ref, is_start = _cell_for_slot(
                 day_date, slot_minutes_in_day, events
             )
             if ref is not None:
-                # Event is active in this slot.  Show the title only in
-                # the slot where the event starts; render a blank bar in
-                # continuation slots so the block reads as one unit.
+                # Event active: fill the full column width so the bar has no
+                # gap.  Start slot shows the title; continuation slot is blank.
                 style = self._event_start_style if is_start else self._event_body_style
-                # Continuation cells use a single space so Textual
-                # paints the background — an empty string causes the
-                # DataTable to skip cell rendering entirely.
-                cells.append(Text(content if is_start else " ", style=style))
+                text = (
+                    content.ljust(_DAY_COL_WIDTH) if is_start else " " * _DAY_COL_WIDTH
+                )
+                cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
             elif shaded:
-                cells.append(Text(content, style=_SHADED_ROW_STYLE))
+                # No event, but this hour is shaded: fill with spaces so the
+                # background covers the whole cell (Rich only paints characters).
+                cells.append(Text(" " * _DAY_COL_WIDTH, style=_SHADED_ROW_STYLE))
             else:
-                cells.append(content)
+                # No event, unshaded hour: leave the cell completely empty so
+                # the DataTable's own background shows through unobstructed.
+                cells.append("")
         self.add_row(*cells)
 
 
