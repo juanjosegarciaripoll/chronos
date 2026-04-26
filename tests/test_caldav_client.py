@@ -861,3 +861,114 @@ class GetSyncTokenHttpTest(CalDAVHttpSessionTestCase):
         )
         session = self._session_with_client(client)
         self.assertIsNone(session.get_sync_token(self._BASE))
+
+
+class ParseCalendarsPropfindTest(unittest.TestCase):
+    """Unit tests for `_parse_calendars_propfind` (pure function)."""
+
+    _BASE = "https://cal.example.com/dav/"
+
+    def _parse(self, body: bytes) -> tuple:
+        from chronos.caldav_client import _parse_calendars_propfind
+
+        return _parse_calendars_propfind(body, base_url=self._BASE)
+
+    def _calendar_response(
+        self,
+        *,
+        href: str,
+        name: str = "Work",
+        ctag: str | None = "ctag-42",
+        sync_token: str | None = "tok-7",
+        include_vevent: bool = True,
+        include_vtodo: bool = False,
+    ) -> str:
+        comp_set = ""
+        if include_vevent:
+            comp_set += '<c:comp name="VEVENT"/>'
+        if include_vtodo:
+            comp_set += '<c:comp name="VTODO"/>'
+        ctag_xml = f"<cs:getctag>{ctag}</cs:getctag>" if ctag else ""
+        st_xml = f"<d:sync-token>{sync_token}</d:sync-token>" if sync_token else ""
+        return (
+            "<d:response>"
+            f"<d:href>{href}</d:href>"
+            "<d:propstat><d:prop>"
+            f"<d:displayname>{name}</d:displayname>"
+            "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>"
+            "<c:supported-calendar-component-set>"
+            f"{comp_set}"
+            "</c:supported-calendar-component-set>"
+            f"{ctag_xml}{st_xml}"
+            "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+            "</d:response>"
+        )
+
+    def _wrap(self, *responses: str) -> bytes:
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<d:multistatus xmlns:d="DAV:" '
+            'xmlns:c="urn:ietf:params:xml:ns:caldav" '
+            'xmlns:cs="http://calendarserver.org/ns/">'
+            + "".join(responses)
+            + "</d:multistatus>"
+        ).encode()
+
+    def test_parses_calendar_with_ctag_and_sync_token(self) -> None:
+        from chronos.domain import ComponentKind
+
+        body = self._wrap(
+            self._calendar_response(
+                href="/dav/work/",
+                name="Work",
+                ctag="ctag-99",
+                sync_token="tok-12",
+                include_vevent=True,
+                include_vtodo=True,
+            )
+        )
+        result = self._parse(body)
+        self.assertEqual(len(result), 1)
+        cal = result[0]
+        self.assertEqual(cal.name, "Work")
+        self.assertTrue(cal.url.endswith("/dav/work/"))
+        self.assertEqual(cal.ctag, "ctag-99")
+        self.assertEqual(cal.sync_token, "tok-12")
+        self.assertIn(ComponentKind.VEVENT, cal.supported_components)
+        self.assertIn(ComponentKind.VTODO, cal.supported_components)
+
+    def test_filters_out_non_calendar_collections(self) -> None:
+        non_cal = (
+            "<d:response><d:href>/dav/contacts/</d:href>"
+            "<d:propstat><d:prop>"
+            "<d:displayname>Contacts</d:displayname>"
+            "<d:resourcetype><d:collection/></d:resourcetype>"
+            "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+            "</d:response>"
+        )
+        body = self._wrap(non_cal)
+        self.assertEqual(self._parse(body), ())
+
+    def test_multiple_calendars_returned(self) -> None:
+        body = self._wrap(
+            self._calendar_response(href="/dav/work/", name="Work", ctag="ct-1"),
+            self._calendar_response(href="/dav/home/", name="Home", ctag="ct-2"),
+        )
+        result = self._parse(body)
+        self.assertEqual(len(result), 2)
+        self.assertEqual({c.name for c in result}, {"Work", "Home"})
+
+    def test_missing_ctag_yields_none(self) -> None:
+        body = self._wrap(
+            self._calendar_response(href="/dav/work/", ctag=None, sync_token=None)
+        )
+        result = self._parse(body)
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0].ctag)
+        self.assertIsNone(result[0].sync_token)
+
+    def test_empty_body_returns_empty(self) -> None:
+        self.assertEqual(self._parse(b""), ())
+
+    def test_unparseable_body_returns_empty(self) -> None:
+        self.assertEqual(self._parse(b"not xml <<>>"), ())

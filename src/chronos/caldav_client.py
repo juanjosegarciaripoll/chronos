@@ -78,6 +78,26 @@ _CALENDAR_QUERY_BODY = (
 
 _MULTIGET_BATCH_SIZE = 100
 
+# Depth-1 PROPFIND against the calendar home-set that fetches everything
+# needed to populate RemoteCalendar in a single round-trip: display name,
+# resource type (to identify calendar collections), supported component set,
+# CTag, and sync-token.  Replaces N per-calendar get_ctag() calls with one
+# request at the start of every sync.
+_CALENDARS_PROPFIND_BODY = (
+    '<?xml version="1.0" encoding="utf-8" ?>'
+    '<d:propfind xmlns:d="DAV:" '
+    'xmlns:c="urn:ietf:params:xml:ns:caldav" '
+    'xmlns:cs="http://calendarserver.org/ns/">'
+    "<d:prop>"
+    "<d:displayname/>"
+    "<d:resourcetype/>"
+    "<c:supported-calendar-component-set/>"
+    "<cs:getctag/>"
+    "<d:sync-token/>"
+    "</d:prop>"
+    "</d:propfind>"
+)
+
 _SYNC_TOKEN_PROPFIND_BODY = (
     '<?xml version="1.0" encoding="utf-8" ?>'
     '<d:propfind xmlns:d="DAV:">'
@@ -128,6 +148,27 @@ class CalDAVHttpSession:
     def list_calendars(self, principal_url: str) -> Sequence[RemoteCalendar]:
         del principal_url  # caldav caches the principal across calls
         principal = self._get_principal()
+
+        # Attempt a single depth-1 PROPFIND against the calendar home-set
+        # that returns CTag and sync-token alongside the usual display name /
+        # component-set.  This eliminates N per-calendar get_ctag() calls from
+        # the sync loop.  Falls back to principal.calendars() if the home-set
+        # URL is unavailable or the request fails.
+        home_url = _calendar_home_url(principal)
+        if home_url is not None:
+            try:
+                response = self._client.propfind(
+                    home_url, props=_CALENDARS_PROPFIND_BODY, depth=1
+                )
+                result = _parse_calendars_propfind(
+                    _response_body(response) or b"", base_url=home_url
+                )
+                if result:
+                    logger.info("listed %d calendars (with state)", len(result))
+                    return result
+            except DAVError:
+                pass  # fall through to the caldav-library path below
+
         try:
             calendars: list[Any] = list(principal.calendars())
         except DAVError as exc:
@@ -541,6 +582,101 @@ def _parse_multiget(body: bytes, *, base_url: str) -> list[tuple[str, str, bytes
             etag = _content_etag(ics)
         out.append((href, etag, ics))
     return out
+
+
+def _calendar_home_url(principal: Any) -> str | None:
+    """Return the first calendar home-set URL from a caldav principal object.
+
+    Reads from the already-fetched principal properties (no extra network
+    request).  Returns None when the attribute is absent or the URL cannot
+    be determined so the caller can fall back to `principal.calendars()`.
+    Only URLs that begin with "http://" or "https://" are accepted so that
+    mock objects and malformed values are safely rejected.
+    """
+    try:
+        home_sets = cast(list[Any], principal.calendar_home_set)
+        if not home_sets:
+            return None
+        url = str(cast(object, home_sets[0].url))
+        return url if url.startswith(("http://", "https://")) else None
+    except (AttributeError, IndexError, DAVError, TypeError, ValueError):
+        return None
+
+
+def _parse_calendars_propfind(
+    body: bytes,
+    *,
+    base_url: str,
+) -> tuple[RemoteCalendar, ...]:
+    """Parse a depth-1 PROPFIND response into RemoteCalendar objects.
+
+    Only responses whose resourcetype contains the CalDAV `calendar` element
+    are included; plain WebDAV collections (address-books, etc.) are skipped.
+    Populates `ctag` and `sync_token` when the server returns them.
+    """
+    if not body:
+        return ()
+    try:
+        tree = ET.fromstring(body)
+    except ET.ParseError:
+        return ()
+    ns = {"d": _DAV_NS, "c": _CALDAV_NS, "cs": _CS_NS}
+    out: list[RemoteCalendar] = []
+    for response in tree.findall("d:response", ns):
+        href_elem = response.find("d:href", ns)
+        if href_elem is None or href_elem.text is None:
+            continue
+        href = _absolute_href(href_elem.text.strip(), base_url=base_url)
+        if not href:
+            continue
+        is_calendar = False
+        name: str | None = None
+        supported: frozenset[ComponentKind] = frozenset()
+        ctag: str | None = None
+        sync_token: str | None = None
+        for propstat in response.findall("d:propstat", ns):
+            status_elem = propstat.find("d:status", ns)
+            if status_elem is None or " 200 " not in (status_elem.text or ""):
+                continue
+            prop = propstat.find("d:prop", ns)
+            if prop is None:
+                continue
+            rt = prop.find("d:resourcetype", ns)
+            if rt is not None and rt.find("c:calendar", ns) is not None:
+                is_calendar = True
+            dn = prop.find("d:displayname", ns)
+            if dn is not None and dn.text:
+                name = dn.text.strip()
+            sccs = prop.find("c:supported-calendar-component-set", ns)
+            if sccs is not None:
+                kinds: set[ComponentKind] = set()
+                for comp in sccs:
+                    if comp.tag == f"{{{_CALDAV_NS}}}comp":
+                        cname = comp.get("name", "").upper()
+                        if cname == "VEVENT":
+                            kinds.add(ComponentKind.VEVENT)
+                        elif cname == "VTODO":
+                            kinds.add(ComponentKind.VTODO)
+                if kinds:
+                    supported = frozenset(kinds)
+            ct = prop.find("cs:getctag", ns)
+            if ct is not None and ct.text:
+                ctag = ct.text.strip() or None
+            st = prop.find("d:sync-token", ns)
+            if st is not None and st.text:
+                sync_token = st.text.strip() or None
+        if not is_calendar:
+            continue
+        out.append(
+            RemoteCalendar(
+                name=name or href.rstrip("/").rsplit("/", 1)[-1] or href,
+                url=href,
+                supported_components=supported if supported else _default_components(),
+                ctag=ctag,
+                sync_token=sync_token,
+            )
+        )
+    return tuple(out)
 
 
 def _build_sync_collection_body(sync_token: str) -> str:

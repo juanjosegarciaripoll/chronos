@@ -114,6 +114,8 @@ class RemoteCalendar:
     name: str
     url: str
     supported_components: frozenset[ComponentKind]
+    ctag: str | None = None
+    sync_token: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

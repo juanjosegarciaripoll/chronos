@@ -92,7 +92,9 @@ This phase is read-only against the server unless auto-create is enabled.
 
 ## 6. CTag-gated path selection
 
-For each in-scope calendar, fetch the current CTag via `PROPFIND` and compare to `calendar_sync_state.ctag`:
+The CTag (and sync-token, when available) for every calendar are obtained in the single depth-1 PROPFIND that `list_calendars` issues against the calendar home-set. No per-calendar CTag PROPFIND is made during path selection unless the home-set PROPFIND fails (fallback path). This collapses N round-trips into the one discovery request.
+
+For each in-scope calendar, compare the CTag returned by `list_calendars` to `calendar_sync_state.ctag`:
 
 - **Fast path** — CTag unchanged. No further server I/O. Emit local-pending changes only (§7 step 5).
 - **Medium path** — CTag changed *and* we have a stored `sync_token` in `calendar_sync_state`. Issue `sync-collection` REPORT (RFC 6578); apply its delta of added/changed/removed hrefs. On `valid-sync-token` error (expired token), clear the token and fall through to the slow path, then re-acquire a fresh token via `PROPFIND DAV:sync-token`. **Status: planned (Milestone 12); currently the engine always takes the slow path when CTag changes.**
@@ -126,10 +128,13 @@ Next sync:
 
 ## 9. Performance properties (load-bearing)
 
-- Fast path is zero-I/O beyond the CTag `PROPFIND`.
+- Calendar state (CTag, sync-token) is collected in the single depth-1 PROPFIND issued by `list_calendars` against the calendar home-set. No per-calendar CTag round-trip is made during path selection.
+- Fast path is zero-I/O beyond the `list_calendars` PROPFIND.
 - Hot-path queries use narrow projections (`list_pending_pushes`, `list_calendar_etag_map`, `list_uid_to_href`), never `SELECT *`.
 - Account-wide UID maps (for cross-calendar move detection) are built lazily, gated by whether any step-1 candidate deletion was found.
 - Server-side component counts come from CTag + sync-token comparisons, never from enumerating resources.
+- After a slow-path sync, the sync-token from `list_calendars` is stored directly (avoiding a `get_sync_token` round-trip per calendar) when the server included it in the discovery PROPFIND.
+- `populate_occurrences` receives the set of UIDs that actually changed so it only re-expands those masters, not the entire calendar.
 
 ## 10. Conflict taxonomy
 

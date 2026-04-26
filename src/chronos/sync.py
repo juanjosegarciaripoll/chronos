@@ -136,6 +136,8 @@ def sync_account(
                 index=index,
                 now=clock,
                 cancel_event=cancel_event,
+                server_ctag=remote.ctag,
+                server_sync_token=remote.sync_token,
             )
         except SyncHaltError as exc:
             # The guard's message already includes the calendar name,
@@ -190,6 +192,8 @@ def _sync_calendar(
     index: IndexRepository,
     now: datetime,
     cancel_event: threading.Event | None = None,
+    server_ctag: str | None = None,
+    server_sync_token: str | None = None,
 ) -> CalendarSyncStats:
     """Reconcile one calendar.
 
@@ -213,7 +217,10 @@ def _sync_calendar(
     """
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     prior_state = index.get_sync_state(calendar_ref)
-    server_ctag = session.get_ctag(calendar.url)
+    # Use the CTag pre-fetched during list_calendars (saves one PROPFIND per
+    # calendar). Falls back to a direct get_ctag call when not supplied.
+    if server_ctag is None:
+        server_ctag = session.get_ctag(calendar.url)
     prior_ctag_repr = prior_state.ctag if prior_state else None
 
     # Carry the existing sync_token forward by default; updated below
@@ -275,7 +282,7 @@ def _sync_calendar(
                 now=now,
                 cancel_event=cancel_event,
             )
-            new_sync_token = _acquire_sync_token(session, calendar.url)
+            new_sync_token = _best_sync_token(server_sync_token, session, calendar.url)
 
     else:
         logger.info(
@@ -294,7 +301,7 @@ def _sync_calendar(
             now=now,
             cancel_event=cancel_event,
         )
-        new_sync_token = _acquire_sync_token(session, calendar.url)
+        new_sync_token = _best_sync_token(server_sync_token, session, calendar.url)
 
     # Default: keep the CTag we read at the top of this run.
     # Re-reading after an unchanged slow path is *worse* on servers
@@ -663,6 +670,23 @@ def _acquire_sync_token(session: CalDAVSession, calendar_url: str) -> str | None
         return session.get_sync_token(calendar_url)
     except CalDAVError:
         return None
+
+
+def _best_sync_token(
+    prefetched: str | None,
+    session: CalDAVSession,
+    calendar_url: str,
+) -> str | None:
+    """Return a sync-token for storing after a slow-path sync.
+
+    Prefers the token already fetched during `list_calendars` so we
+    avoid a redundant `get_sync_token` round-trip.  Falls back to
+    `_acquire_sync_token` when `prefetched` is None (the server did not
+    return a token in the discovery PROPFIND).
+    """
+    if prefetched is not None:
+        return prefetched
+    return _acquire_sync_token(session, calendar_url)
 
 
 def _guard_mass_deletion(

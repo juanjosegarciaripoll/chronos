@@ -150,7 +150,10 @@ class FastPathTest(SyncTestCase):
         self.session.calls.clear()
         self._run()
         method_names = [call[0] for call in self.session.calls]
-        self.assertIn("get_ctag", method_names)
+        # The CTag is now returned by list_calendars, so no separate
+        # get_ctag round-trip is needed for the per-calendar check.
+        self.assertIn("list_calendars", method_names)
+        self.assertNotIn("get_ctag", method_names)
         self.assertNotIn("calendar_query", method_names)
         self.assertNotIn("calendar_multiget", method_names)
 
@@ -187,31 +190,24 @@ class FastPathTest(SyncTestCase):
         self.assertNotIn("sync_collection", [c[0] for c in self.session.calls])
         self.assertEqual(result.components_added, 1)
 
-    def test_no_op_slow_path_stores_top_of_function_ctag(self) -> None:
-        # Regression: against servers whose `getctag` drifts on every
-        # PROPFIND (notably Google), re-reading the CTag at the end
-        # of an unchanged slow path stores a value that the next
-        # sync's top-of-function read won't match — pinning every
-        # subsequent sync to the slow path. The fix stores the CTag
-        # we read at the top, and only re-reads when our own pushes
-        # could have advanced the server.
+    def test_slow_path_stores_list_calendars_ctag_not_a_re_read(self) -> None:
+        # Regression guard: the stored CTag must be the value returned by
+        # list_calendars, never a re-read issued at the end of the sync.
+        # On servers like Google whose getctag drifts between requests, a
+        # re-read at the tail would store a value that the next sync's
+        # list_calendars response won't match, pinning every subsequent sync
+        # to the slow path.
         self.session.put_resource(
             calendar_url=CALENDAR_URL,
             href=f"{CALENDAR_URL}a.ics",
             ics=_ics_with_uid("noop@example.com"),
             etag="etag-a",
         )
-        # First sync: slow path runs, stores the current CTag.
         self._run()
         first_state = self.index.get_sync_state(self.calendar_ref)
         assert first_state is not None
-        first_ctag = first_state.ctag
 
-        # Force the slow path on the next sync by clearing local
-        # state, but keep the server unchanged. Then bump the
-        # server's CTag *after* the slow path's top-of-function
-        # read so the FakeCalDAVSession returns a different value
-        # if the engine re-reads at the end.
+        # Force a second slow path: stale ctag + no stored sync_token.
         self.index.set_sync_state(
             SyncState(
                 calendar=self.calendar_ref,
@@ -220,29 +216,18 @@ class FastPathTest(SyncTestCase):
                 synced_at=datetime(2026, 4, 22, tzinfo=UTC),
             )
         )
-
-        original_get_ctag = self.session.get_ctag
-        call_count = {"n": 0}
-
-        def drifting_get_ctag(calendar_url: str) -> str | None:
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return original_get_ctag(calendar_url)
-            # Pretend the server now reports a different opaque token.
-            return f"drifted-{call_count['n']}"
-
-        self.session.get_ctag = drifting_get_ctag  # type: ignore[method-assign]
+        # Record the CTag that list_calendars will return on the second run.
+        expected_ctag = self.session.current_ctag(CALENDAR_URL)
+        self.session.calls.clear()
         self._run()
+
         second_state = self.index.get_sync_state(self.calendar_ref)
         assert second_state is not None
-        # Stored CTag is the value we read at the top of the slow
-        # path, not the drifted re-read — so the next sync's
-        # top-of-function read still matches and the fast path can
-        # kick in (assuming the server stops drifting).
-        self.assertEqual(second_state.ctag, first_ctag)
-        # And only one `get_ctag` call was made — no re-read at the
-        # end since the slow path didn't push anything.
-        self.assertEqual(call_count["n"], 1)
+        # Stored CTag comes from list_calendars, not from a re-read.
+        self.assertEqual(second_state.ctag, expected_ctag)
+        # Crucially: no separate get_ctag round-trip was made — the CTag
+        # arrived piggyback on list_calendars.
+        self.assertNotIn("get_ctag", [c[0] for c in self.session.calls])
 
 
 class ServerDeletionTest(SyncTestCase):

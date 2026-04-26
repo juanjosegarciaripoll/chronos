@@ -127,7 +127,18 @@ class FakeCalDAVSession:
 
     def list_calendars(self, principal_url: str) -> Sequence[RemoteCalendar]:
         self.calls.append(("list_calendars", principal_url))
-        return tuple(self._calendars.values())
+        return tuple(
+            RemoteCalendar(
+                name=cal.name,
+                url=url,
+                supported_components=cal.supported_components,
+                ctag=self._ctags.get(url),
+                sync_token=(
+                    self.current_sync_token(url) if url in self._tok_counters else None
+                ),
+            )
+            for url, cal in self._calendars.items()
+        )
 
     def get_ctag(self, calendar_url: str) -> str | None:
         self.calls.append(("get_ctag", calendar_url))
