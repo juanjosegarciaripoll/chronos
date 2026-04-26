@@ -159,7 +159,10 @@ class TimelineGrid(DataTable[str]):
         # padded to the declared column width.
         row_index = self.row_count
         shaded = (slot_minutes_in_day // 60) % 2 == 1
-        time_text = _format_slot_time(slot_minutes_in_day)
+        # Only label the top of each hour; the :30 row is left blank so
+        # the time column stays readable without clutter.
+        is_hour = slot_minutes_in_day % 60 == 0
+        time_text = _format_slot_time(slot_minutes_in_day) if is_hour else ""
         cells: list[Any] = [
             Text(time_text.ljust(_TIME_COL_WIDTH), style=_SHADED_ROW_STYLE)
             if shaded
