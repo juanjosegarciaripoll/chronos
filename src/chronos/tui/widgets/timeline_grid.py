@@ -184,9 +184,7 @@ class TimelineGrid(DataTable[str]):
                 cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
             elif shaded:
-                cells.append(
-                    Text(" " * self._day_col_width, style=_SHADED_ROW_STYLE)
-                )
+                cells.append(Text(" " * self._day_col_width, style=_SHADED_ROW_STYLE))
             else:
                 cells.append("")
         self.add_row(*cells)

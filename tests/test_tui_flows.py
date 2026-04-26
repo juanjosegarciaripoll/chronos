@@ -1104,18 +1104,28 @@ class DateNavigationTest(TuiFlowTestCase):
 
 
 class StartupFocusTest(TuiFlowTestCase):
-    async def test_event_list_has_focus_on_mount(self) -> None:
+    async def test_primary_view_widget_has_focus_on_mount(self) -> None:
         # Regression: previously the calendar tree on the left grabbed
         # focus by default, so the user had to tab out of it before
         # arrow keys did anything useful.
+        # The persisted view determines which widget gets initial focus:
+        # EventList for AGENDA, TimelineGrid for Day / Grid.
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
+            await pilot.pause()  # call_after_refresh needs a second tick
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
+            from chronos.tui.widgets.timeline_grid import TimelineGrid
+
             event_list = screen.query_one(EventList)
-            self.assertTrue(event_list.has_focus)
+            timeline = screen.query_one(TimelineGrid)
+            # Exactly one of the two primary widgets must hold focus.
+            self.assertTrue(
+                event_list.has_focus or timeline.has_focus,
+                "neither EventList nor TimelineGrid has focus on startup",
+            )
 
 
 class DetailPaneTracksCursorTest(TuiFlowTestCase):
@@ -2143,6 +2153,7 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             assert isinstance(screen, MainScreen)
             await pilot.press("ctrl+d")
             await pilot.pause()
+            await pilot.pause()  # call_after_refresh for focus needs a tick
             screen._viewed_date = date(2026, 5, 1)  # has the simple_event seed
             screen.refresh_view()
             await pilot.pause()

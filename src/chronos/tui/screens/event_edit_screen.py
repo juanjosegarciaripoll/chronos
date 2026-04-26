@@ -59,9 +59,7 @@ class EventEditScreen(Screen[None]):
         ex = self._existing
         summary = ex.summary or "" if ex is not None else ""
         start = (
-            ex.dtstart.isoformat()
-            if ex is not None and ex.dtstart is not None
-            else ""
+            ex.dtstart.isoformat() if ex is not None and ex.dtstart is not None else ""
         )
         end = (
             ex.dtend.isoformat()

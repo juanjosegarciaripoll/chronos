@@ -20,6 +20,7 @@ from chronos.domain import (
     VEvent,
 )
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
+from chronos.paths import default_tui_state_path
 from chronos.recurrence import expand
 from chronos.tui.bindings import main_bindings
 from chronos.tui.screens.agenda_screen import (
@@ -119,11 +120,17 @@ class MainScreen(Screen[None]):
         # horizontal real estate that the timeline views need. Pressing
         # `c` reveals it.
         panel.display = False
+        # Render in AGENDA first so EventList is visible when focus is set.
+        # Calling focus() on a hidden widget is a silent no-op in Textual,
+        # which would leave the timeline unfocused in Day / Grid views.
         self.refresh_view()
-        # Land focus on the event list, not the calendar tree, so the
-        # user can navigate / open / edit events without first having
-        # to tab out of the left-hand panel.
         self.query_one(EventList).focus()
+        # Now switch to the persisted view (if different from AGENDA).
+        # Hiding the now-focused EventList causes Textual to auto-redirect
+        # focus to the next focusable widget — the timeline.
+        saved = _load_last_view()
+        if saved != ViewKind.AGENDA:
+            self._set_view(saved)
 
     def action_toggle_calendars(self) -> None:
         panel = self.query_one(CalendarPanel)
@@ -139,17 +146,31 @@ class MainScreen(Screen[None]):
 
     # View switches ----------------------------------------------------------
 
-    def action_view_agenda(self) -> None:
-        self._view = ViewKind.AGENDA
+    def _set_view(self, kind: ViewKind) -> None:
+        self._view = kind
+        _save_last_view(kind)
         self.refresh_view()
+        # Give focus to the primary interactive widget of the new view so
+        # keyboard navigation works immediately without a manual Tab.
+        # call_after_refresh defers the focus until after the DataTable has
+        # finished re-rendering its rows (focusing mid-render can be stolen).
+        if kind == ViewKind.AGENDA:
+            self.call_after_refresh(  # pyright: ignore[reportUnknownMemberType]
+                self.query_one(EventList).focus
+            )
+        else:
+            self.call_after_refresh(  # pyright: ignore[reportUnknownMemberType]
+                self.query_one(TimelineGrid).focus
+            )
+
+    def action_view_agenda(self) -> None:
+        self._set_view(ViewKind.AGENDA)
 
     def action_view_day(self) -> None:
-        self._view = ViewKind.DAY
-        self.refresh_view()
+        self._set_view(ViewKind.DAY)
 
     def action_view_grid(self) -> None:
-        self._view = ViewKind.GRID
-        self.refresh_view()
+        self._set_view(ViewKind.GRID)
 
     # Agenda window tuners ----------------------------------------------------
 
@@ -576,6 +597,21 @@ class MainScreen(Screen[None]):
             if self._selection.contains(ref):
                 return ref
         return calendars[0]
+
+
+def _save_last_view(view: ViewKind) -> None:
+    import contextlib
+
+    with contextlib.suppress(OSError):
+        default_tui_state_path().write_text(view.value, encoding="utf-8")
+
+
+def _load_last_view() -> ViewKind:
+    try:
+        text = default_tui_state_path().read_text(encoding="utf-8").strip()
+        return ViewKind(text)
+    except (OSError, ValueError):
+        return ViewKind.AGENDA
 
 
 __all__ = ["MainScreen"]

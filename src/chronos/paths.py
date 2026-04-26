@@ -88,6 +88,11 @@ def default_index_path() -> Path:
     return user_data_dir() / "index.sqlite3"
 
 
+def default_tui_state_path() -> Path:
+    """Tiny file that persists TUI state (last view, etc.) across sessions."""
+    return user_data_dir() / "tui_state"
+
+
 def oauth_token_dir() -> Path:
     """Directory holding OAuth access/refresh tokens per account.
 
