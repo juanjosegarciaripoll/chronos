@@ -31,14 +31,16 @@ _TIME_COL_WIDTH = 6
 _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
 _SHADED_ROW_STYLE = "on color(236)"
-# Event blocks: one colored bar across the full event span.
-# The start cell shows the title; continuation cells show the same
-# background with no text so the bar reads as a single visual block.
-# At runtime these are replaced with the app theme's $accent-darken-3
-# (see TimelineGrid.on_mount); these constants are the fallback used in
-# tests and when the theme does not export a usable accent color.
-_EVENT_START_STYLE = "bold white on color(18)"
+# Event blocks: two alternating accent shades so adjacent back-to-back
+# events are always visually distinct.  The start cell shows the title
+# in plain white (no bold); continuation cells show the same background
+# with no text.  At runtime these are overwritten from the running theme
+# ($accent-darken-3 / $accent-darken-1); the constants below are the
+# fallback used in tests and when the theme has no usable accent color.
+_EVENT_START_STYLE = "white on color(18)"
 _EVENT_BODY_STYLE = "on color(18)"
+_EVENT_ALT_START_STYLE = "white on color(25)"
+_EVENT_ALT_BODY_STYLE = "on color(25)"
 
 
 class TimelineGrid(DataTable[str]):
@@ -56,29 +58,35 @@ class TimelineGrid(DataTable[str]):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # (row_index, col_index) → ComponentRef for the event
-        # rendered in that cell. Lookup driven by cursor coordinates
-        # in `on_data_table_cell_selected`.
+        # (row_index, col_index) → ComponentRef for the event in that cell.
         self._cells: dict[tuple[int, int], ComponentRef] = {}
-        # Event bar styles — overwritten on_mount with the running
-        # theme's $accent-darken-3 color when available.
+        # Per-column alternation flag: flipped each time a new event starts
+        # in that column so adjacent back-to-back events get different shades.
+        self._col_alt: dict[int, bool] = {}
+        # Primary and alternate event bar styles (start-row and body-row
+        # variants).  Overwritten on_mount with theme-derived colors.
         self._event_start_style = _EVENT_START_STYLE
         self._event_body_style = _EVENT_BODY_STYLE
+        self._event_alt_start_style = _EVENT_ALT_START_STYLE
+        self._event_alt_body_style = _EVENT_ALT_BODY_STYLE
 
     def on_mount(self) -> None:
         self.cursor_type = "cell"
         self.zebra_stripes = False
-        # Resolve the event bar color from the running Textual theme so
-        # the bar feels native rather than hardcoded. Textual exposes CSS
-        # variable values (without the leading $) via get_css_variables().
-        # $accent-darken-3 is a suitably dark variant of the accent hue;
-        # fall back to $accent itself if only the base is available.
+        # Resolve event bar colors from the running Textual theme.
+        # Primary shade: $accent-darken-3 (darker).
+        # Alternate shade: $accent-darken-1 (lighter) so consecutive events
+        # are always visually distinct.
         try:
             css = self.app.get_css_variables()  # pyright: ignore[reportUnknownMemberType]
-            accent = css.get("accent-darken-3") or css.get("accent", "")
-            if accent:
-                self._event_start_style = f"bold white on {accent}"
-                self._event_body_style = f"on {accent}"
+            dark = css.get("accent-darken-3") or css.get("accent", "")
+            mid = css.get("accent-darken-1") or dark
+            if dark:
+                self._event_start_style = f"white on {dark}"
+                self._event_body_style = f"on {dark}"
+            if mid:
+                self._event_alt_start_style = f"white on {mid}"
+                self._event_alt_body_style = f"on {mid}"
         except Exception:  # noqa: BLE001 — theme lookup is best-effort
             pass
 
@@ -96,6 +104,7 @@ class TimelineGrid(DataTable[str]):
         """
         self.clear(columns=True)
         self._cells.clear()
+        self._col_alt.clear()
         if not days:
             self.add_column("(no days)")
             return
@@ -173,9 +182,21 @@ class TimelineGrid(DataTable[str]):
                 day_date, slot_minutes_in_day, events
             )
             if ref is not None:
-                # Event active: fill the full column width so the bar has no
-                # gap.  Start slot shows the title; continuation slot is blank.
-                style = self._event_start_style if is_start else self._event_body_style
+                # Flip the alternation flag each time a new event starts so
+                # back-to-back events always render in different shades.
+                if is_start:
+                    self._col_alt[col_idx] = not self._col_alt.get(col_idx, False)
+                alt = self._col_alt.get(col_idx, False)
+                if alt:
+                    style = (
+                        self._event_alt_start_style
+                        if is_start
+                        else self._event_alt_body_style
+                    )
+                else:
+                    style = (
+                        self._event_start_style if is_start else self._event_body_style
+                    )
                 text = (
                     content.ljust(_DAY_COL_WIDTH) if is_start else " " * _DAY_COL_WIDTH
                 )
