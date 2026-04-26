@@ -31,16 +31,14 @@ _TIME_COL_WIDTH = 6
 _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
 _SHADED_ROW_STYLE = "on color(236)"
-# Event blocks: two alternating accent shades so adjacent back-to-back
-# events are always visually distinct.  The start cell shows the title
-# in plain white (no bold); continuation cells show the same background
-# with no text.  At runtime these are overwritten from the running theme
-# ($accent-darken-3 / $accent-darken-1); the constants below are the
-# fallback used in tests and when the theme has no usable accent color.
-_EVENT_START_STYLE = "white on color(18)"
-_EVENT_BODY_STYLE = "on color(18)"
-_EVENT_ALT_START_STYLE = "white on color(25)"
-_EVENT_ALT_BODY_STYLE = "on color(25)"
+# Hardcoded event-bar colors: two distinct dark hues so adjacent events
+# are always visually separable and white text has sufficient contrast.
+#   color(25) = rgb(0, 95, 175)  — dark blue,  contrast ~7.8:1 on white
+#   color(28) = rgb(0, 135, 0)   — dark green, contrast ~5.3:1 on white
+_EVENT_START_STYLE = "white on color(25)"
+_EVENT_BODY_STYLE = "on color(25)"
+_EVENT_ALT_START_STYLE = "white on color(28)"
+_EVENT_ALT_BODY_STYLE = "on color(28)"
 
 
 class TimelineGrid(DataTable[str]):
@@ -63,32 +61,13 @@ class TimelineGrid(DataTable[str]):
         # Per-column alternation flag: flipped each time a new event starts
         # in that column so adjacent back-to-back events get different shades.
         self._col_alt: dict[int, bool] = {}
-        # Primary and alternate event bar styles (start-row and body-row
-        # variants).  Overwritten on_mount with theme-derived colors.
-        self._event_start_style = _EVENT_START_STYLE
-        self._event_body_style = _EVENT_BODY_STYLE
-        self._event_alt_start_style = _EVENT_ALT_START_STYLE
-        self._event_alt_body_style = _EVENT_ALT_BODY_STYLE
+        # Day column width — recomputed in show_days() from the widget's
+        # actual pixel width so empty space to the right is minimised.
+        self._day_col_width: int = _DAY_COL_WIDTH
 
     def on_mount(self) -> None:
         self.cursor_type = "cell"
         self.zebra_stripes = False
-        # Resolve event bar colors from the running Textual theme.
-        # Primary shade: $accent-darken-3 (darker).
-        # Alternate shade: $accent-darken-1 (lighter) so consecutive events
-        # are always visually distinct.
-        try:
-            css = self.app.get_css_variables()  # pyright: ignore[reportUnknownMemberType]
-            dark = css.get("accent-darken-3") or css.get("accent", "")
-            mid = css.get("accent-darken-1") or dark
-            if dark:
-                self._event_start_style = f"white on {dark}"
-                self._event_body_style = f"on {dark}"
-            if mid:
-                self._event_alt_start_style = f"white on {mid}"
-                self._event_alt_body_style = f"on {mid}"
-        except Exception:  # noqa: BLE001 — theme lookup is best-effort
-            pass
 
     def show_days(
         self,
@@ -109,9 +88,16 @@ class TimelineGrid(DataTable[str]):
             self.add_column("(no days)")
             return
 
+        # Distribute available width across day columns so the grid fills
+        # the widget horizontally.  self.size.width is 0 before the first
+        # layout pass, so _DAY_COL_WIDTH acts as a safe minimum.
+        num_days = len(days)
+        available = self.size.width - _TIME_COL_WIDTH
+        self._day_col_width = max(_DAY_COL_WIDTH, available // num_days)
+
         self.add_column("Time", width=_TIME_COL_WIDTH)
         for day_date, _ in days:
-            self.add_column(_day_header(day_date, today), width=_DAY_COL_WIDTH)
+            self.add_column(_day_header(day_date, today), width=self._day_col_width)
 
         # Banner row: full-day events (VTodos / midnight-to-midnight)
         # for each day. Skipped silently when no day has any.
@@ -189,26 +175,19 @@ class TimelineGrid(DataTable[str]):
                 alt = self._col_alt.get(col_idx, False)
                 if alt:
                     style = (
-                        self._event_alt_start_style
-                        if is_start
-                        else self._event_alt_body_style
+                        _EVENT_ALT_START_STYLE if is_start else _EVENT_ALT_BODY_STYLE
                     )
                 else:
-                    style = (
-                        self._event_start_style if is_start else self._event_body_style
-                    )
-                text = (
-                    content.ljust(_DAY_COL_WIDTH) if is_start else " " * _DAY_COL_WIDTH
-                )
+                    style = _EVENT_START_STYLE if is_start else _EVENT_BODY_STYLE
+                w = self._day_col_width
+                text = content.ljust(w) if is_start else " " * w
                 cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
             elif shaded:
-                # No event, but this hour is shaded: fill with spaces so the
-                # background covers the whole cell (Rich only paints characters).
-                cells.append(Text(" " * _DAY_COL_WIDTH, style=_SHADED_ROW_STYLE))
+                cells.append(
+                    Text(" " * self._day_col_width, style=_SHADED_ROW_STYLE)
+                )
             else:
-                # No event, unshaded hour: leave the cell completely empty so
-                # the DataTable's own background shows through unobstructed.
                 cells.append("")
         self.add_row(*cells)
 
