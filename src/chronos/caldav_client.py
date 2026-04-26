@@ -149,38 +149,79 @@ class CalDAVHttpSession:
         del principal_url  # caldav caches the principal across calls
         principal = self._get_principal()
 
-        # Attempt a single depth-1 PROPFIND against the calendar home-set
-        # that returns CTag and sync-token alongside the usual display name /
-        # component-set.  This eliminates N per-calendar get_ctag() calls from
-        # the sync loop.  Falls back to principal.calendars() if the home-set
-        # URL is unavailable or the request fails.
+        # Phase 1: fetch the base calendar list via the caldav library.
+        # This call internally fetches and caches the calendar home-set URL,
+        # so the subsequent `_calendar_home_url` call below is free (the
+        # caldav library's `Principal.calendar_home_set` returns cached data
+        # after `calendars()` has run, with no extra network round-trip).
+        try:
+            caldav_cals: list[Any] = list(principal.calendars())
+        except DAVError as exc:
+            raise CalDAVError(str(exc)) from exc
+
+        cal_by_url: dict[str, Any] = {}
+        for cal in caldav_cals:
+            url = str(cast(object, cal.url))
+            self._calendar_cache[url] = cal
+            cal_by_url[url] = cal
+
+        # Phase 2: one depth-1 PROPFIND for getctag, sync-token, and
+        # supported-calendar-component-set.  The home URL comes from the
+        # caldav library's now-cached `calendar_home_set` — no extra
+        # round-trip.  This replaces N individual get_supported_components()
+        # calls (one per calendar) and returns CTag / sync-token for free.
         home_url = _calendar_home_url(principal)
         if home_url is not None:
             try:
                 response = self._client.propfind(
                     home_url, props=_CALENDARS_PROPFIND_BODY, depth=1
                 )
-                result = _parse_calendars_propfind(
+                rich = _parse_calendars_propfind(
                     _response_body(response) or b"", base_url=home_url
                 )
-                if result:
-                    logger.info("listed %d calendars (with state)", len(result))
-                    return result
+                if rich:
+                    # Match on URL-decoded paths; servers may encode characters
+                    # differently in different PROPFIND contexts.
+                    rich_by_url = {unquote(r.url): r for r in rich}
+                    out: list[RemoteCalendar] = []
+                    for url, cal in cal_by_url.items():
+                        r = rich_by_url.get(unquote(url))
+                        if r is not None:
+                            out.append(
+                                RemoteCalendar(
+                                    name=_extract_name(cal, fallback_url=url),
+                                    url=url,
+                                    supported_components=(
+                                        r.supported_components
+                                        or _extract_supported_components(cal)
+                                    ),
+                                    ctag=r.ctag,
+                                    sync_token=r.sync_token,
+                                )
+                            )
+                        else:
+                            out.append(
+                                RemoteCalendar(
+                                    name=_extract_name(cal, fallback_url=url),
+                                    url=url,
+                                    supported_components=_extract_supported_components(
+                                        cal
+                                    ),
+                                )
+                            )
+                    logger.info("listed %d calendars (with state)", len(out))
+                    return tuple(out)
             except DAVError:
-                pass  # fall through to the caldav-library path below
+                pass  # fall through to the per-calendar fallback
 
-        try:
-            calendars: list[Any] = list(principal.calendars())
-        except DAVError as exc:
-            raise CalDAVError(str(exc)) from exc
-        out: list[RemoteCalendar] = []
-        for cal in calendars:
-            cal_url = str(cast(object, cal.url))
-            self._calendar_cache[cal_url] = cal
+        # Phase 2 fallback: supported-calendar-component-set is fetched
+        # per-calendar (one PROPFIND each).
+        out = []
+        for url, cal in cal_by_url.items():
             out.append(
                 RemoteCalendar(
-                    name=_extract_name(cal, fallback_url=cal_url),
-                    url=cal_url,
+                    name=_extract_name(cal, fallback_url=url),
+                    url=url,
                     supported_components=_extract_supported_components(cal),
                 )
             )

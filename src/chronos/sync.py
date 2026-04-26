@@ -328,18 +328,18 @@ def _sync_calendar(
         )
     )
 
-    # Refresh the recurrence-expansion cache for this calendar so the
-    # TUI's view queries return rows. Skipped on a no-op fast path
-    # (nothing pushed, nothing pulled, nothing trashed) since the cache
-    # is still valid then.
-    if (
-        stats.path in ("slow", "medium")
-        or stats.added
-        or stats.updated
-        or stats.removed
-        or stats.pushed
-        or stats.deleted_remote
-    ):
+    # Refresh the recurrence-expansion cache for this calendar.
+    #
+    # When `affected_uids` is a non-None frozenset (slow / medium path),
+    # expansion is needed only when that set is non-empty — an empty set
+    # means the reconcile confirmed zero changes, so the cache is still
+    # valid.  When `affected_uids` is None (fast path), expansion is
+    # needed only if something was pushed or deleted, since we don't have
+    # per-UID change tracking for that path.
+    should_expand = bool(affected_uids) or (
+        affected_uids is None and (stats.pushed or stats.deleted_remote)
+    )
+    if should_expand:
         populate_occurrences(
             index=index,
             calendar=calendar_ref,
@@ -508,6 +508,7 @@ def _slow_path_reconcile(
             session=session,
             mirror=mirror,
             index=index,
+            local_components=local_components,
         )
         pushed = _push_pending(
             account=account,
@@ -634,6 +635,7 @@ def _medium_path_reconcile(
             session=session,
             mirror=mirror,
             index=index,
+            local_components=local_components,
         )
         pushed = _push_pending(
             account=account,
@@ -1038,13 +1040,15 @@ def _push_trashed(
     session: CalDAVSession,
     mirror: MirrorRepository,
     index: IndexRepository,
+    local_components: Sequence[StoredComponent] | None = None,
 ) -> int:
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
-    trashed = [
-        c
-        for c in index.list_calendar_components(calendar_ref)
-        if c.local_status == LocalStatus.TRASHED
-    ]
+    components = (
+        local_components
+        if local_components is not None
+        else index.list_calendar_components(calendar_ref)
+    )
+    trashed = [c for c in components if c.local_status == LocalStatus.TRASHED]
     hrefs_done: set[str] = set()
     purge_local_only: list[ComponentRef] = []
     deleted_remote = 0

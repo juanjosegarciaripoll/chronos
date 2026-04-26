@@ -127,6 +127,8 @@ def populate_occurrences(
     far. The caller is responsible for raising `SyncCancelled` after
     this returns if early termination matters for its flow.
     """
+    if uids is not None and not uids:
+        return 0  # empty uid set: caller confirmed nothing needs re-expansion
     components = index.list_calendar_components(calendar)
     all_masters = [c for c in components if c.ref.recurrence_id is None]
     masters = (
