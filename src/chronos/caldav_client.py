@@ -78,6 +78,13 @@ _CALENDAR_QUERY_BODY = (
 
 _MULTIGET_BATCH_SIZE = 100
 
+_SYNC_TOKEN_PROPFIND_BODY = (
+    '<?xml version="1.0" encoding="utf-8" ?>'
+    '<d:propfind xmlns:d="DAV:">'
+    "<d:prop><d:sync-token/></d:prop>"
+    "</d:propfind>"
+)
+
 
 class CalDAVError(Exception):
     pass
@@ -93,6 +100,14 @@ class CalDAVNotFoundError(CalDAVError):
 
 class CalDAVAuthError(CalDAVError):
     """Raised on 401 / 403."""
+
+
+class SyncTokenExpiredError(CalDAVError):
+    """Raised when the server rejects a sync-token as invalid or expired.
+
+    The sync engine catches this and falls back to the slow path, then
+    re-acquires a fresh token via `get_sync_token`.
+    """
 
 
 class CalDAVHttpSession:
@@ -240,6 +255,69 @@ class CalDAVHttpSession:
             raise CalDAVNotFoundError(f"DELETE {href}: {exc}") from exc
         except DAVError as exc:
             raise CalDAVError(f"DELETE {href}: {exc}") from exc
+
+    def sync_collection(
+        self,
+        calendar_url: str,
+        sync_token: str,
+    ) -> tuple[
+        Sequence[tuple[str, str]],
+        Sequence[str],
+        str,
+    ]:
+        """Issue an RFC 6578 sync-collection REPORT and return the delta.
+
+        Returns `(changed, deleted, new_sync_token)` where `changed` is
+        a sequence of `(href, etag)` for added or modified resources and
+        `deleted` is a sequence of hrefs removed on the server.
+
+        Raises `SyncTokenExpiredError` when the server signals that the
+        token is invalid (403 / 409 with `valid-sync-token` condition),
+        which the sync engine catches to fall back to the slow path.
+        """
+        body = _build_sync_collection_body(sync_token)
+        try:
+            response = self._client.report(calendar_url, body, depth=1)
+        except AuthorizationError as exc:
+            raise SyncTokenExpiredError(
+                f"sync-collection {calendar_url}: token rejected (403): {exc}"
+            ) from exc
+        except NotFoundError as exc:
+            raise CalDAVNotFoundError(str(exc)) from exc
+        except DAVError as exc:
+            err = str(exc)
+            if "409" in err:
+                raise SyncTokenExpiredError(
+                    f"sync-collection {calendar_url}: token invalid (409): {exc}"
+                ) from exc
+            raise CalDAVError(err) from exc
+        raw = _response_body(response) or b""
+        changed, deleted, new_token = _parse_sync_collection(raw, base_url=calendar_url)
+        if new_token is None:
+            raise SyncTokenExpiredError(
+                f"sync-collection {calendar_url}: response contained no sync-token"
+            )
+        logger.info(
+            "  sync-collection: %d changed, %d deleted",
+            len(changed),
+            len(deleted),
+        )
+        return tuple(changed), tuple(deleted), new_token
+
+    def get_sync_token(self, calendar_url: str) -> str | None:
+        """Fetch the current `DAV:sync-token` for `calendar_url`.
+
+        Returns the opaque token string, or `None` when the server does
+        not expose the property (servers without sync-collection support
+        return an empty or absent propstat).
+        """
+        try:
+            response = self._client.propfind(
+                calendar_url, props=_SYNC_TOKEN_PROPFIND_BODY, depth=0
+            )
+        except DAVError:
+            return None
+        return _parse_sync_token_propfind(_response_body(response) or b"")
 
     def _get_principal(self) -> Any:
         if self._principal is None:
@@ -465,6 +543,87 @@ def _parse_multiget(body: bytes, *, base_url: str) -> list[tuple[str, str, bytes
     return out
 
 
+def _build_sync_collection_body(sync_token: str) -> str:
+    """Build a sync-collection REPORT body (RFC 6578 §3.2)."""
+    root = ET.Element(f"{{{_DAV_NS}}}sync-collection")
+    token_elem = ET.SubElement(root, f"{{{_DAV_NS}}}sync-token")
+    token_elem.text = sync_token
+    level_elem = ET.SubElement(root, f"{{{_DAV_NS}}}sync-level")
+    level_elem.text = "1"
+    prop = ET.SubElement(root, f"{{{_DAV_NS}}}prop")
+    ET.SubElement(prop, f"{{{_DAV_NS}}}getetag")
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _parse_sync_collection(
+    body: bytes,
+    *,
+    base_url: str,
+) -> tuple[list[tuple[str, str]], list[str], str | None]:
+    """Parse a sync-collection REPORT multistatus (RFC 6578 §3.6).
+
+    Returns `(changed, deleted, new_sync_token)`:
+    - `changed`: `(href, etag)` pairs for resources added or modified.
+    - `deleted`: hrefs for resources removed on the server (404 propstat).
+    - `new_sync_token`: the `<d:sync-token>` element from the multistatus
+      root, or `None` if the server omitted it.
+    """
+    if not body:
+        return [], [], None
+    try:
+        tree = ET.fromstring(body)
+    except ET.ParseError:
+        return [], [], None
+    ns = {"d": _DAV_NS}
+    changed: list[tuple[str, str]] = []
+    deleted: list[str] = []
+    for response in tree.findall("d:response", ns):
+        href_elem = response.find("d:href", ns)
+        if href_elem is None or href_elem.text is None:
+            continue
+        href = _absolute_href(href_elem.text.strip(), base_url=base_url)
+        if not href:
+            continue
+        is_deleted = False
+        etag = ""
+        for propstat in response.findall("d:propstat", ns):
+            status_elem = propstat.find("d:status", ns)
+            if status_elem is None or status_elem.text is None:
+                continue
+            if " 404 " in status_elem.text:
+                is_deleted = True
+                break
+            if " 200 " in status_elem.text:
+                etag_elem = propstat.find("d:prop/d:getetag", ns)
+                if etag_elem is not None and etag_elem.text:
+                    etag = etag_elem.text.strip().strip('"')
+        if is_deleted:
+            deleted.append(href)
+        else:
+            changed.append((href, etag or _MISSING_SERVER_ETAG))
+    token_elem = tree.find("d:sync-token", ns)
+    new_token: str | None = None
+    if token_elem is not None and token_elem.text:
+        new_token = token_elem.text.strip() or None
+    return changed, deleted, new_token
+
+
+def _parse_sync_token_propfind(body: bytes) -> str | None:
+    """Extract `DAV:sync-token` from a PROPFIND depth-0 response."""
+    if not body:
+        return None
+    try:
+        tree = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    ns = {"d": _DAV_NS}
+    elem = tree.find(".//d:sync-token", ns)
+    if elem is None or not elem.text:
+        return None
+    value = elem.text.strip()
+    return value or None
+
+
 def _parse_ctag(response: Any) -> str | None:
     body = _response_body(response)
     if body is None:
@@ -559,4 +718,5 @@ __all__ = [
     "CalDAVError",
     "CalDAVHttpSession",
     "CalDAVNotFoundError",
+    "SyncTokenExpiredError",
 ]

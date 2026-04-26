@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
-from chronos.caldav_client import CalDAVConflictError, CalDAVError
+from chronos.caldav_client import (
+    CalDAVConflictError,
+    CalDAVError,
+    SyncTokenExpiredError,
+)
 from chronos.domain import (
     AccountConfig,
     CalendarConfig,
@@ -67,7 +71,7 @@ class SyncCancelled(SyncError):  # noqa: N818 — describes an event, not an err
 @dataclass(frozen=True, kw_only=True)
 class CalendarSyncStats:
     calendar: CalendarRef
-    path: Literal["fast", "slow"]
+    path: Literal["fast", "medium", "slow"]
     added: int = 0
     updated: int = 0
     removed: int = 0
@@ -188,24 +192,33 @@ def _sync_calendar(
     """Reconcile one calendar.
 
     **Resumability invariant** (load-bearing): `set_sync_state` is the
-    *last* index write before a successful return, gated on
-    `_slow_path_reconcile` / `_fast_path_reconcile` having returned
-    without raising. If anything raises mid-sync (KeyboardInterrupt,
-    network error, server 5xx), the prior CTag stays in place — so
-    the next sync re-enters the slow path and reconverges. Anything
-    already ingested before the interrupt is preserved (each
-    `_ingest_resource` is its own SQLite transaction); whatever was
-    in flight is rolled back. Do not move `set_sync_state` earlier
-    or wrap it in the same transaction as the per-resource ingests.
+    *last* index write before a successful return, gated on the chosen
+    reconciliation path having returned without raising. If anything
+    raises mid-sync (KeyboardInterrupt, network error, server 5xx),
+    the prior CTag stays in place — so the next sync re-enters the
+    appropriate path and reconverges. Anything already ingested before
+    the interrupt is preserved (each `_ingest_resource` is its own
+    SQLite transaction); whatever was in flight is rolled back. Do not
+    move `set_sync_state` earlier or wrap it in the same transaction as
+    the per-resource ingests.
+
+    **Path selection:**
+    - CTag unchanged              → fast path (zero extra I/O)
+    - CTag changed + sync_token   → medium path (sync-collection REPORT)
+      - token rejected            → fall back to slow path, re-acquire token
+    - CTag changed, no token      → slow path (full calendar-query), then
+                                    acquire initial sync_token for next run
     """
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     prior_state = index.get_sync_state(calendar_ref)
     server_ctag = session.get_ctag(calendar.url)
     prior_ctag_repr = prior_state.ctag if prior_state else None
 
+    # Carry the existing sync_token forward by default; updated below
+    # when the medium or slow path returns a new one.
+    new_sync_token: str | None = prior_state.sync_token if prior_state else None
+
     if _ctag_matches(prior_state, server_ctag):
-        # CTag stable since last sync — skip the calendar-query +
-        # multiget round trips entirely.
         logger.info(
             "[%s] %s fast path (CTag stable: %s)",
             account.name,
@@ -220,11 +233,44 @@ def _sync_calendar(
             index=index,
             now=now,
         )
+
+    elif prior_state is not None and prior_state.sync_token is not None:
+        logger.info(
+            "[%s] %s medium path (CTag %s -> %s, token %s)",
+            account.name,
+            calendar.calendar_name,
+            prior_ctag_repr,
+            server_ctag if server_ctag is not None else "(none)",
+            prior_state.sync_token,
+        )
+        try:
+            stats, new_sync_token = _medium_path_reconcile(
+                account=account,
+                calendar=calendar,
+                session=session,
+                mirror=mirror,
+                index=index,
+                now=now,
+                sync_token=prior_state.sync_token,
+            )
+        except SyncTokenExpiredError as exc:
+            logger.info(
+                "[%s] %s sync-token expired (%s); falling back to slow path",
+                account.name,
+                calendar.calendar_name,
+                exc,
+            )
+            stats = _slow_path_reconcile(
+                account=account,
+                calendar=calendar,
+                session=session,
+                mirror=mirror,
+                index=index,
+                now=now,
+            )
+            new_sync_token = _acquire_sync_token(session, calendar.url)
+
     else:
-        # CTag mismatch (or missing on either side) → re-list and
-        # reconcile. Surfaced at INFO so users investigating "why
-        # does sync re-fetch every time?" can see the prior vs
-        # server tokens directly in `tui.log` without enabling -v.
         logger.info(
             "[%s] %s slow path (CTag %s -> %s)",
             account.name,
@@ -240,6 +286,7 @@ def _sync_calendar(
             index=index,
             now=now,
         )
+        new_sync_token = _acquire_sync_token(session, calendar.url)
 
     # Default: keep the CTag we read at the top of this run.
     # Re-reading after an unchanged slow path is *worse* on servers
@@ -261,7 +308,7 @@ def _sync_calendar(
         SyncState(
             calendar=calendar_ref,
             ctag=final_ctag,
-            sync_token=None,
+            sync_token=new_sync_token,
             synced_at=now,
         )
     )
@@ -271,7 +318,7 @@ def _sync_calendar(
     # (nothing pushed, nothing pulled, nothing trashed) since the cache
     # is still valid then.
     if (
-        stats.path == "slow"
+        stats.path in ("slow", "medium")
         or stats.added
         or stats.updated
         or stats.removed
@@ -429,6 +476,122 @@ def _slow_path_reconcile(
         deleted_remote=deleted_remote,
         errors=tuple(errors),
     )
+
+
+def _medium_path_reconcile(
+    *,
+    account: AccountConfig,
+    calendar: CalendarConfig,
+    session: CalDAVSession,
+    mirror: MirrorRepository,
+    index: IndexRepository,
+    now: datetime,
+    sync_token: str,
+) -> tuple[CalendarSyncStats, str]:
+    """Apply an RFC 6578 sync-collection delta.
+
+    Raises `SyncTokenExpiredError` when the server rejects `sync_token`
+    so the caller can fall back to the slow path transparently.
+    Returns `(stats, new_sync_token)` on success.
+    """
+    calendar_ref = CalendarRef(account.name, calendar.calendar_name)
+    changed, deleted, new_token = session.sync_collection(calendar.url, sync_token)
+
+    local_components = index.list_calendar_components(calendar_ref)
+    local_by_href: dict[str, StoredComponent] = {}
+    for component in local_components:
+        if component.href is not None:
+            local_by_href.setdefault(component.href, component)
+
+    locally_deleted = {h for h in deleted if h in local_by_href}
+    _guard_mass_deletion(
+        calendar_ref=calendar_ref,
+        baseline=len(local_by_href),
+        removed=len(locally_deleted),
+        local_hrefs=local_by_href.keys(),
+        # Full server set unavailable on medium path; pass local minus
+        # deleted as an approximation for the log sample only.
+        server_hrefs=(h for h in local_by_href if h not in locally_deleted),
+    )
+
+    errors: list[str] = []
+    removed = _apply_server_deletions(
+        removed_hrefs=locally_deleted,
+        local_by_href=local_by_href,
+        local_components=local_components,
+        mirror=mirror,
+        index=index,
+    )
+
+    changed_by_href = {h: e for h, e in changed}
+    new_hrefs = [h for h in changed_by_href if h not in local_by_href]
+    updated_hrefs = [h for h in changed_by_href if h in local_by_href]
+
+    added = _fetch_and_ingest(
+        account=account,
+        calendar=calendar,
+        session=session,
+        mirror=mirror,
+        index=index,
+        hrefs=new_hrefs,
+        now=now,
+        errors=errors,
+    )
+    updated = _fetch_and_ingest(
+        account=account,
+        calendar=calendar,
+        session=session,
+        mirror=mirror,
+        index=index,
+        hrefs=updated_hrefs,
+        now=now,
+        errors=errors,
+    )
+
+    pushed = 0
+    deleted_remote = 0
+    if not calendar.read_only:
+        deleted_remote = _push_trashed(
+            account=account,
+            calendar=calendar,
+            session=session,
+            mirror=mirror,
+            index=index,
+        )
+        pushed = _push_pending(
+            account=account,
+            calendar=calendar,
+            session=session,
+            index=index,
+            now=now,
+        )
+
+    return (
+        CalendarSyncStats(
+            calendar=calendar_ref,
+            path="medium",
+            added=added,
+            updated=updated,
+            removed=removed,
+            pushed=pushed,
+            deleted_remote=deleted_remote,
+            errors=tuple(errors),
+        ),
+        new_token,
+    )
+
+
+def _acquire_sync_token(session: CalDAVSession, calendar_url: str) -> str | None:
+    """Fetch the current sync-token after a slow-path sync.
+
+    Returns the token string, or `None` when the server doesn't support
+    sync-collection (so the next CTag mismatch takes the slow path again
+    rather than attempting a medium path with no token).
+    """
+    try:
+        return session.get_sync_token(calendar_url)
+    except CalDAVError:
+        return None
 
 
 def _guard_mass_deletion(

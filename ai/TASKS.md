@@ -159,6 +159,154 @@ Audit and harden every persistence path so an interrupt (Ctrl-C / SIGINT, termin
 
 **Acceptance:** `uv run python scripts/build.py` produces a bundle that launches on the target platform; release workflow dry-runs cleanly.
 
+## Milestone 12 — Incremental sync via WebDAV sync-collection
+
+### The problem
+
+The sync engine has two paths today:
+
+- **Fast path** (CTag unchanged): zero extra I/O. Perfect.
+- **Slow path** (CTag changed): issues a `calendar-query` REPORT that returns `(href, etag)` for **every** resource in the calendar. For Google Holiday calendars (10 000+ events) this is several megabytes of XML per sync, even when only one event changed. The slow path then computes the diff and only multigets the actual delta, so it is already better than fetching all bodies, but the index scan alone is expensive.
+
+`SyncState.sync_token` and the `sync_token` column in `calendar_sync_state` exist in the schema but are always written as `NULL` (`sync.py` line 265). The `SYNCHRONIZATION.md §6` describes the medium path but it has never been implemented.
+
+### What WebDAV sync-collection (RFC 6578) provides
+
+`sync-collection` is a REPORT that answers: "give me only what changed since sync-token T, and here is your new token." Google Calendar, Fastmail, iCloud, and Nextcloud all support it. The server returns:
+
+- 200-propstat entries: hrefs that were added or modified (with their new etags).
+- 404-propstat entries: hrefs that were deleted.
+- A new `<d:sync-token>` at the end of the multistatus body.
+
+For a typical "one event edited" sync this reduces the round-trip to a single small REPORT response + one multiget, instead of a full calendar-query scan.
+
+### Changes required
+
+**A. `protocols.py` — two new methods on `CalDAVSession`**
+
+```python
+def sync_collection(
+    self, calendar_url: str, sync_token: str
+) -> tuple[
+    Sequence[tuple[str, str]],  # (href, etag) — added or changed
+    Sequence[str],              # hrefs deleted on the server
+    str,                        # new sync-token to store
+]: ...
+
+def get_sync_token(self, calendar_url: str) -> str | None: ...
+```
+
+Both are optional in the sense that the engine falls back to the slow path when the server doesn't support them, but every `CalDAVSession` implementation (real and fake) must declare them.
+
+**B. `caldav_client.py` — implement both new methods**
+
+`sync_collection`:
+- Issues a raw `sync-collection` REPORT with the body below, depth 1.
+- Parses the multistatus: 200-propstat entries → changed, 404-propstat entries → deleted.
+- Extracts `<d:sync-token>` from the multistatus root (not inside a `<d:response>`).
+- On 403 or 409 where the body contains `<d:valid-sync-token/>`: raises `SyncTokenExpiredError` (new subclass of `CalDAVError`). The engine catches this and falls back to the slow path.
+- On any other 4xx/5xx: raises the existing `CalDAVError`.
+
+Request body:
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<d:sync-collection xmlns:d="DAV:">
+  <d:sync-token>TOKEN</d:sync-token>
+  <d:sync-level>1</d:sync-level>
+  <d:prop><d:getetag/></d:prop>
+</d:sync-collection>
+```
+
+`get_sync_token`:
+- Issues a `PROPFIND` at depth 0 asking for `DAV:sync-token`.
+- Returns the token string, or `None` if the server doesn't include it (servers without sync-collection support will return an empty propstat).
+
+Request body:
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop><d:sync-token/></d:prop>
+</d:propfind>
+```
+
+**C. `sync.py` — medium path and token acquisition**
+
+1. Add `SyncTokenExpiredError` import.
+2. Extend `CalendarSyncStats.path` to `Literal["fast", "medium", "slow"]`.
+3. Add `_medium_path_reconcile()` mirroring `_slow_path_reconcile()`:
+   - Calls `session.sync_collection(url, stored_token)` → `(changed, deleted, new_token)`.
+   - Runs `_guard_mass_deletion` on `deleted` (same threshold as slow path).
+   - Calls `_apply_server_deletions` for the deleted hrefs (reuse unchanged).
+   - Calls `_fetch_and_ingest` for the changed hrefs (reuse unchanged; the pipelined producer/consumer carries over verbatim).
+   - Calls `_push_trashed` and `_push_pending` for local mutations (same as slow path).
+   - Returns `CalendarSyncStats(path="medium", ...)` and the `new_token`.
+4. Update `_sync_calendar()` path selection:
+
+```
+CTag matches
+  → fast path (unchanged)
+
+CTag changed + stored sync_token is not None
+  → try medium path
+      success  → store new_token in SyncState
+      SyncTokenExpiredError
+               → clear stored token, run slow path,
+                 then call get_sync_token() to acquire a fresh token
+
+CTag changed + no stored sync_token
+  → slow path, then call get_sync_token() to acquire token for next time
+```
+
+5. In `_sync_calendar`, update the `set_sync_state` call so `sync_token` is populated from the result of `get_sync_token` / the medium path's `new_token` rather than always `None`.
+
+**D. `tests/fake_caldav.py` — extend `FakeCalDAVSession`**
+
+Add internal state:
+- `_sync_tokens: dict[str, str]` — current sync-token per calendar URL.
+- `_change_log: dict[str, list[tuple[str, Literal["added", "changed", "deleted"]]]]` — ordered log of changes since a given token, keyed by calendar URL. Or simpler: a monotone counter per calendar and a per-token snapshot of the state.
+
+Implement `sync_collection(url, token)`:
+- If `token` is unknown or expired (special "expired" sentinel): raise `FakeCalDAVSyncTokenExpiredError`.
+- Otherwise compute `(changed, deleted)` as the diff between the snapshot at `token` and the current state, return those plus the new current token.
+
+Implement `get_sync_token(url)`:
+- Return current sync token for the calendar.
+
+Existing `put_resource` / `remove_resource` helpers advance the sync token alongside bumping the CTag.
+
+**E. `tests/test_sync.py` — new test class `MediumPathTest`**
+
+Cases to cover (all 100% branch-covered per AGENTS §5):
+
+1. **Happy path**: CTag changed + valid sync_token → medium path; exactly the changed hrefs are multiget-fetched (no `calendar_query` call); deleted hrefs removed; new token stored.
+2. **Expired token falls back**: `SyncTokenExpiredError` → slow path runs; new token acquired via `get_sync_token`; stored in index; next sync uses medium path.
+3. **No prior token**: first-ever sync with CTag mismatch → slow path; `get_sync_token` called once; token stored for next run.
+4. **Fast path unaffected**: CTag unchanged → neither `sync_collection` nor `calendar_query` called.
+5. **Mass-deletion guard on medium path**: >20% of known hrefs deleted on server → `SyncHaltError` raised from medium path (same guard as slow path).
+
+Update existing slow-path tests to assert `get_sync_token` is called once at the end and that `index.get_sync_state` then returns a non-None `sync_token`.
+
+**F. `SYNCHRONIZATION.md` — update §6**
+
+Replace the "Medium path — … (described but not yet implemented)" note with the actual logic. Update §9 (performance properties) to note that the medium path's I/O is bounded by the size of the change set, not the total calendar size.
+
+### What does not change
+
+- Fast path is completely untouched.
+- Slow path is kept as-is (fallback for expired tokens and servers without sync-collection).
+- `_fetch_and_ingest` pipelined producer/consumer is reused by the medium path unchanged.
+- `_guard_mass_deletion` applies equally to medium-path deletions.
+- The conflict taxonomy (C-1 through C-11) is unchanged; C-4 is the one that fires on token expiry.
+- No schema changes: `sync_token` column already exists in `calendar_sync_state`.
+
+### Known limitations to document (not block the milestone)
+
+- Google's sync-token expires after roughly 30 days of inactivity. The expired-token fallback handles this gracefully.
+- RFC 6578 allows a server to return a truncated response (too many changes). In practice Google doesn't, but the engine should treat a `507 Insufficient Storage` response from `sync_collection` the same as a `SyncTokenExpiredError`: clear the token, fall back to slow path.
+- CTag drift on Google (a new CTag returned on every PROPFIND) is already handled by the re-read-after-push logic in `_sync_calendar`; no interaction with the medium path.
+
+**Acceptance:** medium path exercises zero `calendar_query` calls for a single-event change on a calendar with a stored token; expired-token test passes without manual intervention; all conflict cases still covered; project-wide branch coverage stays ≥ 85%.
+
 ## Followups / open questions
 
 - **Keyring-backed OAuth token storage** — M7 writes refresh tokens as plain JSON under `paths.oauth_token_dir()` with a best-effort 0600 chmod on POSIX (no-op on Windows). When the `keyring` dep is approved, migrate tokens to the system keyring for defence-in-depth.

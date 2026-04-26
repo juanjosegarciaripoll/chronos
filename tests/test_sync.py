@@ -154,7 +154,7 @@ class FastPathTest(SyncTestCase):
         self.assertNotIn("calendar_query", method_names)
         self.assertNotIn("calendar_multiget", method_names)
 
-    def test_ctag_change_forces_slow_path(self) -> None:
+    def test_ctag_change_with_no_stored_token_forces_slow_path(self) -> None:
         self.session.put_resource(
             calendar_url=CALENDAR_URL,
             href=f"{CALENDAR_URL}a.ics",
@@ -162,6 +162,18 @@ class FastPathTest(SyncTestCase):
             etag="etag-a",
         )
         self._run()
+        # Clear the stored sync_token so the second sync has no token to
+        # attempt the medium path — it must fall through to slow path.
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.index.set_sync_state(
+            SyncState(
+                calendar=self.calendar_ref,
+                ctag=state.ctag,
+                sync_token=None,
+                synced_at=state.synced_at,
+            )
+        )
         # Mutate the calendar on the server to bump the CTag.
         self.session.put_resource(
             calendar_url=CALENDAR_URL,
@@ -172,6 +184,7 @@ class FastPathTest(SyncTestCase):
         self.session.calls.clear()
         result = self._run()
         self.assertIn("calendar_query", [c[0] for c in self.session.calls])
+        self.assertNotIn("sync_collection", [c[0] for c in self.session.calls])
         self.assertEqual(result.components_added, 1)
 
     def test_no_op_slow_path_stores_top_of_function_ctag(self) -> None:
@@ -1006,3 +1019,196 @@ class FetchIngestPipelineTest(SyncTestCase):
         after = {t.name for t in threading.enumerate()}
         leaked = {n for n in after - before if n.startswith("chronos-multiget-")}
         self.assertEqual(leaked, set())
+
+
+class MediumPathTest(SyncTestCase):
+    """RFC 6578 sync-collection medium path.
+
+    The fast path (CTag stable) is zero-I/O and unchanged. The medium
+    path fires when CTag changes *and* a sync-token is already stored
+    from a previous slow-path sync. It issues `sync_collection` instead
+    of `calendar_query`, so the I/O is proportional to the change set
+    rather than the full calendar size.
+    """
+
+    def _seed_and_first_sync(self) -> None:
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}a.ics",
+            ics=_ics_with_uid("med-a@example.com"),
+            etag="etag-a",
+        )
+        self._run()
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.assertIsNotNone(state.sync_token, "first sync must store a sync-token")
+
+    def test_ctag_change_with_token_uses_medium_path(self) -> None:
+        self._seed_and_first_sync()
+        # Server adds a new resource, bumping the CTag.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}b.ics",
+            ics=_ics_with_uid("med-b@example.com"),
+            etag="etag-b",
+        )
+        self.session.calls.clear()
+        result = self._run()
+        method_names = [c[0] for c in self.session.calls]
+        self.assertIn("sync_collection", method_names)
+        self.assertNotIn("calendar_query", method_names)
+        self.assertEqual(result.components_added, 1)
+
+    def test_medium_path_picks_up_only_changed_hrefs(self) -> None:
+        # With 3 resources on the server, a single-resource change must
+        # multiget only that one href — not all three.
+        for uid in ("x", "y", "z"):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{uid}.ics",
+                ics=_ics_with_uid(f"med-{uid}@example.com"),
+                etag=f"etag-{uid}",
+            )
+        self._run()
+        # Modify only z.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}z.ics",
+            ics=_ics_with_uid("med-z-updated@example.com"),
+            etag="etag-z2",
+        )
+        self.session.calls.clear()
+        result = self._run()
+        multiget_calls = [c for c in self.session.calls if c[0] == "calendar_multiget"]
+        fetched_hrefs = {h for call in multiget_calls for h in call[2]}
+        self.assertEqual(fetched_hrefs, {f"{CALENDAR_URL}z.ics"})
+        self.assertEqual(result.components_updated, 1)
+
+    def test_medium_path_removes_server_deleted_hrefs(self) -> None:
+        for uid in ("p", "q"):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{uid}.ics",
+                ics=_ics_with_uid(f"med-{uid}@example.com"),
+                etag=f"etag-{uid}",
+            )
+        self._run()
+        self.session.remove_resource(CALENDAR_URL, f"{CALENDAR_URL}p.ics")
+        self.session.calls.clear()
+        result = self._run()
+        self.assertIn("sync_collection", [c[0] for c in self.session.calls])
+        self.assertNotIn("calendar_query", [c[0] for c in self.session.calls])
+        self.assertEqual(result.components_removed, 1)
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(len(rows), 1)
+
+    def test_medium_path_stores_new_sync_token(self) -> None:
+        self._seed_and_first_sync()
+        state_before = self.index.get_sync_state(self.calendar_ref)
+        assert state_before is not None
+        old_token = state_before.sync_token
+        # Add a resource to advance the server's token.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}new.ics",
+            ics=_ics_with_uid("med-new@example.com"),
+            etag="etag-new",
+        )
+        self._run()
+        state_after = self.index.get_sync_state(self.calendar_ref)
+        assert state_after is not None
+        self.assertIsNotNone(state_after.sync_token)
+        self.assertNotEqual(state_after.sync_token, old_token)
+
+    def test_expired_token_falls_back_to_slow_path_and_stores_new_token(
+        self,
+    ) -> None:
+        self._seed_and_first_sync()
+        # Expire the stored token so sync_collection raises.
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.session.expire_sync_token(CALENDAR_URL)
+        # Bump the server CTag so we don't take the fast path.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}b.ics",
+            ics=_ics_with_uid("med-b@example.com"),
+            etag="etag-b",
+        )
+        self.session.calls.clear()
+        result = self._run()
+        method_names = [c[0] for c in self.session.calls]
+        # sync_collection must have been tried (and rejected).
+        self.assertIn("sync_collection", method_names)
+        # calendar_query confirms we fell through to the slow path.
+        self.assertIn("calendar_query", method_names)
+        # A fresh token must have been acquired and stored.
+        new_state = self.index.get_sync_state(self.calendar_ref)
+        assert new_state is not None
+        self.assertIsNotNone(new_state.sync_token)
+        self.assertEqual(result.components_added, 1)
+
+    def test_first_sync_stores_sync_token_for_next_run(self) -> None:
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}a.ics",
+            ics=_ics_with_uid("med-first@example.com"),
+            etag="etag-a",
+        )
+        self._run()
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.assertIsNotNone(state.sync_token)
+        # Second sync with CTag changed → medium path, not slow.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}b.ics",
+            ics=_ics_with_uid("med-second@example.com"),
+            etag="etag-b",
+        )
+        self.session.calls.clear()
+        self._run()
+        self.assertIn("sync_collection", [c[0] for c in self.session.calls])
+        self.assertNotIn("calendar_query", [c[0] for c in self.session.calls])
+
+    def test_fast_path_does_not_call_sync_collection(self) -> None:
+        self._seed_and_first_sync()
+        self.session.calls.clear()
+        self._run()  # CTag unchanged → fast path
+        method_names = [c[0] for c in self.session.calls]
+        self.assertNotIn("sync_collection", method_names)
+        self.assertNotIn("calendar_query", method_names)
+
+    def test_medium_path_mass_deletion_guard_fires(self) -> None:
+        # Seed 10 resources so the guard baseline is above the minimum.
+        for i in range(10):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{i}.ics",
+                ics=_ics_with_uid(f"md-{i}@example.com"),
+                etag=f"etag-{i}",
+            )
+        self._run()
+        # Delete 6 of 10 on the server (60% > 20% threshold).
+        for i in range(6):
+            self.session.remove_resource(CALENDAR_URL, f"{CALENDAR_URL}{i}.ics")
+        result = self._run()
+        self.assertEqual(result.calendars_synced, 0)
+        self.assertTrue(any("60%" in e or "/10" in e for e in result.errors))
+        # Local rows must be untouched because we halted.
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertEqual(len(rows), 10)
+
+    def test_acquire_sync_token_returns_none_on_caldav_error(self) -> None:
+        from chronos.caldav_client import CalDAVError
+        from chronos.sync import _acquire_sync_token
+
+        original = self.session.get_sync_token
+
+        def boom(_url: str) -> str | None:
+            raise CalDAVError("server unavailable")
+
+        self.session.get_sync_token = boom  # type: ignore[method-assign]
+        result = _acquire_sync_token(self.session, CALENDAR_URL)
+        self.assertIsNone(result)
+        self.session.get_sync_token = original  # type: ignore[method-assign]

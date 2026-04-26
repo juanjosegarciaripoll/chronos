@@ -627,3 +627,237 @@ class DeleteTest(CalDAVHttpSessionTestCase):
         session = self._session_with_client(client)
         with self.assertRaises(CalDAVNotFoundError):
             session.delete("https://x/cal/a.ics", etag="etag")
+
+
+class ParseSyncCollectionTest(unittest.TestCase):
+    """Unit tests for `_parse_sync_collection` (pure function)."""
+
+    def _parse(
+        self, body: bytes
+    ) -> tuple[list[tuple[str, str]], list[str], str | None]:
+        from chronos.caldav_client import _parse_sync_collection
+
+        return _parse_sync_collection(body, base_url="https://cal.example.com/dav/")
+
+    def test_parses_added_and_deleted_resources(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:">'
+            b"<d:response>"
+            b"<d:href>/dav/work/a.ics</d:href>"
+            b"<d:propstat><d:prop><d:getetag>etag-a</d:getetag></d:prop>"
+            b"<d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+            b"</d:response>"
+            b"<d:response>"
+            b"<d:href>/dav/work/b.ics</d:href>"
+            b"<d:propstat><d:prop/>"
+            b"<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>"
+            b"</d:response>"
+            b"<d:sync-token>https://example.com/sync/tok-7</d:sync-token>"
+            b"</d:multistatus>"
+        )
+        changed, deleted, new_token = self._parse(body)
+        self.assertEqual(len(changed), 1)
+        self.assertTrue(changed[0][0].endswith("a.ics"))
+        self.assertEqual(changed[0][1], "etag-a")
+        self.assertEqual(len(deleted), 1)
+        self.assertTrue(deleted[0].endswith("b.ics"))
+        self.assertEqual(new_token, "https://example.com/sync/tok-7")
+
+    def test_returns_none_token_when_absent(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
+        )
+        _, _, new_token = self._parse(body)
+        self.assertIsNone(new_token)
+
+    def test_empty_body_returns_empty_results(self) -> None:
+        changed, deleted, new_token = self._parse(b"")
+        self.assertEqual(changed, [])
+        self.assertEqual(deleted, [])
+        self.assertIsNone(new_token)
+
+    def test_unparseable_body_returns_empty(self) -> None:
+        changed, deleted, new_token = self._parse(b"not xml <<>>")
+        self.assertEqual(changed, [])
+        self.assertIsNone(new_token)
+
+    def test_missing_etag_gets_sentinel(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:">'
+            b"<d:response>"
+            b"<d:href>/dav/work/c.ics</d:href>"
+            b"<d:propstat><d:prop/>"
+            b"<d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+            b"</d:response>"
+            b"<d:sync-token>tok-1</d:sync-token>"
+            b"</d:multistatus>"
+        )
+        changed, _, _ = self._parse(body)
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(changed[0][1], "")  # sentinel (_MISSING_SERVER_ETAG)
+
+
+class ParseSyncTokenPropfindTest(unittest.TestCase):
+    """Unit tests for `_parse_sync_token_propfind` (pure function)."""
+
+    def _parse(self, body: bytes) -> str | None:
+        from chronos.caldav_client import _parse_sync_token_propfind
+
+        return _parse_sync_token_propfind(body)
+
+    def test_extracts_token(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:">'
+            b"<d:response><d:propstat><d:prop>"
+            b"<d:sync-token>https://example.com/sync/42</d:sync-token>"
+            b"</d:prop></d:propstat></d:response>"
+            b"</d:multistatus>"
+        )
+        self.assertEqual(self._parse(body), "https://example.com/sync/42")
+
+    def test_returns_none_when_absent(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
+        )
+        self.assertIsNone(self._parse(body))
+
+    def test_empty_body_returns_none(self) -> None:
+        self.assertIsNone(self._parse(b""))
+
+    def test_unparseable_returns_none(self) -> None:
+        self.assertIsNone(self._parse(b"garbage"))
+
+
+class SyncCollectionHttpTest(CalDAVHttpSessionTestCase):
+    """Error-mapping tests for `CalDAVHttpSession.sync_collection`."""
+
+    _BASE = "https://cal.example.com/dav/work/"
+    _TOK = "https://example.com/sync/tok-3"
+
+    def _session_reporting(
+        self,
+        *,
+        response_body: bytes | None = None,
+        raise_exc: Exception | None = None,
+    ) -> CalDAVHttpSession:
+        client = MagicMock()
+        principal = _fake_principal("https://cal.example.com/p/", ())
+        client.principal.return_value = principal
+        if raise_exc is not None:
+            client.report.side_effect = raise_exc
+        else:
+            resp = MagicMock()
+            resp.raw = response_body
+            client.report.return_value = resp
+        return self._session_with_client(client)
+
+    def test_happy_path_returns_delta_and_new_token(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:">'
+            b"<d:response><d:href>/dav/work/x.ics</d:href>"
+            b'<d:propstat><d:prop><d:getetag>"e1"</d:getetag></d:prop>'
+            b"<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+            b"<d:sync-token>tok-next</d:sync-token>"
+            b"</d:multistatus>"
+        )
+
+        session = self._session_reporting(response_body=body)
+        changed, deleted, new_token = session.sync_collection(self._BASE, self._TOK)
+        self.assertEqual(new_token, "tok-next")
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(deleted, ())
+
+    def test_403_raises_sync_token_expired(self) -> None:
+        from chronos.caldav_client import SyncTokenExpiredError
+
+        session = self._session_reporting(raise_exc=AuthorizationError("403"))
+        with self.assertRaises(SyncTokenExpiredError):
+            session.sync_collection(self._BASE, self._TOK)
+
+    def test_409_raises_sync_token_expired(self) -> None:
+        from chronos.caldav_client import SyncTokenExpiredError
+
+        session = self._session_reporting(raise_exc=DAVError("409 Conflict"))
+        with self.assertRaises(SyncTokenExpiredError):
+            session.sync_collection(self._BASE, self._TOK)
+
+    def test_other_dav_error_raises_caldav_error(self) -> None:
+        from chronos.caldav_client import SyncTokenExpiredError
+
+        session = self._session_reporting(raise_exc=DAVError("500 Server Error"))
+        with self.assertRaises(CalDAVError) as ctx:
+            session.sync_collection(self._BASE, self._TOK)
+        self.assertNotIsInstance(ctx.exception, SyncTokenExpiredError)
+
+    def test_not_found_raises_caldav_not_found(self) -> None:
+        session = self._session_reporting(raise_exc=NotFoundError("404"))
+        with self.assertRaises(CalDAVNotFoundError):
+            session.sync_collection(self._BASE, self._TOK)
+
+    def test_missing_sync_token_in_response_raises_expired(self) -> None:
+        from chronos.caldav_client import SyncTokenExpiredError
+
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
+        )
+        session = self._session_reporting(response_body=body)
+        with self.assertRaises(SyncTokenExpiredError):
+            session.sync_collection(self._BASE, self._TOK)
+
+
+class GetSyncTokenHttpTest(CalDAVHttpSessionTestCase):
+    """Tests for `CalDAVHttpSession.get_sync_token`."""
+
+    _BASE = "https://cal.example.com/dav/work/"
+
+    def test_returns_token_from_propfind(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:">'
+            b"<d:response><d:propstat><d:prop>"
+            b"<d:sync-token>https://example.com/sync/7</d:sync-token>"
+            b"</d:prop></d:propstat></d:response>"
+            b"</d:multistatus>"
+        )
+        resp = MagicMock()
+        resp.raw = body
+        client = MagicMock()
+        client.propfind.return_value = resp
+        client.principal.return_value = _fake_principal(
+            "https://cal.example.com/p/", ()
+        )
+        session = self._session_with_client(client)
+        self.assertEqual(
+            session.get_sync_token(self._BASE), "https://example.com/sync/7"
+        )
+
+    def test_returns_none_when_dav_error(self) -> None:
+        client = MagicMock()
+        client.propfind.side_effect = DAVError("501 Not Implemented")
+        client.principal.return_value = _fake_principal(
+            "https://cal.example.com/p/", ()
+        )
+        session = self._session_with_client(client)
+        self.assertIsNone(session.get_sync_token(self._BASE))
+
+    def test_returns_none_when_token_absent(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
+        )
+        resp = MagicMock()
+        resp.raw = body
+        client = MagicMock()
+        client.propfind.return_value = resp
+        client.principal.return_value = _fake_principal(
+            "https://cal.example.com/p/", ()
+        )
+        session = self._session_with_client(client)
+        self.assertIsNone(session.get_sync_token(self._BASE))

@@ -41,6 +41,18 @@ class CalDAVSession(Protocol):
 
     def delete(self, href: str, etag: str) -> None: ...
 
+    def sync_collection(
+        self,
+        calendar_url: str,
+        sync_token: str,
+    ) -> tuple[
+        Sequence[tuple[str, str]],  # (href, etag) — added or changed
+        Sequence[str],  # hrefs deleted on the server
+        str,  # new sync-token to store
+    ]: ...
+
+    def get_sync_token(self, calendar_url: str) -> str | None: ...
+
 
 class MirrorRepository(Protocol):
     def list_calendars(self, account_name: str) -> Sequence[str]: ...
