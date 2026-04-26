@@ -80,8 +80,16 @@ class ChronosApp(App[None]):
        The dialog box then carries an explicit width so the centring
        has something to act on (auto-width inside a flex parent
        expands to fill, defeating the centre rule). */
-    SyncConfirmScreen, ConfirmScreen, SyncProgressScreen {
+    SyncConfirmScreen, ConfirmScreen, SyncProgressScreen, EventDetailScreen {
         align: center middle;
+    }
+    #event-detail {
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+        width: 80;
+        height: auto;
+        max-height: 80%;
     }
     #sync-confirm-box, #confirm-box, #sync-progress-box {
         background: $surface;

@@ -5,7 +5,7 @@ from datetime import date
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.screen import Screen
+from textual.screen import ModalScreen
 from textual.widgets import Footer
 
 from chronos.domain import StoredComponent
@@ -13,7 +13,7 @@ from chronos.tui.bindings import detail_bindings
 from chronos.tui.widgets.event_view import EventView
 
 
-class EventDetailScreen(Screen[None]):
+class EventDetailScreen(ModalScreen[None]):
     """Read-only modal showing one component's details."""
 
     BINDINGS = detail_bindings()
