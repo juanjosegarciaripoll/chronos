@@ -32,8 +32,14 @@ src/chronos/
   fixture_flow.py            # Deterministic dev ingest (for local testing)
   ingest.py                  # ICS file ingestion: parse + mirror-write + index-upsert
                              #   with href=NULL. Entry point for CLI + MCP import.
-  mcp_server.py              # MCP tools: list_calendars, query_range, search,
-                             #   get_event, get_todo, import_ics
+  mcp_state.py               # MCP state file: port + auth token for the running
+                             #   TCP server; read/write/remove helpers.
+  mcp_transport.py           # TCP server, stdio bridge, stdio self-contained mode.
+                             #   serve_tcp / run_stdio_bridge / run_stdio_standalone.
+  mcp_server.py              # FastMCP tools: list_calendars, query_range, search,
+                             #   get_event, get_todo, import_ics.
+                             #   run_mcp_stdio (chronos mcp entry point),
+                             #   start_tcp_server (TUI / daemon).
   tui/
     app.py                   # ChronosApp + TuiServices dependency bundle
     bindings.py              # Per-screen binding builders + key constants
@@ -87,7 +93,10 @@ All writes go through a single `connection()` context manager that batches withi
 
 **Ingestion** (`ingest.py`). Parses an external `.ics` payload, splits it into per-UID groups, and writes each group to the mirror + index with `href=NULL`. The `href IS NULL` signal causes the next `chronos sync` to push the imported component to the server. Used by `cli.cmd_import` and the MCP `import_ics` tool. Additive only — no delete path.
 
-**MCP** (`mcp_server.py`). Tools backed by the same `IndexRepository` and `MirrorRepository`. Five read-only tools plus `import_ics` (additive write). No destructive tools — an over-eager LLM can add data but cannot delete events or calendars (see `ai/AGENTS.md §7.6`).
+**MCP** (`mcp_server.py`, `mcp_transport.py`, `mcp_state.py`). Three-module split:
+- `mcp_server.py` — FastMCP tools (five read + `import_ics`). `run_mcp_stdio` is the `chronos mcp` entry point; `start_tcp_server` is for the TUI / daemon. No destructive tools.
+- `mcp_transport.py` — asyncio TCP server (`serve_tcp`), transparent stdio↔TCP bridge (`run_stdio_bridge`), and self-contained stdio mode (`run_stdio_standalone`). `chronos mcp` auto-selects: bridge if a running instance is detected, self-contained otherwise.
+- `mcp_state.py` — state file (`user_data_dir() / "mcp_server.json"`) carrying the TCP port and auth token. Written by `start_tcp_server`, read by `run_mcp_stdio`.
 
 ## 3. Data flow
 

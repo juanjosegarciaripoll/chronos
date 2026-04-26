@@ -378,6 +378,81 @@ import_ics(
 
 **Acceptance:** `chronos import some.ics` against a single-account, single-calendar config drops the user into a one-line menu and ingests; `chronos import --account a --calendar c some.ics` runs non-interactively; `chronos sync` afterwards pushes the imported component to the server; the MCP `import_ics` tool is registered, refuses missing/unknown calendar inputs with a useful error, and the server still exposes no destructive tool; ingestion tests cover all three conflict modes; project-wide branch coverage stays ≥ 85%.
 
+## Milestone 14 — MCP TCP transport and stdio bridge
+
+Replace the single-transport `chronos mcp` command with a three-mode architecture that lets the TUI and future daemon modes share their running MCP session with external clients (Claude Desktop, editor integrations) without opening the calendar mirror from two processes. See `ai/MCP.md` for the detailed design; this milestone implements it. The `--port` and `--host` flags introduced in M10 are removed; transport selection is now automatic.
+
+**A. `src/chronos/paths.py`** — add `mcp_server_state_path() -> Path` returning `user_data_dir() / "mcp_server.json"`. No new dependency: the existing per-platform `user_data_dir()` is sufficient.
+
+**B. `src/chronos/mcp_state.py`** (new module)
+
+```
+@dataclass(frozen=True)
+class McpServerState:
+    port: int
+    token: str
+
+def write_state(state: McpServerState) -> None   # atomic temp+replace; chmod 0600 on POSIX
+def read_state() -> McpServerState | None        # None if file missing or malformed
+def remove_state() -> None                       # silent if already absent
+```
+
+State file is JSON: `{"port": N, "token": "..."}`. Uses `paths.mcp_server_state_path()`.
+
+**C. `src/chronos/mcp_transport.py`** (new module)
+
+Three async functions, all running under anyio (asyncio backend):
+
+`serve_tcp(server, *, state)` — accepts connections on `127.0.0.1:state.port` via `asyncio.start_server`. Per-connection flow:
+1. Read first line within `AUTH_TIMEOUT = 2.0 s`; parse as `{"auth": "<token>"}`.
+2. If token mismatch or timeout: close connection silently.
+3. Create two anyio memory object streams: `in_send/in_recv` typed `JSONRPCMessage | Exception` and `out_send/out_recv` typed `JSONRPCMessage`.
+4. Run three concurrent tasks inside `anyio.create_task_group()`:
+   - TCP reader: read lines → `JSONRPCMessage.model_validate_json(line)` → send to `in_send`.
+   - TCP writer: receive from `out_recv` → `msg.model_dump_json(by_alias=True, exclude_none=True)` + `\n` → write to `asyncio.StreamWriter`.
+   - MCP session: `await server.run(in_recv, out_send, server.create_initialization_options())`.
+5. Any pump task finishing (client disconnect, parse error) cancels the others.
+
+`run_stdio_bridge(state)` — transparent stdio↔TCP forwarder:
+1. Open TCP connection to `127.0.0.1:state.port` with `CONNECT_TIMEOUT = 0.5 s`.
+2. Send auth frame: `{"auth": state.token}\n`.
+3. Two tasks: `stdin.buffer → TCP writer` and `TCP reader → stdout.buffer`. Reads on stdin use `asyncio.get_event_loop().run_in_executor(None, ...)` to avoid blocking the event loop.
+
+`run_stdio_standalone(server)` — self-contained mode for when no TCP server is running. Uses `mcp.server.stdio.stdio_server()` exactly as the old `serve_stdio` did.
+
+**D. `src/chronos/mcp_server.py`** — replace `run_mcp_server(host, port)` with:
+
+`run_mcp_stdio(*, index, mirror)` — the single entry point for `chronos mcp`:
+1. Call `read_state()`.
+2. If a state exists: attempt `asyncio.open_connection("127.0.0.1", state.port)` within `CONNECT_TIMEOUT`. On success, call `run_stdio_bridge(state)` and return.
+3. On `ConnectionRefusedError`, `TimeoutError`, or any `OSError`: call `remove_state()`, fall through to step 4.
+4. Self-contained: `server = build_server(index=index, mirror=mirror)`, `await run_stdio_standalone(server)`.
+
+`start_tcp_server(*, index, mirror, port=0)` — starts the TCP server and writes the state file. Returns `McpServerState`. Intended for the TUI and future daemon; not called from the CLI. Port 0 means OS assigns an ephemeral port; the actual port is read back from the server socket and written to the state file. Removes the state file on exit (run inside `try/finally`).
+
+**E. `src/chronos/cli.py`**
+
+- Remove `--host` and `--port` from the `mcp` subparser.
+- `cmd_mcp(ctx)` uses `anyio.run` to call `run_mcp_stdio(index=ctx.index, mirror=ctx.mirror)` (no arguments beyond the repositories).
+
+**F. `tests/test_mcp_transport.py`** (new)
+
+`FramingTest` — start a real TCP server on an ephemeral port, connect, send auth, exchange a valid MCP `initialize` → `initialized` handshake, assert the response arrives.
+
+`AuthTest` — wrong token and missing auth frame both result in the connection being closed before any MCP data flows.
+
+`BridgeDetectionTest` — `run_mcp_stdio` with a stale state file (port where nothing listens) calls `remove_state()` and goes self-contained; state file is gone after the run.
+
+`BridgeForwardingTest` — start a TCP server in one task; start a bridge in another; exchange at least one MCP message end-to-end through the bridge.
+
+**G. Docs**
+
+`ai/ARCHITECTURE.md §1` — add `mcp_state.py` and `mcp_transport.py`.
+`ai/ARCHITECTURE.md §2` — update the MCP subsystem description.
+`ai/CONVENTIONS.md §7` — note that `anyio` is available as a transitive dep via `mcp` and may be used in transport code; no explicit `uv add` needed.
+
+**Acceptance:** `chronos mcp` with no state file goes self-contained and responds to `list_tools`; with a stale state file it cleans up and goes self-contained; `start_tcp_server` writes the state file and a `chronos mcp` run launched in the same test bridges to it; auth rejection test passes; project-wide branch coverage stays ≥ 85%.
+
 ## Followups / open questions
 
 - **Keyring-backed OAuth token storage** — M7 writes refresh tokens as plain JSON under `paths.oauth_token_dir()` with a best-effort 0600 chmod on POSIX (no-op on Windows). When the `keyring` dep is approved, migrate tokens to the system keyring for defence-in-depth.

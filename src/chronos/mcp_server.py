@@ -138,30 +138,86 @@ def build_server(*, index: IndexRepository, mirror: MirrorRepository) -> Any:
     """Return the underlying low-level MCP Server for in-process testing.
 
     Tests drive this via `mcp.shared.memory.create_connected_server_and_client_session`.
-    Production code should use `run_mcp_server` instead.
+    Production code should use `run_mcp_stdio` or `start_tcp_server`.
     """
     return build_mcp_server(index=index, mirror=mirror)._mcp_server  # pyright: ignore[reportPrivateUsage]
 
 
-def run_mcp_server(
+async def run_mcp_stdio(
     *,
     index: IndexRepository,
     mirror: MirrorRepository,
-    host: str = "127.0.0.1",
-    port: int | None = None,
 ) -> None:
-    """Run the MCP server until the client disconnects.
+    """Entry point for `chronos mcp`.
 
-    Uses stdio when *port* is ``None`` (local / Claude Desktop use).
-    Uses Streamable HTTP on *host*:*port* when *port* is given.
+    If a running TCP server is detected via the state file, acts as a
+    transparent stdio↔TCP bridge.  If the state file is missing or the
+    port is not reachable, runs a self-contained MCP session directly
+    over stdin/stdout.
     """
-    mcp = build_mcp_server(index=index, mirror=mirror)
-    if port is not None:
-        mcp.settings.host = host
-        mcp.settings.port = port
-        mcp.run(transport="streamable-http")
-    else:
-        mcp.run(transport="stdio")
+    import asyncio
+
+    from chronos.mcp_state import read_state, remove_state
+    from chronos.mcp_transport import (
+        CONNECT_TIMEOUT,
+        run_stdio_bridge,
+        run_stdio_standalone,
+    )
+
+    state = read_state()
+    if state is not None:
+        try:
+            _reader, _writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", state.port),
+                timeout=CONNECT_TIMEOUT,
+            )
+            _writer.close()
+            await run_stdio_bridge(state)
+            return
+        except (TimeoutError, ConnectionRefusedError, OSError):
+            remove_state()
+
+    server = build_server(index=index, mirror=mirror)
+    await run_stdio_standalone(server)
+
+
+async def start_tcp_server(
+    *,
+    index: IndexRepository,
+    mirror: MirrorRepository,
+    port: int = 0,
+) -> None:
+    """Start the MCP TCP server, write the state file, and run until cancelled.
+
+    Port 0 lets the OS assign an ephemeral port; the actual port is
+    read back from the server socket and written to the state file.
+    The state file is removed on exit.  Intended for the TUI and
+    future daemon mode — not called from the CLI.
+    """
+    import asyncio
+    import secrets
+
+    from chronos.mcp_state import McpServerState, remove_state, write_state
+    from chronos.mcp_transport import serve_tcp
+
+    token = secrets.token_hex(32)
+    server = build_server(index=index, mirror=mirror)
+
+    # Bind to get the actual port before writing the state file.
+    async def _noop(_r: asyncio.StreamReader, _w: asyncio.StreamWriter) -> None:
+        pass
+
+    probe = await asyncio.start_server(_noop, "127.0.0.1", port)
+    actual_port: int = probe.sockets[0].getsockname()[1]
+    probe.close()
+    await probe.wait_closed()
+
+    state = McpServerState(port=actual_port, token=token)
+    write_state(state)
+    try:
+        await serve_tcp(server, state=state)
+    finally:
+        remove_state()
 
 
 # Tool implementations --------------------------------------------------------
@@ -338,7 +394,8 @@ __all__ = [
     "SERVER_NAME",
     "build_mcp_server",
     "build_server",
-    "run_mcp_server",
+    "run_mcp_stdio",
+    "start_tcp_server",
 ]
 
 # Keep Sequence imported so basedpyright sees all collection types used

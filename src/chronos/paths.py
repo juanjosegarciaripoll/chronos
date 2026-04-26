@@ -106,6 +106,16 @@ def oauth_token_path(account_name: str) -> Path:
     return oauth_token_dir() / f"{account_name}.json"
 
 
+def mcp_server_state_path() -> Path:
+    """State file written by a running MCP TCP server (port + auth token).
+
+    The stdio bridge reads this file to find and delegate to the
+    long-running instance.  Lives in the user data dir alongside the
+    index so it shares the same per-user, per-platform scope.
+    """
+    return user_data_dir() / "mcp_server.json"
+
+
 def sync_lock_path() -> Path:
     """Path to the lockfile that gates concurrent `chronos sync` runs.
 

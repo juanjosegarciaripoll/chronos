@@ -338,9 +338,7 @@ def _occurrence_is_past(occurrence: Occurrence, now: datetime) -> bool:
 
 def format_todo_row(todo: VTodo) -> tuple[str, str, str, str]:
     due = (
-        todo.due.astimezone().strftime("%Y-%m-%d %H:%M")
-        if todo.due is not None
-        else ""
+        todo.due.astimezone().strftime("%Y-%m-%d %H:%M") if todo.due is not None else ""
     )
     summary = todo.summary or "(no summary)"
     calendar = todo.ref.calendar_name

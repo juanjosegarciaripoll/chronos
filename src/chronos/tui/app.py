@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from textual import work
 from textual.app import App
 
 from chronos.domain import AppConfig, SyncResult
@@ -154,6 +155,26 @@ class ChronosApp(App[None]):
 
     def on_mount(self) -> None:
         self.push_screen(MainScreen())  # pyright: ignore[reportUnknownMemberType]
+        if not self.is_headless:
+            self._start_mcp_server()
+
+    @work(exclusive=False, name="mcp-server", exit_on_error=False)
+    async def _start_mcp_server(self) -> None:
+        """Start the MCP TCP server on an ephemeral port.
+
+        Runs for the lifetime of the TUI on the app's own event loop
+        (no separate thread, per ai/MCP.md).  Failure is non-fatal:
+        the TUI continues normally without MCP.
+        """
+        from chronos.mcp_server import start_tcp_server
+
+        try:
+            await start_tcp_server(
+                index=self.services.index,
+                mirror=self.services.mirror,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning(f"MCP TCP server stopped: {exc}")
 
 
 __all__ = ["ChronosApp", "SyncRunner", "TuiServices"]

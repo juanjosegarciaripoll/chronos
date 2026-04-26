@@ -82,6 +82,8 @@ OAuth 2.0 support (Google, Microsoft) was evaluated against `google-auth`/`googl
 
 **Note on `caldav` vs raw `httpx` + XML.** Default to `caldav` for v1. Revisit only if it blocks a specific reliability property (idempotent PUT with `If-Match` semantics, conditional REPORT behaviour) that we cannot get through it.
 
+**`anyio`** is a transitive dependency via `mcp` and is therefore available without an explicit `uv add`. It may be used in transport code (`mcp_transport.py`) for task groups and memory streams. No uvicorn, starlette, fastapi, h11, or httpx for the server side — standard library `asyncio` plus `anyio` only.
+
 ## 8. Configuration
 
 - A single TOML file is the only configuration format.

@@ -405,21 +405,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tui", help="Launch the Textual UI.")
 
-    mcp_p = sub.add_parser(
+    sub.add_parser(
         "mcp",
-        help="Run the MCP server over stdio (default) or Streamable HTTP.",
-    )
-    mcp_p.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Bind address for Streamable HTTP transport (default: 127.0.0.1).",
-    )
-    mcp_p.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        metavar="PORT",
-        help="Port for Streamable HTTP transport. Omit to use stdio.",
+        help=(
+            "Run the MCP server. Bridges to a running chronos instance if "
+            "detected; otherwise runs self-contained over stdio."
+        ),
     )
 
     import_p = sub.add_parser(
@@ -607,11 +598,7 @@ def _dispatch(
     if command == "tui":
         return cmd_tui(ctx)
     if command == "mcp":
-        return cmd_mcp(
-            ctx,
-            host=getattr(args, "host", "127.0.0.1"),
-            port=getattr(args, "port", None),
-        )
+        return cmd_mcp(ctx)
     if command == "import":
         return cmd_import(
             ctx,
@@ -990,19 +977,19 @@ def cmd_doctor(ctx: CliContext) -> int:
     return report.exit_code
 
 
-def cmd_mcp(
-    ctx: CliContext, *, host: str = "127.0.0.1", port: int | None = None
-) -> int:
-    """Run the MCP server until the client disconnects.
+def cmd_mcp(ctx: CliContext) -> int:
+    """Run the MCP server.
 
-    Stdio: stdin/stdout carry the JSON-RPC stream (nothing may print to
-    stdout while the server runs).  HTTP: binds on *host*:*port* and
-    serves Streamable HTTP — suitable for Docker or remote clients.
+    Bridges to a running chronos instance when one is detected via the
+    state file; otherwise runs self-contained over stdio.  Nothing may
+    print to stdout while the server runs (stdin/stdout carry the
+    JSON-RPC stream).
     """
-    # Deferred import so `chronos --help` doesn't load the MCP stack.
-    from chronos.mcp_server import run_mcp_server
+    import anyio
 
-    run_mcp_server(index=ctx.index, mirror=ctx.mirror, host=host, port=port)
+    from chronos.mcp_server import run_mcp_stdio
+
+    anyio.run(lambda: run_mcp_stdio(index=ctx.index, mirror=ctx.mirror))
     return 0
 
 
