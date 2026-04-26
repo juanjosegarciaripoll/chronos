@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from chronos.domain import CalendarRef
 from chronos.protocols import IndexRepository
@@ -26,7 +26,9 @@ def title_for(viewed: date, days: int = DEFAULT_GRID_DAYS) -> str:
 def window_for(
     viewed: date, days: int = DEFAULT_GRID_DAYS
 ) -> tuple[datetime, datetime]:
-    start = datetime.combine(viewed, time.min, tzinfo=UTC)
+    # Anchored at local midnight (see views.day_window) so events at
+    # local 00:00–02:00 land in the right day for users not in UTC.
+    start = datetime.combine(viewed, time.min).astimezone()
     return start, start + timedelta(days=days)
 
 

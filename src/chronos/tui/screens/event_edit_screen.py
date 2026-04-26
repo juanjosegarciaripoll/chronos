@@ -58,11 +58,16 @@ class EventEditScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         ex = self._existing
         summary = ex.summary or "" if ex is not None else ""
+        # Pre-fill with the system-local representation so what the user
+        # sees here matches the times shown in the calendar views, and
+        # so a no-op edit round-trips without shifting by their UTC offset.
         start = (
-            ex.dtstart.isoformat() if ex is not None and ex.dtstart is not None else ""
+            _format_local(ex.dtstart)
+            if ex is not None and ex.dtstart is not None
+            else ""
         )
         end = (
-            ex.dtend.isoformat()
+            _format_local(ex.dtend)
             if isinstance(ex, VEvent) and ex.dtend is not None
             else ""
         )
@@ -147,6 +152,10 @@ class EventEditScreen(Screen[None]):
     @staticmethod
     def _calendar_label(ref: CalendarRef) -> str:
         return f"{ref.account_name} / {ref.calendar_name}"
+
+
+def _format_local(dt: datetime) -> str:
+    return dt.astimezone().strftime("%Y-%m-%dT%H:%M")
 
 
 __all__ = ["EditDraft", "EventEditScreen"]

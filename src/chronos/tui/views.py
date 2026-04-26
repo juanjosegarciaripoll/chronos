@@ -81,14 +81,23 @@ class OccurrenceRow:
     component: StoredComponent
 
 
+def _local_midnight(d: date) -> datetime:
+    # datetime.combine produces a naive datetime; .astimezone() with no
+    # argument presumes naive == system local and attaches the local
+    # tzinfo. The result is a tz-aware "local midnight" for `d`. The
+    # SQL layer converts back to UTC for the index query, so callers
+    # don't need to do that themselves.
+    return datetime.combine(d, time.min).astimezone()
+
+
 def day_window(viewed: date) -> tuple[datetime, datetime]:
-    start = datetime.combine(viewed, time.min, tzinfo=UTC)
+    start = _local_midnight(viewed)
     return start, start + timedelta(days=1)
 
 
 def week_window(viewed: date) -> tuple[datetime, datetime]:
     monday = viewed - timedelta(days=viewed.weekday())
-    start = datetime.combine(monday, time.min, tzinfo=UTC)
+    start = _local_midnight(monday)
     return start, start + timedelta(days=7)
 
 
@@ -98,15 +107,13 @@ def month_window(viewed: date) -> tuple[datetime, datetime]:
         nxt = first.replace(year=first.year + 1, month=1)
     else:
         nxt = first.replace(month=first.month + 1)
-    start = datetime.combine(first, time.min, tzinfo=UTC)
-    end = datetime.combine(nxt, time.min, tzinfo=UTC)
-    return start, end
+    return _local_midnight(first), _local_midnight(nxt)
 
 
 def agenda_window(
     today: date, days: int = DEFAULT_AGENDA_DAYS
 ) -> tuple[datetime, datetime]:
-    start = datetime.combine(today, time.min, tzinfo=UTC)
+    start = _local_midnight(today)
     return start, start + timedelta(days=days)
 
 

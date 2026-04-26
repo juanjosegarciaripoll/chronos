@@ -150,26 +150,31 @@ def _services(
 
 
 class WindowMathTest(unittest.TestCase):
-    def test_day_window_is_24_hours_utc(self) -> None:
+    # Windows are anchored at local midnight so events near midnight
+    # land in the user's local day rather than the UTC day. The
+    # assertions compare against `datetime(...).astimezone()` so they
+    # pass in any timezone (CI, dev box, user machine).
+
+    def test_day_window_is_24_hours_local(self) -> None:
         start, end = day_window(date(2026, 4, 25))
-        self.assertEqual(start, datetime(2026, 4, 25, tzinfo=UTC))
+        self.assertEqual(start, datetime(2026, 4, 25).astimezone())
         self.assertEqual(end - start, timedelta(days=1))
 
     def test_week_window_starts_on_monday(self) -> None:
         # 2026-04-25 is a Saturday.
         start, end = week_window(date(2026, 4, 25))
-        self.assertEqual(start, datetime(2026, 4, 20, tzinfo=UTC))
-        self.assertEqual(end, datetime(2026, 4, 27, tzinfo=UTC))
+        self.assertEqual(start, datetime(2026, 4, 20).astimezone())
+        self.assertEqual(end, datetime(2026, 4, 27).astimezone())
 
     def test_month_window_handles_december_rollover(self) -> None:
         start, end = month_window(date(2026, 12, 15))
-        self.assertEqual(start, datetime(2026, 12, 1, tzinfo=UTC))
-        self.assertEqual(end, datetime(2027, 1, 1, tzinfo=UTC))
+        self.assertEqual(start, datetime(2026, 12, 1).astimezone())
+        self.assertEqual(end, datetime(2027, 1, 1).astimezone())
 
     def test_month_window_mid_year(self) -> None:
         start, end = month_window(date(2026, 4, 25))
-        self.assertEqual(start, datetime(2026, 4, 1, tzinfo=UTC))
-        self.assertEqual(end, datetime(2026, 5, 1, tzinfo=UTC))
+        self.assertEqual(start, datetime(2026, 4, 1).astimezone())
+        self.assertEqual(end, datetime(2026, 5, 1).astimezone())
 
     def test_agenda_window_default_is_two_weeks(self) -> None:
         start, end = agenda_window(date(2026, 4, 25))
@@ -211,11 +216,8 @@ class ViewScreenTitleTest(unittest.TestCase):
         self.assertEqual(agenda_window_for(d, AgendaWindow.MONTH), month_window(d))
 
     def test_grid_window_for_default_is_four_days(self) -> None:
-        from datetime import time as _time
-
         start, end = grid_window_for(date(2026, 4, 25))
-        expected_start = datetime.combine(date(2026, 4, 25), _time.min, tzinfo=UTC)
-        self.assertEqual(start, expected_start)
+        self.assertEqual(start, datetime(2026, 4, 25).astimezone())
         self.assertEqual(end - start, timedelta(days=4))
 
 
@@ -805,13 +807,21 @@ class SearchAndDetailTest(unittest.TestCase):
 
 
 class DatePickerTest(unittest.TestCase):
-    def test_parse_naive_gets_utc(self) -> None:
+    def test_parse_naive_is_local(self) -> None:
+        # Naive input must be interpreted in the user's local timezone
+        # so what the editor accepts matches what the calendar views
+        # display. Compared via .astimezone(UTC) so the test passes
+        # in any timezone (CI, dev box, user machines).
         dt = parse_date_input("2026-05-01T09:00")
-        self.assertEqual(dt, datetime(2026, 5, 1, 9, tzinfo=UTC))
+        expected = datetime(2026, 5, 1, 9).astimezone()
+        self.assertEqual(dt.astimezone(UTC), expected.astimezone(UTC))
+        self.assertIsNotNone(dt.tzinfo)
 
     def test_parse_date_only(self) -> None:
         dt = parse_date_input("2026-05-01")
-        self.assertEqual(dt, datetime(2026, 5, 1, tzinfo=UTC))
+        expected = datetime(2026, 5, 1).astimezone()
+        self.assertEqual(dt.astimezone(UTC), expected.astimezone(UTC))
+        self.assertIsNotNone(dt.tzinfo)
 
     def test_parse_with_offset(self) -> None:
         dt = parse_date_input("2026-05-01T09:00+02:00")

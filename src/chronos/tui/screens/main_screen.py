@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, cast
 
 from dateutil.relativedelta import relativedelta
@@ -374,8 +374,12 @@ class MainScreen(Screen[None]):
                 for offset in range(self._grid_days)
             ]
             for occ_row in rows:
+                # Bucket by local date so an event at 23:00 local Apr 26
+                # lands in the Apr 26 column even when its UTC date is
+                # Apr 27. The timeline-grid cell logic also uses local
+                # dates, so the two must agree.
                 day_index = (
-                    occ_row.occurrence.start.astimezone(UTC).date() - self._viewed_date
+                    occ_row.occurrence.start.astimezone().date() - self._viewed_date
                 ).days
                 if 0 <= day_index < self._grid_days:
                     buckets[day_index][1].append(occ_row)

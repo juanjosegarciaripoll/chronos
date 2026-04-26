@@ -27,7 +27,7 @@ Layer 1 carries most of the assertions. Layer 2 verifies that the bindings, scre
 - `views.gather_todos` — only ACTIVE VTODOs, sorted by due date.
 - `views.search_components` — substring match across summary/description/location, case-insensitive, empty-needle = empty result.
 - `views.render_event_detail` — VEvent vs VTodo formatting; missing fields skipped.
-- `widgets.date_picker.parse_date_input` — naive datetime gets UTC, malformed input raises `InvalidDateError`.
+- `widgets.date_picker.parse_date_input` — naive datetime is interpreted in the system local timezone (so the editor's input matches what the calendar views display), malformed input raises `InvalidDateError`.
 - `widgets.event_list.EventList._row_key` — round-trips through stored ref+recurrence_id.
 - `screens.*.title_for` — month names, week range formatting.
 

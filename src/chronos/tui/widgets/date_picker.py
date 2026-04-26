@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from textual.widgets import Input
 
@@ -10,10 +10,12 @@ class InvalidDateError(ValueError):
 
 
 def parse_date_input(value: str) -> datetime:
-    """Parse a `YYYY-MM-DDTHH:MM` (or `YYYY-MM-DD`) into a UTC datetime.
+    """Parse a `YYYY-MM-DDTHH:MM` (or `YYYY-MM-DD`) into a tz-aware datetime.
 
-    A naive datetime gets `UTC` attached. Raises `InvalidDateError`
-    with a user-facing message otherwise.
+    A naive datetime is interpreted in the system local timezone — so
+    "2026-04-26T11:00" typed by a user in Madrid means 11:00 Madrid
+    local, matching what the calendar views display. Raises
+    `InvalidDateError` with a user-facing message on malformed input.
     """
     text = value.strip()
     if not text:
@@ -25,7 +27,10 @@ def parse_date_input(value: str) -> datetime:
             f"could not parse {text!r} (expected YYYY-MM-DD or YYYY-MM-DDTHH:MM)"
         ) from exc
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
+        # astimezone() on a naive datetime presumes it is in the system
+        # local timezone, then attaches that tzinfo. Storage downstream
+        # converts to UTC; display converts back via astimezone().
+        dt = dt.astimezone()
     return dt
 
 
