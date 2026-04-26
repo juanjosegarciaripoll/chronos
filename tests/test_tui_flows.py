@@ -1673,6 +1673,8 @@ class DraftAndDetailScreenWiringTest(unittest.TestCase):
             summary="X",
             dtstart=datetime(2026, 5, 1, 9, tzinfo=UTC),
             dtend=None,
+            location="",
+            description="",
             existing=event,
         )
         self.assertIs(draft.existing, event)

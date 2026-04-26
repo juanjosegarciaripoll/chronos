@@ -429,7 +429,15 @@ class MainScreen(Screen[None]):
             ref = ComponentRef(
                 draft.target.account_name, draft.target.calendar_name, uid
             )
-            ics = build_event_ics(uid, draft.summary, draft.dtstart, draft.dtend, now)
+            ics = build_event_ics(
+                uid,
+                draft.summary,
+                draft.dtstart,
+                draft.dtend,
+                now,
+                location=draft.location,
+                description=draft.description,
+            )
             services.mirror.write(
                 ResourceRef(draft.target.account_name, draft.target.calendar_name, uid),
                 ics,
@@ -440,8 +448,8 @@ class MainScreen(Screen[None]):
                 etag=None,
                 raw_ics=ics,
                 summary=draft.summary,
-                description=None,
-                location=None,
+                description=draft.description or None,
+                location=draft.location or None,
                 dtstart=draft.dtstart,
                 dtend=draft.dtend,
                 status=None,
@@ -459,7 +467,13 @@ class MainScreen(Screen[None]):
         else:
             existing = draft.existing
             ics = build_event_ics(
-                existing.ref.uid, draft.summary, draft.dtstart, draft.dtend, now
+                existing.ref.uid,
+                draft.summary,
+                draft.dtstart,
+                draft.dtend,
+                now,
+                location=draft.location,
+                description=draft.description,
             )
             services.mirror.write(existing.ref.resource, ics)
             updated = VEvent(
@@ -468,8 +482,8 @@ class MainScreen(Screen[None]):
                 etag=existing.etag,
                 raw_ics=ics,
                 summary=draft.summary,
-                description=existing.description,
-                location=existing.location,
+                description=draft.description or None,
+                location=draft.location or None,
                 dtstart=draft.dtstart,
                 dtend=draft.dtend,
                 status=existing.status,

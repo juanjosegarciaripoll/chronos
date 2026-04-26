@@ -12,6 +12,9 @@ def build_event_ics(
     dtstart: datetime,
     dtend: datetime | None,
     now: datetime,
+    *,
+    location: str = "",
+    description: str = "",
 ) -> bytes:
     lines = [
         "BEGIN:VCALENDAR",
@@ -24,13 +27,12 @@ def build_event_ics(
     ]
     if dtend is not None:
         lines.append(f"DTEND:{_fmt_dt(dtend)}")
-    lines.extend(
-        [
-            f"SUMMARY:{_escape_text(summary)}",
-            "END:VEVENT",
-            "END:VCALENDAR",
-        ]
-    )
+    lines.append(f"SUMMARY:{_escape_text(summary)}")
+    if location:
+        lines.append(f"LOCATION:{_escape_text(location)}")
+    if description:
+        lines.append(f"DESCRIPTION:{_escape_text(description)}")
+    lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
 

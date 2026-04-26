@@ -23,6 +23,8 @@ class EditDraft:
     summary: str
     dtstart: datetime
     dtend: datetime | None
+    location: str
+    description: str
     existing: StoredComponent | None
 
 
@@ -54,18 +56,20 @@ class EventEditScreen(Screen[None]):
         self._error: str | None = None
 
     def compose(self) -> ComposeResult:
-        existing = self._existing
-        existing_summary = existing.summary if existing is not None else ""
-        existing_start = (
-            existing.dtstart.isoformat()
-            if existing is not None and existing.dtstart is not None
+        ex = self._existing
+        summary = ex.summary or "" if ex is not None else ""
+        start = (
+            ex.dtstart.isoformat()
+            if ex is not None and ex.dtstart is not None
             else ""
         )
-        existing_end = (
-            existing.dtend.isoformat()
-            if isinstance(existing, VEvent) and existing.dtend is not None
+        end = (
+            ex.dtend.isoformat()
+            if isinstance(ex, VEvent) and ex.dtend is not None
             else ""
         )
+        location = ex.location or "" if ex is not None else ""
+        description = ex.description or "" if ex is not None else ""
         with Vertical(id="event-edit"):
             yield Label("Calendar:")
             yield Select(
@@ -75,11 +79,15 @@ class EventEditScreen(Screen[None]):
                 id="edit-calendar",
             )
             yield Label("Summary:")
-            yield Input(value=existing_summary or "", id="edit-summary")
+            yield Input(value=summary, id="edit-summary")
             yield Label("Start (YYYY-MM-DDTHH:MM):")
-            yield DatePicker(value=existing_start or "", placeholder="YYYY-MM-DDTHH:MM")
-            yield Label("End (optional):")
-            yield Input(value=existing_end or "", id="edit-end")
+            yield DatePicker(value=start, placeholder="YYYY-MM-DDTHH:MM")
+            yield Label("End (optional, YYYY-MM-DDTHH:MM):")
+            yield Input(value=end, id="edit-end")
+            yield Label("Location (optional):")
+            yield Input(value=location, id="edit-location")
+            yield Label("Description (optional):")
+            yield Input(value=description, id="edit-description")
             yield Label("", id="edit-error")
         yield Footer()
 
@@ -118,11 +126,15 @@ class EventEditScreen(Screen[None]):
             from chronos.tui.widgets.date_picker import parse_date_input
 
             dtend = parse_date_input(end_text)
+        location_input: Input = self.query_one("#edit-location", Input)
+        description_input: Input = self.query_one("#edit-description", Input)
         return EditDraft(
             target=target,
             summary=summary,
             dtstart=dtstart,
             dtend=dtend,
+            location=location_input.value.strip(),
+            description=description_input.value.strip(),
             existing=self._existing,
         )
 
