@@ -282,7 +282,9 @@ def _sync_calendar(
                 now=now,
                 cancel_event=cancel_event,
             )
-            new_sync_token = _best_sync_token(server_sync_token, session, calendar.url)
+            new_sync_token = _best_sync_token(
+                server_sync_token, session, calendar.url, server_ctag=server_ctag
+            )
 
     else:
         logger.info(
@@ -301,7 +303,9 @@ def _sync_calendar(
             now=now,
             cancel_event=cancel_event,
         )
-        new_sync_token = _best_sync_token(server_sync_token, session, calendar.url)
+        new_sync_token = _best_sync_token(
+            server_sync_token, session, calendar.url, server_ctag=server_ctag
+        )
 
     # Default: keep the CTag we read at the top of this run.
     # Re-reading after an unchanged slow path is *worse* on servers
@@ -678,16 +682,25 @@ def _best_sync_token(
     prefetched: str | None,
     session: CalDAVSession,
     calendar_url: str,
+    *,
+    server_ctag: str | None,
 ) -> str | None:
     """Return a sync-token for storing after a slow-path sync.
 
     Prefers the token already fetched during `list_calendars` so we
-    avoid a redundant `get_sync_token` round-trip.  Falls back to
-    `_acquire_sync_token` when `prefetched` is None (the server did not
-    return a token in the discovery PROPFIND).
+    avoid a redundant `get_sync_token` round-trip.
+
+    When `server_ctag` is None the server returned no CTag from both the
+    discovery PROPFIND and the per-calendar fallback call.  `getctag` and
+    `DAV:sync-token` are typically implemented together; a server that
+    returns no CTag almost certainly does not support `DAV:sync-token`
+    either, so the `get_sync_token` PROPFIND would just waste a round-trip
+    and return None.  Skip it.
     """
     if prefetched is not None:
         return prefetched
+    if server_ctag is None:
+        return None
     return _acquire_sync_token(session, calendar_url)
 
 
