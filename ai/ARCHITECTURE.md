@@ -30,8 +30,10 @@ src/chronos/
   mutations.py               # Shared write helpers: build_event_ics,
                              #   generate_uid, trashed_copy. Used by CLI + TUI.
   fixture_flow.py            # Deterministic dev ingest (for local testing)
-  mcp_server.py              # Read-only MCP tools (list_calendars, query_range,
-                             #   search, get_event, get_todo)
+  ingest.py                  # ICS file ingestion: parse + mirror-write + index-upsert
+                             #   with href=NULL. Entry point for CLI + MCP import.
+  mcp_server.py              # MCP tools: list_calendars, query_range, search,
+                             #   get_event, get_todo, import_ics
   tui/
     app.py                   # ChronosApp + TuiServices dependency bundle
     bindings.py              # Per-screen binding builders + key constants
@@ -83,7 +85,9 @@ All writes go through a single `connection()` context manager that batches withi
 
 **CLI** (`cli.py`). `argparse` dispatch to subcommands. Same repositories as the TUI; nothing TUI-specific leaks in. Write helpers shared with the TUI (`build_event_ics`, `generate_uid`, `trashed_copy`) live in `mutations.py`.
 
-**MCP** (`mcp_server.py`). Read-only tools backed by the same `IndexRepository`. No write or mutating tools without explicit approval.
+**Ingestion** (`ingest.py`). Parses an external `.ics` payload, splits it into per-UID groups, and writes each group to the mirror + index with `href=NULL`. The `href IS NULL` signal causes the next `chronos sync` to push the imported component to the server. Used by `cli.cmd_import` and the MCP `import_ics` tool. Additive only — no delete path.
+
+**MCP** (`mcp_server.py`). Tools backed by the same `IndexRepository` and `MirrorRepository`. Five read-only tools plus `import_ics` (additive write). No destructive tools — an over-eager LLM can add data but cannot delete events or calendars (see `ai/AGENTS.md §7.6`).
 
 ## 3. Data flow
 

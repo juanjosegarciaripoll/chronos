@@ -1,25 +1,30 @@
-"""Read-only MCP server over the chronos local index.
+"""MCP server over the chronos local index.
 
-Exposes five tools, all backed by the same `IndexRepository` the CLI
-and TUI read from:
+Exposes six tools backed by the same `IndexRepository` and
+`MirrorRepository` the CLI and TUI use:
 
 - `list_calendars` — distinct (account, calendar) pairs known locally.
 - `query_range(start, end)` — occurrences whose start falls inside
-  the half-open ISO-8601 window. Pulls from the `occurrences` cache,
-  so it sees expanded recurrences just like the TUI's day/week view.
+  the half-open ISO-8601 window.
 - `search(query, limit?)` — FTS5 full-text search over summary /
   description / location.
 - `get_event(account, calendar, uid)` — full VEVENT detail by UID.
 - `get_todo(account, calendar, uid)` — full VTODO detail by UID.
+- `import_ics(account, calendar, ics, on_conflict?)` — ingest a raw
+  RFC 5545 payload into a calendar.  Additive only; no delete path.
 
-There are no write tools by design (see `ai/AGENTS.md` §7.6); MCP
-clients can read but not mutate, so an over-eager LLM can't delete
-the user's calendar.
+No destructive tools are present (see `ai/AGENTS.md` §7.6`): an
+over-eager LLM can add data but cannot delete events or calendars.
 
-The server is split from its transport. `build_server(index=...)`
-returns an `mcp.server.lowlevel.Server` that tests can drive via
-mcp's in-process transports; `serve_stdio(index=...)` is the thin
-async wrapper the CLI's `chronos mcp` command awaits.
+Transports
+----------
+stdio (default)
+    ``chronos mcp``
+    Use with Claude Desktop or any local MCP client.
+
+Streamable HTTP
+    ``chronos mcp --port 8765``
+    Use in Docker or remote deployments.
 """
 
 from __future__ import annotations
@@ -29,9 +34,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
 
-import mcp.types as types
-from mcp.server.lowlevel import Server
-from mcp.server.stdio import stdio_server
+from mcp.server.fastmcp import FastMCP
 
 from chronos.domain import (
     CalendarRef,
@@ -42,180 +45,123 @@ from chronos.domain import (
     VEvent,
     VTodo,
 )
-from chronos.protocols import IndexRepository
+from chronos.protocols import IndexRepository, MirrorRepository
 
 SERVER_NAME = "chronos"
 
 
-def build_server(*, index: IndexRepository) -> Server[dict[str, Any], Any]:
-    """Construct the MCP `Server` with chronos's read-only tools.
+def build_mcp_server(*, index: IndexRepository, mirror: MirrorRepository) -> FastMCP:
+    """Build a `FastMCP` instance with all chronos tools registered.
 
-    The returned server holds a reference to `index`; callers control
-    the index's lifecycle (the CLI opens/closes a `SqliteIndexRepository`
-    around `serve_stdio`).
+    The returned server captures `index` and `mirror` in closures;
+    callers control their lifecycles.
     """
-    server: Server[dict[str, Any], Any] = Server(SERVER_NAME)
+    mcp: FastMCP = FastMCP(SERVER_NAME)
 
-    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def _list_tools() -> list[types.Tool]:  # pyright: ignore[reportUnusedFunction]
-        return _TOOL_DEFINITIONS
+    @mcp.tool()
+    def list_calendars() -> str:  # pyright: ignore[reportUnusedFunction]
+        """List the (account, calendar) pairs with at least one component in
+        the local index. Use these names verbatim in subsequent calls."""
+        return json.dumps(_tool_list_calendars(index), indent=2)
 
-    @server.call_tool()  # type: ignore[untyped-decorator]
-    async def _call_tool(  # pyright: ignore[reportUnusedFunction]
-        name: str, arguments: dict[str, Any]
-    ) -> list[types.TextContent]:
-        payload: object
-        if name == "list_calendars":
-            payload = _tool_list_calendars(index)
-        elif name == "query_range":
-            payload = _tool_query_range(
-                index,
-                start=_require_str(arguments, "start"),
-                end=_require_str(arguments, "end"),
-            )
-        elif name == "search":
-            payload = _tool_search(
-                index,
-                query=_require_str(arguments, "query"),
-                limit=_optional_int(arguments, "limit", 50),
-            )
-        elif name == "get_event":
-            payload = _tool_get_component(
+    @mcp.tool()
+    def query_range(start: str, end: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        """Return occurrences (expanded recurrences included) whose start
+        falls inside the half-open window [start, end). Both arguments
+        must be ISO-8601 datetimes."""
+        return json.dumps(_tool_query_range(index, start=start, end=end), indent=2)
+
+    @mcp.tool()
+    def search(query: str, limit: int = 50) -> str:  # pyright: ignore[reportUnusedFunction]
+        """Full-text search (FTS5) over summary / description / location of
+        every event and todo across all calendars."""
+        return json.dumps(_tool_search(index, query=query, limit=limit), indent=2)
+
+    @mcp.tool()
+    def get_event(account: str, calendar: str, uid: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        """Fetch one VEVENT by (account, calendar, uid). Returns JSON null if
+        not found or if the UID belongs to a VTODO."""
+        return json.dumps(
+            _tool_get_component(
                 index,
                 kind=ComponentKind.VEVENT,
-                account=_require_str(arguments, "account"),
-                calendar=_require_str(arguments, "calendar"),
-                uid=_require_str(arguments, "uid"),
-            )
-        elif name == "get_todo":
-            payload = _tool_get_component(
-                index,
-                kind=ComponentKind.VTODO,
-                account=_require_str(arguments, "account"),
-                calendar=_require_str(arguments, "calendar"),
-                uid=_require_str(arguments, "uid"),
-            )
-        else:
-            raise ValueError(f"unknown tool: {name!r}")
-        return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
-
-    return server
-
-
-async def serve_stdio(*, index: IndexRepository) -> None:
-    """Run the MCP server over stdio until the client disconnects.
-
-    Used by the `chronos mcp` CLI command — the wrapper that wires
-    stdin/stdout into the MCP transport. `index` is supplied by the
-    caller; the server doesn't open or close it.
-    """
-    server = build_server(index=index)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
+                account=account,
+                calendar=calendar,
+                uid=uid,
+            ),
+            indent=2,
         )
 
+    @mcp.tool()
+    def get_todo(account: str, calendar: str, uid: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        """Fetch one VTODO by (account, calendar, uid). Returns JSON null if
+        not found or if the UID belongs to a VEVENT."""
+        return json.dumps(
+            _tool_get_component(
+                index,
+                kind=ComponentKind.VTODO,
+                account=account,
+                calendar=calendar,
+                uid=uid,
+            ),
+            indent=2,
+        )
 
-# Tool definitions ------------------------------------------------------------
+    @mcp.tool()
+    def import_ics(  # pyright: ignore[reportUnusedFunction]
+        account: str,
+        calendar: str,
+        ics: str,
+        on_conflict: str = "skip",
+    ) -> str:
+        """Ingest a raw RFC 5545 iCalendar payload into a local calendar.
+        Components land with href=NULL so the next chronos sync pushes
+        them to the server. Both account and calendar must match a pair
+        from list_calendars. on_conflict: skip (default), replace, or rename.
+        Additive only — cannot delete events or calendars."""
+        return json.dumps(
+            _tool_import_ics(
+                index,
+                mirror,
+                account=account,
+                calendar=calendar,
+                ics=ics,
+                on_conflict=on_conflict,
+            ),
+            indent=2,
+        )
 
-_LIST_CALENDARS_TOOL = types.Tool(
-    name="list_calendars",
-    description=(
-        "List the (account, calendar) pairs that have at least one component "
-        "in the local index. Use these names verbatim in subsequent calls."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-)
+    return mcp
 
-_QUERY_RANGE_TOOL = types.Tool(
-    name="query_range",
-    description=(
-        "Return occurrences (expanded recurrences included) whose start time "
-        "falls inside the half-open window `[start, end)`. `start` and `end` "
-        "must be ISO-8601 datetimes."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "start": {
-                "type": "string",
-                "description": "ISO-8601 datetime, inclusive lower bound.",
-            },
-            "end": {
-                "type": "string",
-                "description": "ISO-8601 datetime, exclusive upper bound.",
-            },
-        },
-        "required": ["start", "end"],
-        "additionalProperties": False,
-    },
-)
 
-_SEARCH_TOOL = types.Tool(
-    name="search",
-    description=(
-        "Full-text search (FTS5) over summary / description / location of "
-        "every event and todo across all calendars."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "FTS5 query string."},
-            "limit": {
-                "type": "integer",
-                "description": "Maximum hits to return (default 50).",
-                "minimum": 1,
-                "maximum": 500,
-            },
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-)
+def build_server(*, index: IndexRepository, mirror: MirrorRepository) -> Any:
+    """Return the underlying low-level MCP Server for in-process testing.
 
-_GET_EVENT_TOOL = types.Tool(
-    name="get_event",
-    description="Fetch one VEVENT by (account, calendar, uid).",
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "account": {"type": "string"},
-            "calendar": {"type": "string"},
-            "uid": {"type": "string"},
-        },
-        "required": ["account", "calendar", "uid"],
-        "additionalProperties": False,
-    },
-)
+    Tests drive this via `mcp.shared.memory.create_connected_server_and_client_session`.
+    Production code should use `run_mcp_server` instead.
+    """
+    return build_mcp_server(index=index, mirror=mirror)._mcp_server  # pyright: ignore[reportPrivateUsage]
 
-_GET_TODO_TOOL = types.Tool(
-    name="get_todo",
-    description="Fetch one VTODO by (account, calendar, uid).",
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "account": {"type": "string"},
-            "calendar": {"type": "string"},
-            "uid": {"type": "string"},
-        },
-        "required": ["account", "calendar", "uid"],
-        "additionalProperties": False,
-    },
-)
 
-_TOOL_DEFINITIONS: list[types.Tool] = [
-    _LIST_CALENDARS_TOOL,
-    _QUERY_RANGE_TOOL,
-    _SEARCH_TOOL,
-    _GET_EVENT_TOOL,
-    _GET_TODO_TOOL,
-]
+def run_mcp_server(
+    *,
+    index: IndexRepository,
+    mirror: MirrorRepository,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+) -> None:
+    """Run the MCP server until the client disconnects.
+
+    Uses stdio when *port* is ``None`` (local / Claude Desktop use).
+    Uses Streamable HTTP on *host*:*port* when *port* is given.
+    """
+    mcp = build_mcp_server(index=index, mirror=mirror)
+    if port is not None:
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run(transport="stdio")
 
 
 # Tool implementations --------------------------------------------------------
@@ -273,17 +219,56 @@ def _tool_get_component(
         ComponentKind.VEVENT if isinstance(component, VEvent) else ComponentKind.VTODO
     )
     if actual_kind != kind:
-        # Asked for a VEVENT but found a VTODO (or vice versa). Treat
-        # as not-found rather than returning the wrong shape.
+        # Asked for a VEVENT but found a VTODO (or vice versa): treat as
+        # not-found so an LLM asking for an event doesn't get a todo.
         return None
     return _full_dict(component)
+
+
+def _tool_import_ics(
+    index: IndexRepository,
+    mirror: MirrorRepository,
+    *,
+    account: str,
+    calendar: str,
+    ics: str,
+    on_conflict: str,
+) -> dict[str, Any]:
+    from chronos.ingest import ingest_ics_bytes
+
+    if on_conflict not in ("skip", "replace", "rename"):
+        raise ValueError(
+            f"on_conflict must be 'skip', 'replace', or 'rename'; got {on_conflict!r}"
+        )
+
+    known = {(ref.account_name, ref.calendar_name) for ref in index.list_calendars()}
+    if (account, calendar) not in known:
+        pairs = sorted(f"{a}/{c}" for a, c in known)
+        raise ValueError(
+            f"unknown (account={account!r}, calendar={calendar!r}). "
+            f"Known calendars: {pairs}"
+        )
+
+    report = ingest_ics_bytes(
+        ics.encode("utf-8"),
+        target=CalendarRef(account_name=account, calendar_name=calendar),
+        mirror=mirror,
+        index=index,
+        on_conflict=on_conflict,  # type: ignore[arg-type]
+    )
+    return {
+        "imported": report.imported,
+        "skipped": report.skipped,
+        "replaced": report.replaced,
+        "renamed": report.renamed,
+        "details": list(report.details),
+    }
 
 
 # Serialisation helpers -------------------------------------------------------
 
 
 def _summary_dict(component: StoredComponent) -> dict[str, Any]:
-    """Compact projection used in `search` results."""
     return {
         "account": component.ref.account_name,
         "calendar": component.ref.calendar_name,
@@ -301,7 +286,6 @@ def _summary_dict(component: StoredComponent) -> dict[str, Any]:
 
 
 def _full_dict(component: StoredComponent) -> dict[str, Any]:
-    """Expanded projection used in `get_event` / `get_todo` responses."""
     base = _summary_dict(component)
     base["description"] = component.description
     base["location"] = component.location
@@ -350,29 +334,13 @@ def _parse_datetime(value: str, *, label: str) -> datetime:
         raise ValueError(f"{label}: not an ISO-8601 datetime: {value!r}") from exc
 
 
-def _require_str(arguments: dict[str, Any], key: str) -> str:
-    value = arguments.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"missing/invalid string argument {key!r}")
-    return value
-
-
-def _optional_int(arguments: dict[str, Any], key: str, default: int) -> int:
-    value = arguments.get(key)
-    if value is None:
-        return default
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"argument {key!r} must be an integer")
-    return int(value)
-
-
 __all__ = [
     "SERVER_NAME",
+    "build_mcp_server",
     "build_server",
-    "serve_stdio",
+    "run_mcp_server",
 ]
 
-
-# Marker so tests can detect the chronos.mcp_server module without
-# importing private helpers.
+# Keep Sequence imported so basedpyright sees all collection types used
+# in return annotations of the tool helpers above.
 _ = Sequence

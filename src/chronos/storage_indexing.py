@@ -95,11 +95,11 @@ def _project_resource(
             uid=uid,
             recurrence_id=component.recurrence_id,
         )
-        out.append(_build_stored(ref, raw, component, now))
+        out.append(build_stored_component(ref, raw, component, now))
     return out
 
 
-def _build_stored(
+def build_stored_component(
     ref: ComponentRef,
     raw: bytes,
     component: ParsedComponent,
@@ -145,3 +145,11 @@ def _build_stored(
 def synthetic_uid(account: str, calendar: str, raw: bytes) -> str:
     digest = hashlib.sha256(f"{account}|{calendar}|".encode() + raw).hexdigest()[:32]
     return f"chronos-syn-{digest}"
+
+
+__all__ = [
+    "IndexingResult",
+    "build_stored_component",
+    "index_calendar",
+    "synthetic_uid",
+]

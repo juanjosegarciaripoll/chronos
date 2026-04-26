@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Literal, TextIO
 
 from chronos.authorization import Authorization
 from chronos.bootstrap import (
@@ -154,7 +154,12 @@ def main(
         err.write(f"config error: {exc}\n")
         return 2
     try:
-        return _dispatch(args, ctx)
+        return _dispatch(
+            args,
+            ctx,
+            prompt=prompt or default_prompt,
+            is_interactive=is_interactive or default_is_interactive,
+        )
     finally:
         if owns_context:
             ctx.index.close()
@@ -400,9 +405,56 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tui", help="Launch the Textual UI.")
 
-    sub.add_parser(
+    mcp_p = sub.add_parser(
         "mcp",
-        help="Run the read-only MCP server over stdio.",
+        help="Run the MCP server over stdio (default) or Streamable HTTP.",
+    )
+    mcp_p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address for Streamable HTTP transport (default: 127.0.0.1).",
+    )
+    mcp_p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Port for Streamable HTTP transport. Omit to use stdio.",
+    )
+
+    import_p = sub.add_parser(
+        "import",
+        help="Ingest one or more .ics files into a local calendar.",
+    )
+    import_p.add_argument(
+        "paths",
+        nargs="+",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "One or more .ics files or directories (directories are walked "
+            "non-recursively for *.ics files)."
+        ),
+    )
+    import_p.add_argument(
+        "--account",
+        default=None,
+        help="Target account name. Prompted interactively if omitted.",
+    )
+    import_p.add_argument(
+        "--calendar",
+        default=None,
+        help="Target calendar name. Prompted interactively if omitted.",
+    )
+    import_p.add_argument(
+        "--on-conflict",
+        choices=("skip", "replace", "rename"),
+        default="skip",
+        dest="on_conflict",
+        help=(
+            "What to do when a UID already exists locally: "
+            "skip (default), replace (overwrite), or rename (new UID)."
+        ),
     )
 
     sub.add_parser(
@@ -507,7 +559,13 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
+def _dispatch(
+    args: argparse.Namespace,
+    ctx: CliContext,
+    *,
+    prompt: PromptFn,
+    is_interactive: IsInteractiveFn,
+) -> int:
     command = str(args.command)
     if command == "sync":
         return cmd_sync(ctx, force=bool(getattr(args, "force", False)))
@@ -549,7 +607,21 @@ def _dispatch(args: argparse.Namespace, ctx: CliContext) -> int:
     if command == "tui":
         return cmd_tui(ctx)
     if command == "mcp":
-        return cmd_mcp(ctx)
+        return cmd_mcp(
+            ctx,
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", None),
+        )
+    if command == "import":
+        return cmd_import(
+            ctx,
+            paths=list(args.paths),
+            account_name=args.account,
+            calendar_name=args.calendar,
+            on_conflict=args.on_conflict,
+            prompt=prompt,
+            is_interactive=is_interactive,
+        )
     ctx.stderr.write(f"unknown command: {command}\n")
     return 2
 
@@ -918,22 +990,162 @@ def cmd_doctor(ctx: CliContext) -> int:
     return report.exit_code
 
 
-def cmd_mcp(ctx: CliContext) -> int:
-    """Run the read-only MCP server until the client disconnects.
+def cmd_mcp(
+    ctx: CliContext, *, host: str = "127.0.0.1", port: int | None = None
+) -> int:
+    """Run the MCP server until the client disconnects.
 
-    Stdio transport: stdin/stdout carry the MCP JSON-RPC stream, so
-    nothing chronos-side may print to stdout (logging is on stderr,
-    which we already configured by the time `_dispatch` runs).
+    Stdio: stdin/stdout carry the JSON-RPC stream (nothing may print to
+    stdout while the server runs).  HTTP: binds on *host*:*port* and
+    serves Streamable HTTP — suitable for Docker or remote clients.
     """
-    # Imported lazily so the mcp dependency only loads when actually
-    # running the server, keeping `chronos --help` and other commands
-    # snappy.
-    import anyio
+    # Deferred import so `chronos --help` doesn't load the MCP stack.
+    from chronos.mcp_server import run_mcp_server
 
-    from chronos.mcp_server import serve_stdio
-
-    anyio.run(lambda: serve_stdio(index=ctx.index))
+    run_mcp_server(index=ctx.index, mirror=ctx.mirror, host=host, port=port)
     return 0
+
+
+def cmd_import(
+    ctx: CliContext,
+    *,
+    paths: list[Path],
+    account_name: str | None,
+    calendar_name: str | None,
+    on_conflict: Literal["skip", "replace", "rename"],
+    prompt: PromptFn,
+    is_interactive: IsInteractiveFn,
+) -> int:
+    """Ingest .ics files into a local calendar.
+
+    Resolves the target calendar interactively when ``--account`` /
+    ``--calendar`` are omitted.  In non-interactive mode both flags are
+    required; missing either returns exit code 2.
+    """
+    from chronos.ingest import IngestError, ingest_ics_bytes
+
+    target = _resolve_import_calendar(
+        ctx,
+        account_name=account_name,
+        calendar_name=calendar_name,
+        prompt=prompt,
+        is_interactive=is_interactive,
+    )
+    if target is None:
+        return 2
+
+    files: list[Path] = []
+    for p in paths:
+        if p.is_dir():
+            files.extend(sorted(p.glob("*.ics")))
+        elif p.exists():
+            files.append(p)
+        else:
+            ctx.stderr.write(f"import: {p}: no such file or directory\n")
+
+    if not files:
+        ctx.stderr.write("import: no .ics files found\n")
+        return 2
+
+    total_imported = total_skipped = total_replaced = total_renamed = 0
+    all_details: list[str] = []
+    errors = 0
+
+    for file_path in files:
+        try:
+            payload = file_path.read_bytes()
+        except OSError as exc:
+            ctx.stderr.write(f"import: {file_path}: {exc}\n")
+            errors += 1
+            continue
+        try:
+            report = ingest_ics_bytes(
+                payload,
+                target=target,
+                mirror=ctx.mirror,
+                index=ctx.index,
+                on_conflict=on_conflict,
+            )
+        except IngestError as exc:
+            ctx.stderr.write(f"import: {file_path}: {exc}\n")
+            errors += 1
+            continue
+        total_imported += report.imported
+        total_skipped += report.skipped
+        total_replaced += report.replaced
+        total_renamed += report.renamed
+        all_details.extend(report.details)
+
+    ctx.stdout.write(
+        f"imported {total_imported}, skipped {total_skipped}, "
+        f"replaced {total_replaced}, renamed {total_renamed}\n"
+    )
+    for detail in all_details:
+        ctx.stdout.write(f"  {detail}\n")
+
+    if errors > 0:
+        return 1
+    acted = total_imported + total_replaced + total_renamed
+    if acted == 0 and total_skipped > 0:
+        return 1  # everything skipped — signal to scripts
+    return 0
+
+
+def _resolve_import_calendar(
+    ctx: CliContext,
+    *,
+    account_name: str | None,
+    calendar_name: str | None,
+    prompt: PromptFn,
+    is_interactive: IsInteractiveFn,
+) -> CalendarRef | None:
+    """Return the target `CalendarRef`, prompting when flags are absent.
+
+    Returns ``None`` and writes to stderr on any unresolvable situation.
+    """
+    if account_name is not None and calendar_name is not None:
+        known_accounts = {a.name for a in ctx.config.accounts}
+        if account_name not in known_accounts:
+            ctx.stderr.write(f"import: unknown account {account_name!r}\n")
+            return None
+        return CalendarRef(account_name=account_name, calendar_name=calendar_name)
+
+    if not is_interactive():
+        ctx.stderr.write(
+            "import: --account and --calendar are required in non-interactive mode\n"
+        )
+        return None
+
+    calendars = list(ctx.index.list_calendars())
+    if not calendars:
+        ctx.stderr.write(
+            "import: no calendars in local index; run `chronos sync` first\n"
+        )
+        return None
+
+    if account_name is not None:
+        calendars = [c for c in calendars if c.account_name == account_name]
+        if not calendars:
+            ctx.stderr.write(f"import: no calendars for account {account_name!r}\n")
+            return None
+
+    if len(calendars) == 1:
+        return calendars[0]
+
+    ctx.stdout.write("Select target calendar:\n")
+    for i, cal in enumerate(calendars, 1):
+        ctx.stdout.write(f"  {i}. {cal.account_name}/{cal.calendar_name}\n")
+
+    raw = prompt(f"Enter number [1-{len(calendars)}]: ")
+    try:
+        choice = int(raw.strip())
+    except ValueError:
+        ctx.stderr.write("import: invalid selection\n")
+        return None
+    if not (1 <= choice <= len(calendars)):
+        ctx.stderr.write("import: selection out of range\n")
+        return None
+    return calendars[choice - 1]
 
 
 def cmd_tui(ctx: CliContext) -> int:

@@ -1,9 +1,9 @@
-"""End-to-end tests for the read-only MCP server.
+"""End-to-end tests for the MCP server.
 
 Each test stands up an in-process MCP server backed by a real
-`SqliteIndexRepository` (no mocking), connects a `ClientSession`
-through `create_connected_server_and_client_session`, and exercises
-the five tools.
+`SqliteIndexRepository` and `VdirMirrorRepository` (no mocking),
+connects a `ClientSession` through
+`create_connected_server_and_client_session`, and exercises all tools.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from chronos.domain import (
 )
 from chronos.index_store import SqliteIndexRepository
 from chronos.mcp_server import SERVER_NAME, build_server
+from chronos.storage import VdirMirrorRepository
 
 
 def _ref(account: str, calendar: str, uid: str) -> ComponentRef:
@@ -98,8 +99,11 @@ def _vtodo(
 @asynccontextmanager
 async def _connected_session(
     index: SqliteIndexRepository,
+    mirror: VdirMirrorRepository | None = None,
 ) -> AsyncIterator[ClientSession]:
-    server = build_server(index=index)
+    if mirror is None:
+        mirror = _McpServerTestCase._default_mirror  # type: ignore[attr-defined]
+    server = build_server(index=index, mirror=mirror)
     async with create_connected_server_and_client_session(
         server, raise_exceptions=True
     ) as session:
@@ -115,48 +119,62 @@ def _text(content: list[TextContent]) -> str:
     return block.text
 
 
-class McpServerTestCase(unittest.IsolatedAsyncioTestCase):
+class _McpServerTestCase(unittest.IsolatedAsyncioTestCase):
+    _default_mirror: VdirMirrorRepository  # set in setUp
+
     def setUp(self) -> None:
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.mirror = VdirMirrorRepository(tmp / "mirror")
+        _McpServerTestCase._default_mirror = self.mirror
         self.index = SqliteIndexRepository(tmp / "index.sqlite3")
         self.addCleanup(self.index.close)
 
 
+# Keep the old name as an alias so the helper above can reference it
+# before subclasses exist.
+McpServerTestCase = _McpServerTestCase
+
+
 class ListToolsTest(McpServerTestCase):
-    async def test_advertises_exactly_five_read_only_tools(self) -> None:
-        async with _connected_session(self.index) as session:
+    async def test_advertises_exactly_six_tools(self) -> None:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.list_tools()
         names = {tool.name for tool in result.tools}
         self.assertEqual(
             names,
-            {"list_calendars", "query_range", "search", "get_event", "get_todo"},
+            {
+                "list_calendars",
+                "query_range",
+                "search",
+                "get_event",
+                "get_todo",
+                "import_ics",
+            },
         )
 
-    async def test_no_write_tools_present(self) -> None:
-        # Belt-and-braces: AGENTS.md §7.6 forbids write tools. Any
-        # tool name suggestive of mutation (`create`, `update`,
-        # `delete`, `set`, `add`, `remove`, `put`, `push`, `sync`)
-        # is rejected here.
+    async def test_no_destructive_tools_present(self) -> None:
+        # AGENTS.md §7.6: MCP tools may add data but not destroy it.
+        # Any tool name suggestive of deletion or bulk overwrite is
+        # rejected here. `import_ics` is intentionally absent from the
+        # forbidden list because it is additive.
         forbidden_substrings = (
-            "create",
-            "update",
             "delete",
-            "set_",
-            "add_",
             "remove",
-            "put",
-            "push",
-            "sync",
             "trash",
+            "purge",
+            "drop",
+            "clear",
+            "wipe",
+            "destroy",
         )
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             tools = (await session.list_tools()).tools
         for tool in tools:
             for forbidden in forbidden_substrings:
                 self.assertNotIn(
                     forbidden,
                     tool.name.lower(),
-                    f"tool {tool.name!r} looks like a write tool",
+                    f"tool {tool.name!r} looks like a destructive tool",
                 )
 
 
@@ -165,7 +183,7 @@ class ListCalendarsToolTest(McpServerTestCase):
         self.index.upsert_component(_vevent(account="personal", calendar="work"))
         self.index.upsert_component(_vevent(account="personal", calendar="home"))
         self.index.upsert_component(_vevent(account="work-acct", calendar="team"))
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool("list_calendars", {})
         payload = json.loads(_text(result.content))
         self.assertEqual(
@@ -178,7 +196,7 @@ class ListCalendarsToolTest(McpServerTestCase):
         )
 
     async def test_empty_index_returns_empty_list(self) -> None:
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool("list_calendars", {})
         self.assertEqual(json.loads(_text(result.content)), [])
 
@@ -223,7 +241,7 @@ class QueryRangeToolTest(McpServerTestCase):
 
     async def test_returns_only_in_range_occurrences(self) -> None:
         self._seed_with_occurrences()
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "query_range",
                 {
@@ -238,7 +256,7 @@ class QueryRangeToolTest(McpServerTestCase):
         self.assertEqual(rows[0]["start"], "2026-05-01T09:00:00+00:00")
 
     async def test_inverted_window_raises(self) -> None:
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "query_range",
                 {
@@ -249,7 +267,7 @@ class QueryRangeToolTest(McpServerTestCase):
         self.assertTrue(result.isError)
 
     async def test_invalid_iso_raises(self) -> None:
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "query_range",
                 {"start": "not-a-date", "end": "2026-05-02T00:00:00+00:00"},
@@ -279,14 +297,14 @@ class SearchToolTest(McpServerTestCase):
 
     async def test_matches_summary(self) -> None:
         self._seed()
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool("search", {"query": "planning"})
         rows = json.loads(_text(result.content))
         self.assertEqual([r["uid"] for r in rows], ["planning@example.com"])
 
     async def test_matches_description_and_location(self) -> None:
         self._seed()
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             sync_hits = json.loads(
                 _text((await session.call_tool("search", {"query": "sync"})).content)
             )
@@ -301,7 +319,7 @@ class SearchToolTest(McpServerTestCase):
             self.index.upsert_component(
                 _vevent(uid=f"meeting-{i}@example.com", summary=f"Meeting {i}")
             )
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool("search", {"query": "Meeting", "limit": 2})
         rows = json.loads(_text(result.content))
         self.assertEqual(len(rows), 2)
@@ -317,7 +335,7 @@ class GetEventToolTest(McpServerTestCase):
                 location="Boardroom",
             )
         )
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "get_event",
                 {
@@ -334,7 +352,7 @@ class GetEventToolTest(McpServerTestCase):
         self.assertIn("BEGIN:VCALENDAR", payload["raw_ics"])
 
     async def test_unknown_uid_returns_null_payload(self) -> None:
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "get_event",
                 {
@@ -350,7 +368,7 @@ class GetEventToolTest(McpServerTestCase):
         # by get_event — the kind discriminates so an LLM asking
         # for an event doesn't get a todo silently substituted.
         self.index.upsert_component(_vtodo(uid="task@example.com"))
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "get_event",
                 {
@@ -365,7 +383,7 @@ class GetEventToolTest(McpServerTestCase):
 class GetTodoToolTest(McpServerTestCase):
     async def test_returns_full_todo(self) -> None:
         self.index.upsert_component(_vtodo(uid="taxes@example.com"))
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "get_todo",
                 {
@@ -381,7 +399,7 @@ class GetTodoToolTest(McpServerTestCase):
 
     async def test_get_todo_on_a_vevent_returns_null(self) -> None:
         self.index.upsert_component(_vevent(uid="meeting@example.com"))
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
                 "get_todo",
                 {
@@ -393,9 +411,133 @@ class GetTodoToolTest(McpServerTestCase):
         self.assertIsNone(json.loads(_text(result.content)))
 
 
+class ImportIcsToolTest(McpServerTestCase):
+    def _seed_calendar(self) -> None:
+        """Put one event in the index so list_calendars returns a known pair."""
+        self.index.upsert_component(_vevent())
+
+    async def test_import_ics_happy_path(self) -> None:
+        from tests import corpus
+
+        self._seed_calendar()
+        ics = corpus.simple_event().decode("utf-8")
+        async with _connected_session(self.index, self.mirror) as session:
+            result = await session.call_tool(
+                "import_ics",
+                {"account": "personal", "calendar": "work", "ics": ics},
+            )
+        payload = json.loads(_text(result.content))
+        self.assertEqual(payload["imported"], 1)
+        self.assertEqual(payload["skipped"], 0)
+
+    async def test_import_ics_skip_on_conflict(self) -> None:
+        from tests import corpus
+
+        self._seed_calendar()
+        ics = corpus.simple_event().decode("utf-8")
+        async with _connected_session(self.index, self.mirror) as session:
+            await session.call_tool(
+                "import_ics",
+                {"account": "personal", "calendar": "work", "ics": ics},
+            )
+            result = await session.call_tool(
+                "import_ics",
+                {
+                    "account": "personal",
+                    "calendar": "work",
+                    "ics": ics,
+                    "on_conflict": "skip",
+                },
+            )
+        payload = json.loads(_text(result.content))
+        self.assertEqual(payload["skipped"], 1)
+        self.assertEqual(payload["imported"], 0)
+
+    async def test_import_ics_replace_on_conflict(self) -> None:
+        from tests import corpus
+
+        self._seed_calendar()
+        ics = corpus.simple_event().decode("utf-8")
+        async with _connected_session(self.index, self.mirror) as session:
+            await session.call_tool(
+                "import_ics",
+                {"account": "personal", "calendar": "work", "ics": ics},
+            )
+            result = await session.call_tool(
+                "import_ics",
+                {
+                    "account": "personal",
+                    "calendar": "work",
+                    "ics": ics,
+                    "on_conflict": "replace",
+                },
+            )
+        payload = json.loads(_text(result.content))
+        self.assertEqual(payload["replaced"], 1)
+
+    async def test_import_ics_rename_on_conflict(self) -> None:
+        from tests import corpus
+
+        self._seed_calendar()
+        ics = corpus.simple_event().decode("utf-8")
+        async with _connected_session(self.index, self.mirror) as session:
+            await session.call_tool(
+                "import_ics",
+                {"account": "personal", "calendar": "work", "ics": ics},
+            )
+            result = await session.call_tool(
+                "import_ics",
+                {
+                    "account": "personal",
+                    "calendar": "work",
+                    "ics": ics,
+                    "on_conflict": "rename",
+                },
+            )
+        payload = json.loads(_text(result.content))
+        self.assertEqual(payload["renamed"], 1)
+
+    async def test_import_ics_unknown_calendar_returns_error_with_valid_list(
+        self,
+    ) -> None:
+        from tests import corpus
+
+        self._seed_calendar()
+        ics = corpus.simple_event().decode("utf-8")
+        async with _connected_session(self.index, self.mirror) as session:
+            result = await session.call_tool(
+                "import_ics",
+                {
+                    "account": "personal",
+                    "calendar": "no-such-calendar",
+                    "ics": ics,
+                },
+            )
+        self.assertTrue(result.isError)
+        # Error message names the valid calendars so the agent can retry.
+        self.assertIn("personal/work", _text(result.content))
+
+    async def test_import_ics_invalid_on_conflict_returns_error(self) -> None:
+        from tests import corpus
+
+        self._seed_calendar()
+        ics = corpus.simple_event().decode("utf-8")
+        async with _connected_session(self.index, self.mirror) as session:
+            result = await session.call_tool(
+                "import_ics",
+                {
+                    "account": "personal",
+                    "calendar": "work",
+                    "ics": ics,
+                    "on_conflict": "explode",
+                },
+            )
+        self.assertTrue(result.isError)
+
+
 class ServerMetadataTest(McpServerTestCase):
     async def test_server_name_and_initialization(self) -> None:
-        async with _connected_session(self.index) as session:
+        async with _connected_session(self.index, self.mirror) as session:
             # `initialize()` was called inside the helper; round-trip
             # a list_tools to confirm the server is responsive.
             tools = await session.list_tools()

@@ -307,6 +307,77 @@ Replace the "Medium path — … (described but not yet implemented)" note with 
 
 **Acceptance:** medium path exercises zero `calendar_query` calls for a single-event change on a calendar with a stored token; expired-token test passes without manual intervention; all conflict cases still covered; project-wide branch coverage stays ≥ 85%.
 
+## Milestone 13 — ICS file ingestion
+
+Let users (and AI agents) pull an external `.ics` file — meeting invites, exports from another client, a colleague's published feed — into a local calendar, where it then flows through the normal `href IS NULL` push path on the next sync. This is also the first additive-write surface on the MCP server. The MCP rule we actually care about is "no destructive tools" (no event deletion, no calendar deletion / rename, no bulk overwrite of existing data) — additive ingestion is in scope. Update `ai/AGENTS.md §7.6` and `ai/SPECIFICATIONS.md §3` accordingly when this milestone ships.
+
+**A. Shared ingestion core — `src/chronos/ingest.py` (new module)**
+
+One function does the actual work; CLI and MCP wrap it.
+
+```
+def ingest_ics_bytes(
+    payload: bytes,
+    *,
+    target: CalendarRef,
+    mirror: MirrorRepository,
+    index: IndexRepository,
+    on_conflict: Literal["skip", "replace", "rename"] = "skip",
+) -> IngestReport: ...
+```
+
+- Parses via `ical_parser` into a list of `VEvent` / `VTodo` (rejects `VJOURNAL` / `VFREEBUSY` with a clear error — out of v1 scope per `SPECIFICATIONS.md §4`).
+- For each component:
+  - If `UID` is missing or empty, generate one via `mutations.generate_uid` (this is the one place we synthesise on the *write* path; defensive, not for round-trip — note in `ai/AGENTS.md §7.10` is about server data, this is user-supplied input, so the rule does not apply, but document the deviation in the module docstring).
+  - Look up `(target, uid)` in the index. On collision: `skip` (default), `replace` (overwrite mirror + index, keep existing href if any), or `rename` (assign a fresh UID and ingest as new).
+  - Write the `.ics` to the mirror via `MirrorRepository.write_new` / `overwrite`, then project into the index via `storage_indexing` with `href = NULL` so the next `chronos sync` pushes it.
+- `IngestReport` captures `imported`, `skipped`, `replaced`, `renamed`, plus per-component reasons. Returned to caller for display / tool response.
+- Recurrence overrides (multiple `VEVENT`s sharing a UID with `RECURRENCE-ID`) ingest as a single mirror file — same shape as a sync-fetched master + override bundle (`RECURRENCE.md §3`).
+
+**B. CLI — `chronos import` subcommand (in `cli.py`)**
+
+- `chronos import PATH [PATH ...] [--account NAME] [--calendar NAME] [--on-conflict {skip,replace,rename}]`
+- `PATH` may be a file or a directory; directories are walked for `*.ics` non-recursively (recursive ingest is a future ask, not now).
+- Calendar resolution:
+  1. Both flags supplied → resolve directly; error if account or calendar unknown.
+  2. Only `--account` supplied → list that account's calendars and prompt for one (use the existing `default_prompt` infra; non-interactive stdin → exit 2 with a clear message naming `--calendar`).
+  3. Neither supplied → list every `(account, calendar)` known to the index, prompt the user with a numbered menu.
+- Re-uses the bootstrap-style prompt (`bootstrap.PromptFn` / `default_prompt`) so the existing test harness for `chronos init` covers the prompt path.
+- Prints the `IngestReport` summary on stdout; exits non-zero if every component was skipped due to conflicts and `--on-conflict skip` was in effect (so scripts notice).
+
+**C. MCP — `import_ics` tool (in `mcp_server.py`)**
+
+Registered alongside the existing five read tools, no opt-in flag. Additive writes are allowed; the MCP server still has no event-delete or calendar-delete tools, and `on_conflict="replace"` is the only path that overwrites an existing UID — by explicit caller request, on a single component, never in bulk.
+
+Tool schema:
+```
+import_ics(
+    account: str,           # required
+    calendar: str,          # required
+    ics: str,               # raw RFC 5545 text
+    on_conflict: "skip" | "replace" | "rename" = "skip"
+) -> { imported: int, skipped: int, replaced: int, renamed: int, details: [...] }
+```
+
+- Both `account` and `calendar` are **required** inputs (no interactive prompting — MCP has no user-facing UI). Missing or unknown account/calendar → tool error with the list of valid `(account, calendar)` pairs in the error body so the agent can retry.
+- The tool calls the same `ingest.ingest_ics_bytes` core. The MCP layer does no policy of its own beyond input validation.
+- Update `mcp_server.py` module docstring + `ai/SPECIFICATIONS.md §3` and `ai/AGENTS.md §7.6` to record the actual rule: "MCP tools may add data but not destroy it — no delete-event, no delete-calendar, no bulk-overwrite tools."
+
+**D. Tests**
+
+- `tests/test_ingest.py` — unit tests for `ingest_ics_bytes` against a real `SqliteIndexRepository` + temp-dir mirror: single VEVENT, recurring master + override bundle, missing-UID synthesis, all three `on_conflict` modes, VJOURNAL rejection, malformed ICS rejection.
+- `tests/test_cli.py` — extend with `import` cases: file argument with both flags, directory argument, missing-flag interactive prompt (driven through the captured-stdout harness with a scripted `PromptFn`), non-interactive missing-flag → exit 2.
+- `tests/test_mcp_server.py` — extend with `import_ics`: happy path, missing account / calendar errors include the valid-pairs list, all three conflict modes round-trip, and a regression test that no destructive tool (`delete_event`, `delete_calendar`, etc.) is registered on the server.
+- Followup sync test (in `tests/test_sync.py` or a new `test_ingest_sync.py`): ingest a file, then run a sync against `FakeCalDAVSession` and assert the imported component PUTs to the server (proving the `href IS NULL` plumbing carries through).
+
+**E. Docs**
+
+- `ai/ARCHITECTURE.md §1` — add `ingest.py` to the package layout listing.
+- `ai/ARCHITECTURE.md §2` — one-paragraph "Ingestion" subsystem entry pointing at the shared core and noting the two entry points (CLI, opt-in MCP).
+- `config-sample.toml` and `docs/` — no schema change needed, but document the new commands once `docs/` lands (M11).
+
+**Acceptance:** `chronos import some.ics` against a single-account, single-calendar config drops the user into a one-line menu and ingests; `chronos import --account a --calendar c some.ics` runs non-interactively; `chronos sync` afterwards pushes the imported component to the server; the MCP `import_ics` tool is registered, refuses missing/unknown calendar inputs with a useful error, and the server still exposes no destructive tool; ingestion tests cover all three conflict modes; project-wide branch coverage stays ≥ 85%.
+
 ## Followups / open questions
 
 - **Keyring-backed OAuth token storage** — M7 writes refresh tokens as plain JSON under `paths.oauth_token_dir()` with a best-effort 0600 chmod on POSIX (no-op on Windows). When the `keyring` dep is approved, migrate tokens to the system keyring for defence-in-depth.
