@@ -170,7 +170,10 @@ class TimelineGrid(DataTable[str]):
                 # the slot where the event starts; render a blank bar in
                 # continuation slots so the block reads as one unit.
                 style = self._event_start_style if is_start else self._event_body_style
-                cells.append(Text(content if is_start else "", style=style))
+                # Continuation cells use a single space so Textual
+                # paints the background — an empty string causes the
+                # DataTable to skip cell rendering entirely.
+                cells.append(Text(content if is_start else " ", style=style))
                 self._cells[(row_index, col_idx)] = ref
             elif shaded:
                 cells.append(Text(content, style=_SHADED_ROW_STYLE))
