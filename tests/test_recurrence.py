@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from chronos.domain import (
+    CalendarRef,
     ComponentRef,
     LocalStatus,
     VEvent,
@@ -13,6 +17,7 @@ from chronos.recurrence import (
     MAX_OCCURRENCES,
     RecurrenceExpansionError,
     expand,
+    populate_occurrences,
 )
 from tests import corpus
 
@@ -369,3 +374,121 @@ class VtodoExpansionTest(unittest.TestCase):
         )
         self.assertEqual(len(occs), 1)
         self.assertEqual(occs[0].start, due)
+
+
+class PopulateOccurrencesTest(unittest.TestCase):
+    """Tests for `populate_occurrences` focusing on the `uids` filter
+    and `cancel_event` early-exit. Requires a real SQLite index."""
+
+    def setUp(self) -> None:
+        from chronos.index_store import SqliteIndexRepository
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.index = SqliteIndexRepository(tmp / "index.sqlite3")
+        self.addCleanup(self.index.close)
+        self.calendar = CalendarRef(account_name=ACCOUNT, calendar_name=CALENDAR)
+        self.window_start = datetime(2026, 1, 1, tzinfo=UTC)
+        self.window_end = datetime(2027, 1, 1, tzinfo=UTC)
+
+    def _insert(self, uid: str, raw_ics: bytes, dtstart: datetime) -> None:
+        from chronos.domain import LocalStatus
+
+        self.index.upsert_component(
+            _event(uid, raw_ics, dtstart=dtstart, dtend=dtstart + (dtstart - dtstart))
+        )
+        # Re-insert with a proper dtend so the occurrence window lands.
+        from chronos.domain import ComponentRef, VEvent
+
+        ref = ComponentRef(account_name=ACCOUNT, calendar_name=CALENDAR, uid=uid)
+        ev = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=raw_ics,
+            summary=uid,
+            description=None,
+            location=None,
+            dtstart=dtstart,
+            dtend=dtstart + __import__("datetime").timedelta(hours=1),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        self.index.upsert_component(ev)
+
+    def test_uids_filter_expands_only_specified_masters(self) -> None:
+        # Insert three non-recurring masters; only expand uid-a.
+        dt = datetime(2026, 5, 1, 9, tzinfo=UTC)
+        for uid in ("uid-a", "uid-b", "uid-c"):
+            self._insert(uid, corpus.simple_event(), dt)
+
+        count = populate_occurrences(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            uids=frozenset({"uid-a"}),
+        )
+        # One occurrence written (uid-a only).
+        self.assertEqual(count, 1)
+        occs = self.index.query_occurrences(
+            self.calendar, self.window_start, self.window_end
+        )
+        self.assertEqual(len(occs), 1)
+        self.assertEqual(occs[0].ref.uid, "uid-a")
+
+    def test_uids_empty_set_expands_nothing(self) -> None:
+        dt = datetime(2026, 5, 1, 9, tzinfo=UTC)
+        self._insert("uid-x", corpus.simple_event(), dt)
+        count = populate_occurrences(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            uids=frozenset(),
+        )
+        self.assertEqual(count, 0)
+        occs = self.index.query_occurrences(
+            self.calendar, self.window_start, self.window_end
+        )
+        self.assertEqual(len(occs), 0)
+
+    def test_uids_none_expands_all(self) -> None:
+        dt = datetime(2026, 5, 1, 9, tzinfo=UTC)
+        for uid in ("uid-1", "uid-2"):
+            self._insert(uid, corpus.simple_event(), dt)
+        count = populate_occurrences(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            uids=None,
+        )
+        self.assertEqual(count, 2)
+
+    def test_cancel_event_stops_expansion_early(self) -> None:
+        dt = datetime(2026, 5, 1, 9, tzinfo=UTC)
+        for uid in ("uid-p", "uid-q", "uid-r"):
+            self._insert(uid, corpus.simple_event(), dt)
+        cancel = threading.Event()
+        expanded: list[str] = []
+        original_set = self.index.set_occurrences
+
+        def set_and_cancel(ref, occs):  # type: ignore[no-untyped-def]
+            expanded.append(ref.uid)
+            original_set(ref, occs)
+            cancel.set()
+
+        self.index.set_occurrences = set_and_cancel  # type: ignore[method-assign]
+        populate_occurrences(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            cancel_event=cancel,
+        )
+        # Only one master expanded before the loop noticed the cancel.
+        self.assertEqual(len(expanded), 1)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
@@ -107,17 +108,32 @@ def populate_occurrences(
     calendar: CalendarRef,
     window_start: datetime,
     window_end: datetime,
+    uids: frozenset[str] | None = None,
     max_occurrences: int = MAX_OCCURRENCES,
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """Rebuild the `occurrences` cache for one calendar + window.
+
+    When `uids` is supplied only masters whose UID is in that set are
+    re-expanded; pass `None` to rebuild all masters (initial sync).
 
     Returns the number of occurrence rows written. Masters whose RRULE
     expands to more than `max_occurrences` instances inside the window
     are skipped (their cache row is left empty); they remain in the
     `components` table for diagnostics.
+
+    When `cancel_event` is set by another thread the loop stops after
+    the current master finishes and commits whatever has been written so
+    far. The caller is responsible for raising `SyncCancelled` after
+    this returns if early termination matters for its flow.
     """
     components = index.list_calendar_components(calendar)
-    masters = [c for c in components if c.ref.recurrence_id is None]
+    all_masters = [c for c in components if c.ref.recurrence_id is None]
+    masters = (
+        [m for m in all_masters if m.ref.uid in uids]
+        if uids is not None
+        else all_masters
+    )
     overrides_by_uid: dict[str, list[StoredComponent]] = {}
     for component in components:
         if component.ref.recurrence_id is not None:
@@ -137,6 +153,8 @@ def populate_occurrences(
         )
     with index.connection():
         for processed, master in enumerate(masters, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             try:
                 occurrences = expand(
                     master=master,

@@ -135,6 +135,7 @@ def sync_account(
                 mirror=mirror,
                 index=index,
                 now=clock,
+                cancel_event=cancel_event,
             )
         except SyncHaltError as exc:
             # The guard's message already includes the calendar name,
@@ -188,6 +189,7 @@ def _sync_calendar(
     mirror: MirrorRepository,
     index: IndexRepository,
     now: datetime,
+    cancel_event: threading.Event | None = None,
 ) -> CalendarSyncStats:
     """Reconcile one calendar.
 
@@ -217,6 +219,9 @@ def _sync_calendar(
     # Carry the existing sync_token forward by default; updated below
     # when the medium or slow path returns a new one.
     new_sync_token: str | None = prior_state.sync_token if prior_state else None
+    # UIDs whose masters need occurrence re-expansion. None means "all"
+    # (used on the fast path where we didn't track individual changes).
+    affected_uids: frozenset[str] | None = None
 
     if _ctag_matches(prior_state, server_ctag):
         logger.info(
@@ -244,7 +249,7 @@ def _sync_calendar(
             prior_state.sync_token,
         )
         try:
-            stats, new_sync_token = _medium_path_reconcile(
+            stats, new_sync_token, affected_uids = _medium_path_reconcile(
                 account=account,
                 calendar=calendar,
                 session=session,
@@ -252,6 +257,7 @@ def _sync_calendar(
                 index=index,
                 now=now,
                 sync_token=prior_state.sync_token,
+                cancel_event=cancel_event,
             )
         except SyncTokenExpiredError as exc:
             logger.info(
@@ -260,13 +266,14 @@ def _sync_calendar(
                 calendar.calendar_name,
                 exc,
             )
-            stats = _slow_path_reconcile(
+            stats, affected_uids = _slow_path_reconcile(
                 account=account,
                 calendar=calendar,
                 session=session,
                 mirror=mirror,
                 index=index,
                 now=now,
+                cancel_event=cancel_event,
             )
             new_sync_token = _acquire_sync_token(session, calendar.url)
 
@@ -278,13 +285,14 @@ def _sync_calendar(
             prior_ctag_repr if prior_ctag_repr is not None else "(none)",
             server_ctag if server_ctag is not None else "(none)",
         )
-        stats = _slow_path_reconcile(
+        stats, affected_uids = _slow_path_reconcile(
             account=account,
             calendar=calendar,
             session=session,
             mirror=mirror,
             index=index,
             now=now,
+            cancel_event=cancel_event,
         )
         new_sync_token = _acquire_sync_token(session, calendar.url)
 
@@ -330,7 +338,13 @@ def _sync_calendar(
             calendar=calendar_ref,
             window_start=now - _OCCURRENCE_WINDOW_PAST,
             window_end=now + _OCCURRENCE_WINDOW_FUTURE,
+            uids=affected_uids,
+            cancel_event=cancel_event,
         )
+        # Raise after the transaction commits so partial expansion is
+        # preserved on disk — the next sync will complete the rest.
+        if cancel_event is not None and cancel_event.is_set():
+            raise SyncCancelled
 
     return stats
 
@@ -386,7 +400,13 @@ def _slow_path_reconcile(
     mirror: MirrorRepository,
     index: IndexRepository,
     now: datetime,
-) -> CalendarSyncStats:
+    cancel_event: threading.Event | None = None,
+) -> tuple[CalendarSyncStats, frozenset[str]]:
+    """Full calendar-query reconcile.
+
+    Returns `(stats, affected_uids)` where `affected_uids` is the set
+    of component UIDs whose masters need occurrence re-expansion.
+    """
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     server_resources = session.calendar_query(calendar.url)
     server_map: dict[str, str] = dict(server_resources)
@@ -404,6 +424,19 @@ def _slow_path_reconcile(
         removed=len(removed_hrefs),
         local_hrefs=local_by_href.keys(),
         server_hrefs=server_map.keys(),
+    )
+
+    # Collect UIDs before any index mutations so local_by_href is intact.
+    deleted_uids = frozenset(
+        local_by_href[h].ref.uid for h in removed_hrefs if h in local_by_href
+    )
+    changed_hrefs = [
+        href
+        for href, etag in server_map.items()
+        if href in local_by_href and etag and local_by_href[href].etag != etag
+    ]
+    changed_uids = frozenset(
+        local_by_href[h].ref.uid for h in changed_hrefs if h in local_by_href
     )
 
     errors: list[str] = []
@@ -425,6 +458,7 @@ def _slow_path_reconcile(
         hrefs=new_hrefs,
         now=now,
         errors=errors,
+        cancel_event=cancel_event,
     )
 
     # When the server returns an empty etag (CalDAV gateways that omit
@@ -432,11 +466,6 @@ def _slow_path_reconcile(
     # — trust the local copy and skip the refetch. CTag still drives
     # slow-path entry, so missed in-place modifications on such servers
     # are bounded by CTag granularity, not by every-sync churn.
-    changed_hrefs = [
-        href
-        for href, etag in server_map.items()
-        if href in local_by_href and etag and local_by_href[href].etag != etag
-    ]
     updated = _fetch_and_ingest(
         account=account,
         calendar=calendar,
@@ -446,7 +475,22 @@ def _slow_path_reconcile(
         hrefs=changed_hrefs,
         now=now,
         errors=errors,
+        cancel_event=cancel_event,
     )
+
+    # UIDs for newly ingested resources (unknown before ingestion).
+    new_uids: frozenset[str]
+    if new_hrefs:
+        new_href_set = set(new_hrefs)
+        new_uids = frozenset(
+            c.ref.uid
+            for c in index.list_calendar_components(calendar_ref)
+            if c.href in new_href_set
+        )
+    else:
+        new_uids = frozenset()
+
+    affected_uids: frozenset[str] = deleted_uids | changed_uids | new_uids
 
     pushed = 0
     deleted_remote = 0
@@ -466,15 +510,18 @@ def _slow_path_reconcile(
             now=now,
         )
 
-    return CalendarSyncStats(
-        calendar=calendar_ref,
-        path="slow",
-        added=added,
-        updated=updated,
-        removed=removed,
-        pushed=pushed,
-        deleted_remote=deleted_remote,
-        errors=tuple(errors),
+    return (
+        CalendarSyncStats(
+            calendar=calendar_ref,
+            path="slow",
+            added=added,
+            updated=updated,
+            removed=removed,
+            pushed=pushed,
+            deleted_remote=deleted_remote,
+            errors=tuple(errors),
+        ),
+        affected_uids,
     )
 
 
@@ -487,12 +534,13 @@ def _medium_path_reconcile(
     index: IndexRepository,
     now: datetime,
     sync_token: str,
-) -> tuple[CalendarSyncStats, str]:
+    cancel_event: threading.Event | None = None,
+) -> tuple[CalendarSyncStats, str, frozenset[str]]:
     """Apply an RFC 6578 sync-collection delta.
 
     Raises `SyncTokenExpiredError` when the server rejects `sync_token`
     so the caller can fall back to the slow path transparently.
-    Returns `(stats, new_sync_token)` on success.
+    Returns `(stats, new_sync_token, affected_uids)` on success.
     """
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     changed, deleted, new_token = session.sync_collection(calendar.url, sync_token)
@@ -514,6 +562,17 @@ def _medium_path_reconcile(
         server_hrefs=(h for h in local_by_href if h not in locally_deleted),
     )
 
+    # Collect UIDs before any index mutations.
+    deleted_uids = frozenset(
+        local_by_href[h].ref.uid for h in locally_deleted if h in local_by_href
+    )
+    changed_by_href = {h: e for h, e in changed}
+    new_hrefs = [h for h in changed_by_href if h not in local_by_href]
+    updated_hrefs = [h for h in changed_by_href if h in local_by_href]
+    updated_uids = frozenset(
+        local_by_href[h].ref.uid for h in updated_hrefs if h in local_by_href
+    )
+
     errors: list[str] = []
     removed = _apply_server_deletions(
         removed_hrefs=locally_deleted,
@@ -522,10 +581,6 @@ def _medium_path_reconcile(
         mirror=mirror,
         index=index,
     )
-
-    changed_by_href = {h: e for h, e in changed}
-    new_hrefs = [h for h in changed_by_href if h not in local_by_href]
-    updated_hrefs = [h for h in changed_by_href if h in local_by_href]
 
     added = _fetch_and_ingest(
         account=account,
@@ -536,6 +591,7 @@ def _medium_path_reconcile(
         hrefs=new_hrefs,
         now=now,
         errors=errors,
+        cancel_event=cancel_event,
     )
     updated = _fetch_and_ingest(
         account=account,
@@ -546,7 +602,21 @@ def _medium_path_reconcile(
         hrefs=updated_hrefs,
         now=now,
         errors=errors,
+        cancel_event=cancel_event,
     )
+
+    new_uids: frozenset[str]
+    if new_hrefs:
+        new_href_set = set(new_hrefs)
+        new_uids = frozenset(
+            c.ref.uid
+            for c in index.list_calendar_components(calendar_ref)
+            if c.href in new_href_set
+        )
+    else:
+        new_uids = frozenset()
+
+    affected_uids: frozenset[str] = deleted_uids | updated_uids | new_uids
 
     pushed = 0
     deleted_remote = 0
@@ -578,6 +648,7 @@ def _medium_path_reconcile(
             errors=tuple(errors),
         ),
         new_token,
+        affected_uids,
     )
 
 
@@ -691,6 +762,7 @@ def _fetch_and_ingest(
     hrefs: Sequence[str],
     now: datetime,
     errors: list[str],
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """Stream chunks of `calendar-multiget` results into the local index.
 
@@ -793,6 +865,8 @@ def _fetch_and_ingest(
                     and processed % _INGEST_PROGRESS_INTERVAL == 0
                 ):
                     logger.info("  ingest: %d/%d", processed, total)
+            if cancel_event is not None and cancel_event.is_set():
+                raise SyncCancelled
     finally:
         cancel.set()
         # Drain the queue so a producer blocked on `put` can see the

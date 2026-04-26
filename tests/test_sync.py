@@ -22,7 +22,7 @@ from chronos.domain import (
 )
 from chronos.index_store import SqliteIndexRepository
 from chronos.storage import VdirMirrorRepository
-from chronos.sync import SyncHaltError, sync_account
+from chronos.sync import SyncCancelled, SyncHaltError, sync_account
 from tests import corpus
 from tests.fake_caldav import FakeCalDAVSession
 
@@ -1080,7 +1080,7 @@ class MediumPathTest(SyncTestCase):
         self.session.calls.clear()
         result = self._run()
         multiget_calls = [c for c in self.session.calls if c[0] == "calendar_multiget"]
-        fetched_hrefs = {h for call in multiget_calls for h in call[2]}
+        fetched_hrefs = {h for call in multiget_calls for h in call[2]}  # type: ignore[union-attr]
         self.assertEqual(fetched_hrefs, {f"{CALENDAR_URL}z.ics"})
         self.assertEqual(result.components_updated, 1)
 
@@ -1208,7 +1208,190 @@ class MediumPathTest(SyncTestCase):
         def boom(_url: str) -> str | None:
             raise CalDAVError("server unavailable")
 
-        self.session.get_sync_token = boom  # type: ignore[method-assign]
+        self.session.get_sync_token = boom  # type: ignore[assignment]
         result = _acquire_sync_token(self.session, CALENDAR_URL)
         self.assertIsNone(result)
-        self.session.get_sync_token = original  # type: ignore[method-assign]
+        self.session.get_sync_token = original  # type: ignore[assignment]
+
+
+class TargetedExpansionTest(SyncTestCase):
+    """After a slow or medium path sync, only the UIDs of changed
+    resources are passed to `populate_occurrences`, so an unchanged
+    10 000-event calendar doesn't pay for a full re-expansion when a
+    single event is updated.
+    """
+
+    def test_slow_path_only_expands_changed_and_new_uids(self) -> None:
+        from collections.abc import Sequence as Seq
+
+        from chronos.domain import Occurrence
+
+        for uid in ("a", "b", "c"):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{uid}.ics",
+                ics=_ics_with_uid(f"{uid}@example.com"),
+                etag=f"etag-{uid}",
+            )
+        self._run()  # First sync expands all three.
+
+        # Update only event c; force slow path by clearing sync_token.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}c.ics",
+            ics=_ics_with_uid("c@example.com"),
+            etag="etag-c-v2",
+        )
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.index.set_sync_state(
+            SyncState(
+                calendar=self.calendar_ref,
+                ctag=state.ctag,
+                sync_token=None,
+                synced_at=state.synced_at,
+            )
+        )
+
+        expanded_uids: list[str] = []
+        original_set = self.index.set_occurrences
+
+        def tracking(ref: ComponentRef, occs: Seq[Occurrence]) -> None:
+            expanded_uids.append(ref.uid)
+            original_set(ref, occs)
+
+        self.index.set_occurrences = tracking  # type: ignore[assignment]
+        self._run()
+
+        self.assertEqual(expanded_uids, ["c@example.com"])
+
+    def test_medium_path_only_expands_changed_uids(self) -> None:
+        from collections.abc import Sequence as Seq
+
+        from chronos.domain import Occurrence
+
+        for uid in ("x", "y", "z"):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{uid}.ics",
+                ics=_ics_with_uid(f"{uid}@example.com"),
+                etag=f"etag-{uid}",
+            )
+        self._run()  # First sync establishes sync_token.
+
+        # Update only z on the server.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}z.ics",
+            ics=_ics_with_uid("z@example.com"),
+            etag="etag-z-v2",
+        )
+
+        expanded_uids: list[str] = []
+        original_set = self.index.set_occurrences
+
+        def tracking(ref: ComponentRef, occs: Seq[Occurrence]) -> None:
+            expanded_uids.append(ref.uid)
+            original_set(ref, occs)
+
+        self.index.set_occurrences = tracking  # type: ignore[assignment]
+        self._run()  # Medium path: sync_collection returns only z.
+
+        self.assertEqual(expanded_uids, ["z@example.com"])
+
+
+class CancellationTest(SyncTestCase):
+    """Verify that cancel_event is observed inside _fetch_and_ingest
+    and inside populate_occurrences so a long sync can be interrupted
+    within a single calendar rather than only at calendar boundaries.
+    """
+
+    def _sync_with_cancel(self, cancel_event: threading.Event) -> None:
+        sync_account(
+            account=_account(),
+            session=self.session,
+            mirror=self.mirror,
+            index=self.index,
+            now=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            cancel_event=cancel_event,
+        )
+
+    def test_cancel_during_fetch_raises_after_current_chunk(self) -> None:
+        # 150 resources = 2 chunks (chunk size 100); cancel after first.
+        for i in range(150):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}r{i:04d}.ics",
+                ics=_ics_with_uid(f"cancel-{i}@example.com"),
+                etag=f"etag-{i}",
+            )
+        cancel_event = threading.Event()
+        original_multiget = self.session.calendar_multiget
+        calls = {"n": 0}
+
+        def cancelling(
+            url: str, hrefs: Sequence[str]
+        ) -> Sequence[tuple[str, str, bytes]]:
+            result = original_multiget(url, hrefs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                cancel_event.set()
+            return result
+
+        self.session.calendar_multiget = cancelling  # type: ignore[method-assign]
+        with self.assertRaises(SyncCancelled):
+            self._sync_with_cancel(cancel_event)
+
+        # First chunk (100 resources) was committed before the cancel fired.
+        rows = self.index.list_calendar_components(self.calendar_ref)
+        self.assertGreater(len(rows), 0)
+        self.assertLess(len(rows), 150)
+
+    def test_cancel_during_expansion_raises_after_current_master(self) -> None:
+        from collections.abc import Sequence as Seq
+
+        from chronos.domain import Occurrence
+
+        for uid in ("e0", "e1", "e2", "e3", "e4"):
+            self.session.put_resource(
+                calendar_url=CALENDAR_URL,
+                href=f"{CALENDAR_URL}{uid}.ics",
+                ics=_ics_with_uid(f"{uid}@example.com"),
+                etag=f"etag-{uid}",
+            )
+        self._run()  # First sync — establishes state.
+
+        # Update e2 so the second sync has an affected_uid to expand.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}e2.ics",
+            ics=_ics_with_uid("e2@example.com"),
+            etag="etag-e2-v2",
+        )
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.index.set_sync_state(
+            SyncState(
+                calendar=self.calendar_ref,
+                ctag=state.ctag,
+                sync_token=None,
+                synced_at=state.synced_at,
+            )
+        )
+
+        cancel_event = threading.Event()
+        original_set = self.index.set_occurrences
+        expanded: list[str] = []
+
+        def set_and_cancel(ref: ComponentRef, occs: Seq[Occurrence]) -> None:
+            expanded.append(ref.uid)
+            original_set(ref, occs)
+            cancel_event.set()
+
+        self.index.set_occurrences = set_and_cancel  # type: ignore[assignment]
+
+        with self.assertRaises(SyncCancelled):
+            self._sync_with_cancel(cancel_event)
+
+        # Only e2 was expanded before the cancel fired.
+        self.assertEqual(expanded, ["e2@example.com"])
