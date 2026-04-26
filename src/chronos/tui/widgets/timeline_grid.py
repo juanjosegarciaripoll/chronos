@@ -31,6 +31,14 @@ _TIME_COL_WIDTH = 6
 _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
 _SHADED_ROW_STYLE = "on color(236)"
+# Event blocks: one colored bar across the full event span.
+# The start cell shows the title; continuation cells show the same
+# background with no text so the bar reads as a single visual block.
+# At runtime these are replaced with the app theme's $accent-darken-3
+# (see TimelineGrid.on_mount); these constants are the fallback used in
+# tests and when the theme does not export a usable accent color.
+_EVENT_START_STYLE = "bold white on color(18)"
+_EVENT_BODY_STYLE = "on color(18)"
 
 
 class TimelineGrid(DataTable[str]):
@@ -52,10 +60,27 @@ class TimelineGrid(DataTable[str]):
         # rendered in that cell. Lookup driven by cursor coordinates
         # in `on_data_table_cell_selected`.
         self._cells: dict[tuple[int, int], ComponentRef] = {}
+        # Event bar styles — overwritten on_mount with the running
+        # theme's $accent-darken-3 color when available.
+        self._event_start_style = _EVENT_START_STYLE
+        self._event_body_style = _EVENT_BODY_STYLE
 
     def on_mount(self) -> None:
         self.cursor_type = "cell"
         self.zebra_stripes = False
+        # Resolve the event bar color from the running Textual theme so
+        # the bar feels native rather than hardcoded. Textual exposes CSS
+        # variable values (without the leading $) via get_css_variables().
+        # $accent-darken-3 is a suitably dark variant of the accent hue;
+        # fall back to $accent itself if only the base is available.
+        try:
+            css = self.app.get_css_variables()  # pyright: ignore[reportUnknownMemberType]
+            accent = css.get("accent-darken-3") or css.get("accent", "")
+            if accent:
+                self._event_start_style = f"bold white on {accent}"
+                self._event_body_style = f"on {accent}"
+        except Exception:  # noqa: BLE001 — theme lookup is best-effort
+            pass
 
     def show_days(
         self,
@@ -137,10 +162,20 @@ class TimelineGrid(DataTable[str]):
             Text(time_text, style=_SHADED_ROW_STYLE) if shaded else time_text
         ]
         for col_idx, (day_date, events) in enumerate(days, start=1):
-            content, ref = _cell_for_slot(day_date, slot_minutes_in_day, events)
-            cells.append(Text(content, style=_SHADED_ROW_STYLE) if shaded else content)
+            content, ref, is_start = _cell_for_slot(
+                day_date, slot_minutes_in_day, events
+            )
             if ref is not None:
+                # Event is active in this slot.  Show the title only in
+                # the slot where the event starts; render a blank bar in
+                # continuation slots so the block reads as one unit.
+                style = self._event_start_style if is_start else self._event_body_style
+                cells.append(Text(content if is_start else "", style=style))
                 self._cells[(row_index, col_idx)] = ref
+            elif shaded:
+                cells.append(Text(content, style=_SHADED_ROW_STYLE))
+            else:
+                cells.append(content)
         self.add_row(*cells)
 
 
@@ -192,15 +227,22 @@ def _cell_for_slot(
     day: date,
     slot_minutes_in_day: int,
     events: Sequence[OccurrenceRow],
-) -> tuple[str, ComponentRef | None]:
-    """Figure out what to put in the (day, slot) cell.
+) -> tuple[str, ComponentRef | None, bool]:
+    """Figure out what data belongs in the (day, slot) cell.
 
     A slot spans `[slot_minutes_in_day, slot_minutes_in_day + 30)`.
-    Any event whose `[start, end)` interval overlaps with the slot
-    window appears here, so a multi-hour event fills every slot it
-    covers. Events that start within this slot are listed before those
-    already running from an earlier slot; when several are active the
-    first wins and a `+N` suffix indicates hidden extras.
+    Any event whose `[start, end)` interval overlaps is included, so a
+    multi-hour event covers every slot it touches. Events that START in
+    this slot are listed before those already running from an earlier
+    slot; when several are active the first wins and a `+N` suffix
+    indicates hidden extras.
+
+    Returns `(summary, ref, is_start)`:
+    - `summary`: the primary event title (always set when `ref` is not None).
+    - `ref`: the event to open on Enter; `None` when the slot is empty.
+    - `is_start`: True when the primary event begins in this slot,
+      False for a continuation slot.  The renderer uses this to decide
+      whether to display the title or just the coloured bar.
     """
     slot_start = slot_minutes_in_day
     slot_end = slot_minutes_in_day + _SLOT_MINUTES
@@ -226,12 +268,12 @@ def _cell_for_slot(
                 continuing.append(row)
     active = starting + continuing
     if not active:
-        return "", None
+        return "", None, False
     first = active[0]
     summary = first.component.summary or "(no summary)"
     if len(active) > 1:
         summary = f"{summary} +{len(active) - 1}"
-    return summary, first.component.ref
+    return summary, first.component.ref, bool(starting)
 
 
 def _full_day_summary(

@@ -1875,14 +1875,18 @@ class TimelineGridHelpersTest(unittest.TestCase):
                 component=event,
             ),
         )
-        # Slot 09:00 → event lands here.
-        cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        # Slot 09:00 → event starts here.
+        cell, hit, is_start = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
         self.assertEqual(cell, "Standup")
         self.assertEqual(hit, ref)
+        self.assertTrue(is_start)
         # Slot 09:30 → empty (event already ended; nothing starts here).
-        cell_empty, hit_empty = _cell_for_slot(date(2026, 5, 1), 9 * 60 + 30, rows)
+        cell_empty, hit_empty, is_start_empty = _cell_for_slot(
+            date(2026, 5, 1), 9 * 60 + 30, rows
+        )
         self.assertEqual(cell_empty, "")
         self.assertIsNone(hit_empty)
+        self.assertFalse(is_start_empty)
 
     def test_cell_for_slot_appends_plus_when_overlapping(self) -> None:
         from chronos.tui.widgets.timeline_grid import _cell_for_slot
@@ -1918,11 +1922,12 @@ class TimelineGridHelpersTest(unittest.TestCase):
             )
             for ref, label in ((ref_a, "Meeting A"), (ref_b, "Meeting B"))
         )
-        cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        cell, hit, is_start = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
         # First event wins the visible spot; the `+1` indicates one
         # other event is active in the same slot.
         self.assertEqual(cell, "Meeting A +1")
         self.assertEqual(hit, ref_a)
+        self.assertTrue(is_start)  # both events start in this slot
 
     def test_cell_for_slot_multi_hour_event_fills_all_covered_slots(self) -> None:
         from chronos.tui.widgets.timeline_grid import _cell_for_slot
@@ -1958,12 +1963,20 @@ class TimelineGridHelpersTest(unittest.TestCase):
             ),
         )
         # Event starts at 09:00 and ends at 11:00, covering four 30-min slots.
-        for slot_start in (9 * 60, 9 * 60 + 30, 10 * 60, 10 * 60 + 30):
-            cell, hit = _cell_for_slot(date(2026, 5, 1), slot_start, rows)
-            self.assertEqual(cell, "Workshop", msg=f"slot {slot_start}")
-            self.assertEqual(hit, ref, msg=f"slot {slot_start}")
+        # The start slot carries is_start=True; continuation slots carry False.
+        cell_0900, hit_0900, is_start_0900 = _cell_for_slot(
+            date(2026, 5, 1), 9 * 60, rows
+        )
+        self.assertEqual(cell_0900, "Workshop")
+        self.assertEqual(hit_0900, ref)
+        self.assertTrue(is_start_0900)
+        for slot in (9 * 60 + 30, 10 * 60, 10 * 60 + 30):
+            cell, hit, is_start = _cell_for_slot(date(2026, 5, 1), slot, rows)
+            self.assertEqual(cell, "Workshop", msg=f"slot {slot}")
+            self.assertEqual(hit, ref, msg=f"slot {slot}")
+            self.assertFalse(is_start, msg=f"slot {slot} should be continuation")
         # Slot at 11:00 is outside the event's half-open [start, end) interval.
-        cell_after, hit_after = _cell_for_slot(date(2026, 5, 1), 11 * 60, rows)
+        cell_after, hit_after, _ = _cell_for_slot(date(2026, 5, 1), 11 * 60, rows)
         self.assertEqual(cell_after, "")
         self.assertIsNone(hit_after)
 
@@ -2004,12 +2017,18 @@ class TimelineGridHelpersTest(unittest.TestCase):
         )
         # Event starts on 2026-05-01 at 23:00 and crosses midnight; both
         # remaining slots on that day must show the event.
-        cell_2300, hit_2300 = _cell_for_slot(date(2026, 5, 1), 23 * 60, rows)
+        cell_2300, hit_2300, is_start_2300 = _cell_for_slot(
+            date(2026, 5, 1), 23 * 60, rows
+        )
         self.assertEqual(cell_2300, "Late Call")
         self.assertEqual(hit_2300, ref)
-        cell_2330, hit_2330 = _cell_for_slot(date(2026, 5, 1), 23 * 60 + 30, rows)
+        self.assertTrue(is_start_2300)
+        cell_2330, hit_2330, is_start_2330 = _cell_for_slot(
+            date(2026, 5, 1), 23 * 60 + 30, rows
+        )
         self.assertEqual(cell_2330, "Late Call")
         self.assertEqual(hit_2330, ref)
+        self.assertFalse(is_start_2330)
 
     def test_cell_for_slot_newly_starting_event_takes_priority_over_running(
         self,
@@ -2067,9 +2086,10 @@ class TimelineGridHelpersTest(unittest.TestCase):
         )
         # In the 09:00 slot, "Standup" starts here and must be listed first,
         # demoting "All-Morning Meeting" to the "+1" overflow count.
-        cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        cell, hit, is_start = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
         self.assertEqual(cell, "Standup +1")
         self.assertEqual(hit, ref_new)
+        self.assertTrue(is_start)  # Standup starts here
 
 
 class TimelineGridFlowTest(TuiFlowTestCase):
