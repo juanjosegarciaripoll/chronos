@@ -78,7 +78,7 @@ Only these. Anything else needs explicit approval before `uv add`.
 | `mcp` | Model Context Protocol server SDK. |
 | `tomli-w` | Writing `config.toml` from the config-editing CLI. Python 3.13 has `tomllib` for reading only. |
 
-OAuth 2.0 support (Google, Microsoft) was evaluated against `google-auth`/`google-auth-oauthlib` but neither is added. The device flow + refresh grant are ~60 lines of straightforward HTTP; `google-auth` would drag in `requests` as a hard transport dep which we don't otherwise ship (`caldav` uses `niquests`). The OAuth code in `chronos.oauth` uses `niquests` (already a transitive dep via `caldav`) directly.
+OAuth 2.0 support (Google, Microsoft) was evaluated against `google-auth`/`google-auth-oauthlib` but neither is added — `google-auth` requires `requests`, which we don't ship. The OAuth code in `chronos.oauth` uses `niquests` (already a transitive dep via `caldav`) directly.
 
 **Note on `caldav` vs raw `httpx` + XML.** Default to `caldav` for v1. Revisit only if it blocks a specific reliability property (idempotent PUT with `If-Match` semantics, conditional REPORT behaviour) that we cannot get through it.
 

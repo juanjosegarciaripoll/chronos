@@ -1,4 +1,4 @@
-"""OAuth 2.0 (loopback + device flow) + token storage + request signing.
+"""OAuth 2.0 loopback flow + token storage + request signing.
 
 This module bridges `chronos` to Google's OAuth 2.0 endpoints. The same
 endpoints work for any Google CalDAV account; the `scope` on
@@ -6,18 +6,12 @@ endpoints work for any Google CalDAV account; the `scope` on
 
 Pieces:
 
-- **Loopback flow** (`run_loopback_flow`, RFC 8252) — the default for
-  desktop usage. We open the user's browser to Google's authorization
-  page with `redirect_uri=http://127.0.0.1:<random-port>/`, listen on
-  that port for the redirect, and exchange the auth code for tokens
-  using PKCE. This is what "Desktop app" OAuth clients use (the same
-  flow Thunderbird, gh CLI, vdirsyncer, etc. use). Requires a local
-  browser.
-- **Device flow** (`request_device_code`, `poll_for_tokens`, RFC 8628)
-  — the SSH/headless fallback. The user opens a URL on any device,
-  enters a short code, authorises chronos. No local browser needed,
-  but Google requires the OAuth client be of type "TVs and Limited
-  Input devices".
+- **Loopback flow** (`run_loopback_flow`, RFC 8252 + PKCE) — opens the
+  user's browser to Google's authorization page with
+  `redirect_uri=http://127.0.0.1:<random-port>/`, listens on that port
+  for the redirect, and exchanges the auth code for tokens. This is
+  what "Desktop app" OAuth clients use (same flow as Thunderbird, gh
+  CLI, vdirsyncer, etc.). Requires a local browser.
 - **Token store** (`save_tokens`, `load_tokens`) — plain JSON under
   `paths.oauth_token_dir()`, with a best-effort 0600 chmod (ignored
   on Windows). Contains the refresh token; keep it safe.
@@ -28,8 +22,6 @@ Pieces:
 
 Implementation note: we deliberately do not depend on `google-auth`
 because its transport layer requires `requests`, which we don't ship.
-The refresh-grant flow is ~40 lines of straightforward HTTP; cheaper
-to maintain than pulling in a second HTTP library.
 """
 
 from __future__ import annotations
@@ -56,7 +48,6 @@ import niquests
 from niquests.auth import AuthBase
 
 _AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _LOOPBACK_TIMEOUT_SECONDS = 300
 
@@ -85,15 +76,6 @@ class OAuthError(RuntimeError):
 
 
 @dataclass(frozen=True, kw_only=True)
-class DeviceCodeGrant:
-    device_code: str
-    user_code: str
-    verification_url: str
-    interval: int
-    expires_in: int
-
-
-@dataclass(frozen=True, kw_only=True)
 class StoredTokens:
     access_token: str
     refresh_token: str
@@ -101,7 +83,7 @@ class StoredTokens:
     scope: str
 
 
-# Loopback flow (RFC 8252) ----------------------------------------------------
+# Loopback flow (RFC 8252 + PKCE) ---------------------------------------------
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -225,7 +207,7 @@ def _make_callback_handler(
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, ARG002
             # Silence the default per-request stderr logging — the
-            # device-flow callback is internal plumbing, not server
+            # loopback callback is internal plumbing, not server
             # traffic the user needs to see.
             pass
 
@@ -279,9 +261,9 @@ def run_loopback_flow(
         if not open_browser(auth_url):
             raise OAuthError(
                 "no browser available; cannot complete the loopback "
-                "flow. Open the URL manually on a machine that can "
-                "reach this one's localhost, or use the device flow "
-                "(SSH / headless) instead.\n\n"
+                f"flow (listening on port {port}). Open the URL below "
+                "on a machine that can reach this one — for example "
+                f"via `ssh -L {port}:localhost:{port} <this-host>`.\n\n"
                 f"{auth_url}\n"
             )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -320,101 +302,6 @@ def run_loopback_flow(
         http_post=http_post,
         now=now,
     )
-
-
-# Device flow -----------------------------------------------------------------
-
-
-def request_device_code(
-    *,
-    client_id: str,
-    scope: str,
-    http_post: Callable[..., Any] | None = None,
-) -> DeviceCodeGrant:
-    """Start the device-authorisation flow; returns a code for the user."""
-    post = http_post or niquests.post
-    response = cast(
-        Any,
-        post(
-            _DEVICE_CODE_URL,
-            data={"client_id": client_id, "scope": scope},
-            timeout=30,
-        ),
-    )
-    _raise_for_status(response, "device-code request")
-    data = response.json()
-    if not isinstance(data, dict):
-        raise OAuthError(f"device-code request returned non-object JSON: {data!r}")
-    payload = cast(dict[str, object], data)
-    return DeviceCodeGrant(
-        device_code=_require_str(payload, "device_code"),
-        user_code=_require_str(payload, "user_code"),
-        # Google sometimes uses verification_url, sometimes verification_uri.
-        verification_url=_require_str(
-            payload, "verification_url", fallback_key="verification_uri"
-        ),
-        interval=_optional_int(payload, "interval", default=5),
-        expires_in=_optional_int(payload, "expires_in", default=1800),
-    )
-
-
-def poll_for_tokens(
-    *,
-    client_id: str,
-    client_secret: str,
-    grant: DeviceCodeGrant,
-    scope: str,
-    http_post: Callable[..., Any] | None = None,
-    sleep: Callable[[float], None] | None = None,
-    now: Callable[[], float] | None = None,
-) -> StoredTokens:
-    """Poll the token endpoint until the user authorises or the grant expires."""
-    post = http_post or niquests.post
-    wait = sleep or time.sleep
-    clock = now or time.time
-
-    deadline = clock() + grant.expires_in
-    interval = max(1, grant.interval)
-    while clock() < deadline:
-        wait(interval)
-        response = cast(
-            Any,
-            post(
-                _TOKEN_URL,
-                data={
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "device_code": grant.device_code,
-                    "grant_type": ("urn:ietf:params:oauth:grant-type:device_code"),
-                },
-                timeout=30,
-            ),
-        )
-        data = response.json()
-        if not isinstance(data, dict):
-            raise OAuthError(f"token request returned non-object JSON: {data!r}")
-        payload = cast(dict[str, object], data)
-        status = int(getattr(response, "status_code", 0))
-        if status == 200:
-            expires_in = _optional_int(payload, "expires_in", default=3600)
-            return StoredTokens(
-                access_token=_require_str(payload, "access_token"),
-                refresh_token=_require_str(payload, "refresh_token"),
-                expiry_unix=clock() + expires_in,
-                scope=_optional_str(payload, "scope", default=scope),
-            )
-        error = _optional_str(payload, "error", default="")
-        if error == "authorization_pending":
-            continue
-        if error == "slow_down":
-            interval += 5
-            continue
-        description = _optional_str(payload, "error_description", default="")
-        raise OAuthError(
-            f"device flow failed: {error or 'unknown'}"
-            + (f": {description}" if description else "")
-        )
-    raise OAuthError("device flow expired; user did not authorise in time")
 
 
 # Token storage ---------------------------------------------------------------
@@ -614,12 +501,8 @@ def _raise_for_status(response: Any, label: str) -> None:
     raise OAuthError(f"{label} failed: HTTP {status} {body!r}")
 
 
-def _require_str(
-    data: dict[str, object], key: str, *, fallback_key: str | None = None
-) -> str:
+def _require_str(data: dict[str, object], key: str) -> str:
     value = data.get(key)
-    if value is None and fallback_key is not None:
-        value = data.get(fallback_key)
     if not isinstance(value, str) or not value:
         raise OAuthError(f"missing/invalid {key!r} in OAuth payload: {data!r}")
     return value
@@ -648,15 +531,13 @@ def _optional_float(data: dict[str, object], key: str, *, default: float) -> flo
 
 __all__ = [
     "BearerTokenAuth",
-    "DeviceCodeGrant",
     "OAuthError",
     "StoredTokens",
     "build_authorization_url",
     "build_bearer_auth",
     "exchange_code_for_tokens",
     "load_tokens",
-    "poll_for_tokens",
-    "request_device_code",
+    "refresh_access_token",
     "run_loopback_flow",
     "save_tokens",
 ]

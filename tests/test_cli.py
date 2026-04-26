@@ -1312,7 +1312,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
         self.stdout.truncate(0)
         self.stdout.seek(0)
 
-    def test_authorize_runs_device_flow_and_saves_tokens(self) -> None:
+    def test_authorize_with_injected_flow_saves_tokens(self) -> None:
         from chronos.domain import OAuthCredential
         from chronos.oauth import StoredTokens
 
@@ -1367,7 +1367,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
             self.config_path,
         )
 
-        # cmd_oauth_authorize supports an injected device_flow; call
+        # cmd_oauth_authorize supports an injected auth_flow; call
         # it directly for the cleanest test.
         from chronos import cli
 
@@ -1419,7 +1419,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
 
     def test_authorize_accepts_google_backend(self) -> None:
         """`google` is OAuth shorthand; `oauth authorize` must run the
-        device flow with the underlying client_id/secret + Google scope."""
+        loopback flow with the underlying client_id/secret + Google scope."""
         from chronos.domain import GOOGLE_OAUTH_SCOPE, OAuthCredential
         from chronos.oauth import StoredTokens
 
@@ -1475,7 +1475,7 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
 
 
 class CliAuthorizerTest(unittest.TestCase):
-    """`_default_cli_authorizer` runs the OAuth device flow over sys.stdout
+    """`_default_cli_authorizer` runs the OAuth loopback flow over sys.stdout
     when interactive, and surfaces a clean error otherwise."""
 
     def test_raises_when_no_tty(self) -> None:

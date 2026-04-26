@@ -31,7 +31,7 @@ Delivered or to-be-delivered in v1:
 - **TUI:** Textual-based day / week / month / agenda / todo-list views, with screen-specific keybindings shown in the footer.
 - **CLI:** `chronos sync`, `list`, `show`, `add`, `edit`, `rm`, `doctor`.
 - **MCP server:** read-only tools for listing calendars, querying ranges, searching, and fetching events/todos by UID.
-- **Credentials:** five backends — plaintext (for testing), environment variable, external command, encrypted keyring, and OAuth 2.0 (device flow, for Google Calendar and Microsoft/Outlook).
+- **Credentials:** five backends — plaintext (for testing), environment variable, external command, encrypted keyring, and OAuth 2.0 (loopback flow, RFC 8252 + PKCE, for Google Calendar and Microsoft/Outlook).
 - **Packaging:** PyInstaller standalone bundles for Linux, macOS, and Windows.
 
 ## 4. Deferred scope (v2 and later)

@@ -23,8 +23,8 @@ from chronos.paths import oauth_token_path
 _COMMAND_TIMEOUT_SECONDS = 30
 
 
-# Returns fresh tokens for an account, typically by running the OAuth
-# device flow. Raises `OAuthError` if it can't (e.g. no TTY in CLI, or
+# Returns fresh tokens for an account by running the OAuth loopback
+# flow. Raises `OAuthError` if it can't (e.g. no browser available, or
 # the TUI is owning the terminal).
 InteractiveAuthorizer = Callable[[str, OAuthCredential, Path], StoredTokens]
 

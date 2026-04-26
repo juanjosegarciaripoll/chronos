@@ -543,7 +543,7 @@ def _build_parser() -> argparse.ArgumentParser:
     oauth_sub = oauth_p.add_subparsers(dest="oauth_cmd", required=True)
     oauth_authorize = oauth_sub.add_parser(
         "authorize",
-        help="Run the OAuth device flow for an account and save tokens.",
+        help="Re-run OAuth authorization for an account and save tokens.",
     )
     oauth_authorize.add_argument("--account", required=True)
 
@@ -1140,10 +1140,9 @@ def cmd_tui(ctx: CliContext) -> int:
     # Textual into the import graph.
     from chronos.tui import ChronosApp, TuiServices
 
-    # The TUI owns the terminal, so the OAuth device flow can't print
-    # to stdout. Swap in a creds provider whose authorizer surfaces a
-    # clear "go authorize from CLI" message instead of blocking on a
-    # prompt the user can't see.
+    # The TUI owns the terminal, so the OAuth loopback flow can't open
+    # a browser inline. Swap in a creds provider whose authorizer
+    # surfaces a clear "go authorize from CLI" message instead.
     tui_ctx = dataclasses.replace(
         ctx,
         creds=DefaultCredentialsProvider(
@@ -1213,7 +1212,7 @@ def _tui_unsupported_authorizer(
 ) -> StoredTokens:
     raise OAuthError(
         f"account {account_name!r} needs OAuth authorization, but the "
-        "TUI can't run the device flow inline. Quit the TUI and run "
+        "TUI can't run the loopback flow inline. Quit the TUI and run "
         "`chronos sync` once to authorize, then come back."
     )
 
