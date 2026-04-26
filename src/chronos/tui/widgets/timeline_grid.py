@@ -30,6 +30,7 @@ _DEFAULT_END_HOUR = 22
 _TIME_COL_WIDTH = 6
 _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
+_SHADED_ROW_STYLE = "on color(236)"
 
 
 class TimelineGrid(DataTable[str]):
@@ -130,10 +131,14 @@ class TimelineGrid(DataTable[str]):
         # Subsequent rows index after the all-day banner if it was
         # added — `row_count` is the current total.
         row_index = self.row_count
-        cells: list[Any] = [_format_slot_time(slot_minutes_in_day)]
+        shaded = (slot_minutes_in_day // 60) % 2 == 1
+        time_text = _format_slot_time(slot_minutes_in_day)
+        cells: list[Any] = [
+            Text(time_text, style=_SHADED_ROW_STYLE) if shaded else time_text
+        ]
         for col_idx, (day_date, events) in enumerate(days, start=1):
             content, ref = _cell_for_slot(day_date, slot_minutes_in_day, events)
-            cells.append(content)
+            cells.append(Text(content, style=_SHADED_ROW_STYLE) if shaded else content)
             if ref is not None:
                 self._cells[(row_index, col_idx)] = ref
         self.add_row(*cells)
@@ -190,28 +195,42 @@ def _cell_for_slot(
 ) -> tuple[str, ComponentRef | None]:
     """Figure out what to put in the (day, slot) cell.
 
-    A slot is `[slot_minutes_in_day, slot_minutes_in_day + 30)`.
-    Events whose start time falls inside that window land here; if
-    multiple, the first wins and a `+N` suffix indicates how many
-    others are hidden behind it (the user can see them by scrolling
-    to a later slot or opening a different view).
+    A slot spans `[slot_minutes_in_day, slot_minutes_in_day + 30)`.
+    Any event whose `[start, end)` interval overlaps with the slot
+    window appears here, so a multi-hour event fills every slot it
+    covers. Events that start within this slot are listed before those
+    already running from an earlier slot; when several are active the
+    first wins and a `+N` suffix indicates hidden extras.
     """
+    slot_start = slot_minutes_in_day
+    slot_end = slot_minutes_in_day + _SLOT_MINUTES
     starting: list[OccurrenceRow] = []
+    continuing: list[OccurrenceRow] = []
     for row in events:
         if _is_full_day(row):
             continue
         occ_start = row.occurrence.start.astimezone(UTC)
         if occ_start.date() != day:
             continue
-        event_minute = occ_start.hour * 60 + occ_start.minute
-        if slot_minutes_in_day <= event_minute < slot_minutes_in_day + _SLOT_MINUTES:
-            starting.append(row)
-    if not starting:
+        occ_end_dt = (row.occurrence.end or row.occurrence.start).astimezone(UTC)
+        start_min = occ_start.hour * 60 + occ_start.minute
+        end_min = (
+            24 * 60
+            if occ_end_dt.date() > day
+            else occ_end_dt.hour * 60 + occ_end_dt.minute
+        )
+        if start_min < slot_end and end_min > slot_start:
+            if start_min >= slot_start:
+                starting.append(row)
+            else:
+                continuing.append(row)
+    active = starting + continuing
+    if not active:
         return "", None
-    first = starting[0]
+    first = active[0]
     summary = first.component.summary or "(no summary)"
-    if len(starting) > 1:
-        summary = f"{summary} +{len(starting) - 1}"
+    if len(active) > 1:
+        summary = f"{summary} +{len(active) - 1}"
     return summary, first.component.ref
 
 

@@ -1920,9 +1920,156 @@ class TimelineGridHelpersTest(unittest.TestCase):
         )
         cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
         # First event wins the visible spot; the `+1` indicates one
-        # other event overlaps in the same slot.
+        # other event is active in the same slot.
         self.assertEqual(cell, "Meeting A +1")
         self.assertEqual(hit, ref_a)
+
+    def test_cell_for_slot_multi_hour_event_fills_all_covered_slots(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _cell_for_slot
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "long")
+        event = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=b"",
+            summary="Workshop",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        rows = (
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                    end=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            ),
+        )
+        # Event starts at 09:00 and ends at 11:00, covering four 30-min slots.
+        for slot_start in (9 * 60, 9 * 60 + 30, 10 * 60, 10 * 60 + 30):
+            cell, hit = _cell_for_slot(date(2026, 5, 1), slot_start, rows)
+            self.assertEqual(cell, "Workshop", msg=f"slot {slot_start}")
+            self.assertEqual(hit, ref, msg=f"slot {slot_start}")
+        # Slot at 11:00 is outside the event's half-open [start, end) interval.
+        cell_after, hit_after = _cell_for_slot(date(2026, 5, 1), 11 * 60, rows)
+        self.assertEqual(cell_after, "")
+        self.assertIsNone(hit_after)
+
+    def test_cell_for_slot_midnight_crossing_event_fills_remaining_day_slots(
+        self,
+    ) -> None:
+        from chronos.tui.widgets.timeline_grid import _cell_for_slot
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "late")
+        event = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=b"",
+            summary="Late Call",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 2, 1, 0, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        rows = (
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ref,
+                    start=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
+                    end=datetime(2026, 5, 2, 1, 0, tzinfo=UTC),
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=event,
+            ),
+        )
+        # Event starts on 2026-05-01 at 23:00 and crosses midnight; both
+        # remaining slots on that day must show the event.
+        cell_2300, hit_2300 = _cell_for_slot(date(2026, 5, 1), 23 * 60, rows)
+        self.assertEqual(cell_2300, "Late Call")
+        self.assertEqual(hit_2300, ref)
+        cell_2330, hit_2330 = _cell_for_slot(date(2026, 5, 1), 23 * 60 + 30, rows)
+        self.assertEqual(cell_2330, "Late Call")
+        self.assertEqual(hit_2330, ref)
+
+    def test_cell_for_slot_newly_starting_event_takes_priority_over_running(
+        self,
+    ) -> None:
+        from chronos.tui.widgets.timeline_grid import _cell_for_slot
+
+        ref_running = ComponentRef(ACCOUNT_NAME, WORK_CAL, "running")
+        ref_new = ComponentRef(ACCOUNT_NAME, WORK_CAL, "new")
+        running = VEvent(
+            ref=ref_running,
+            href=None,
+            etag=None,
+            raw_ics=b"",
+            summary="All-Morning Meeting",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 8, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        new_event = VEvent(
+            ref=ref_new,
+            href=None,
+            etag=None,
+            raw_ics=b"",
+            summary="Standup",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        rows = tuple(
+            OccurrenceRow(
+                occurrence=Occurrence(
+                    ref=ev.ref,
+                    start=ev.dtstart,  # type: ignore[arg-type]
+                    end=ev.dtend,
+                    recurrence_id=None,
+                    is_override=False,
+                ),
+                component=ev,
+            )
+            for ev in (running, new_event)
+        )
+        # In the 09:00 slot, "Standup" starts here and must be listed first,
+        # demoting "All-Morning Meeting" to the "+1" overflow count.
+        cell, hit = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        self.assertEqual(cell, "Standup +1")
+        self.assertEqual(hit, ref_new)
 
 
 class TimelineGridFlowTest(TuiFlowTestCase):
