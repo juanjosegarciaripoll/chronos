@@ -340,39 +340,43 @@ class FriendlyStartFormatTest(unittest.TestCase):
 
     def test_today(self) -> None:
         self.assertEqual(
-            format_friendly_start(datetime(2026, 4, 25, 9, 30, tzinfo=UTC), self.TODAY),
+            format_friendly_start(
+                datetime(2026, 4, 25, 9, 30).astimezone(), self.TODAY
+            ),
             "Today 09:30",
         )
 
     def test_tomorrow(self) -> None:
         self.assertEqual(
-            format_friendly_start(datetime(2026, 4, 26, 14, 0, tzinfo=UTC), self.TODAY),
+            format_friendly_start(
+                datetime(2026, 4, 26, 14, 0).astimezone(), self.TODAY
+            ),
             "Tomorrow 14:00",
         )
 
     def test_yesterday(self) -> None:
         self.assertEqual(
-            format_friendly_start(datetime(2026, 4, 24, 8, 0, tzinfo=UTC), self.TODAY),
+            format_friendly_start(datetime(2026, 4, 24, 8, 0).astimezone(), self.TODAY),
             "Yesterday 08:00",
         )
 
     def test_within_a_week_uses_weekday_name(self) -> None:
         # 2026-04-28 is the following Tuesday.
         result = format_friendly_start(
-            datetime(2026, 4, 28, 9, 0, tzinfo=UTC), self.TODAY
+            datetime(2026, 4, 28, 9, 0).astimezone(), self.TODAY
         )
         self.assertEqual(result, "Tue 09:00")
 
     def test_recent_past_uses_last_weekday(self) -> None:
         # 2026-04-22 is the prior Wednesday.
         result = format_friendly_start(
-            datetime(2026, 4, 22, 9, 0, tzinfo=UTC), self.TODAY
+            datetime(2026, 4, 22, 9, 0).astimezone(), self.TODAY
         )
         self.assertEqual(result, "Last Wed 09:00")
 
     def test_same_year_uses_short_date(self) -> None:
         result = format_friendly_start(
-            datetime(2026, 8, 15, 9, 0, tzinfo=UTC), self.TODAY
+            datetime(2026, 8, 15, 9, 0).astimezone(), self.TODAY
         )
         # Sat 15 Aug 09:00 — order varies by locale of strftime but
         # the important pieces are all there.
@@ -383,7 +387,7 @@ class FriendlyStartFormatTest(unittest.TestCase):
 
     def test_other_year_includes_year(self) -> None:
         result = format_friendly_start(
-            datetime(2014, 9, 30, 12, 18, tzinfo=UTC), self.TODAY
+            datetime(2014, 9, 30, 12, 18).astimezone(), self.TODAY
         )
         self.assertIn("2014", result)
         self.assertIn("Sep", result)
@@ -460,8 +464,8 @@ class RowFormattingTest(unittest.TestCase):
             summary="Hello",
             description=None,
             location="Room 1",
-            dtstart=datetime(2026, 6, 15, 9, tzinfo=UTC),
-            dtend=datetime(2026, 6, 15, 10, tzinfo=UTC),
+            dtstart=datetime(2026, 6, 15, 9).astimezone(),
+            dtend=datetime(2026, 6, 15, 10).astimezone(),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -472,8 +476,8 @@ class RowFormattingTest(unittest.TestCase):
         row = OccurrenceRow(
             occurrence=Occurrence(
                 ref=ref,
-                start=datetime(2026, 6, 15, 9, tzinfo=UTC),
-                end=datetime(2026, 6, 15, 10, tzinfo=UTC),
+                start=datetime(2026, 6, 15, 9).astimezone(),
+                end=datetime(2026, 6, 15, 10).astimezone(),
                 recurrence_id=None,
                 is_override=False,
             ),
@@ -519,7 +523,7 @@ class RowFormattingTest(unittest.TestCase):
         row = OccurrenceRow(
             occurrence=Occurrence(
                 ref=ref,
-                start=datetime(2026, 5, 1, 9, tzinfo=UTC),
+                start=datetime(2026, 5, 1, 9).astimezone(),
                 end=None,
                 recurrence_id=None,
                 is_override=False,
@@ -589,7 +593,7 @@ class RowFormattingTest(unittest.TestCase):
             description=None,
             location=None,
             dtstart=None,
-            due=datetime(2026, 5, 5, 17, tzinfo=UTC),
+            due=datetime(2026, 5, 5, 17).astimezone(),
             status="NEEDS-ACTION",
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -1832,8 +1836,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             OccurrenceRow(
                 occurrence=Occurrence(
                     ref=ref,
-                    start=datetime(2026, 5, 1, 4, 30, tzinfo=UTC),
-                    end=datetime(2026, 5, 1, 5, 30, tzinfo=UTC),
+                    start=datetime(2026, 5, 1, 4, 30).astimezone(),
+                    end=datetime(2026, 5, 1, 5, 30).astimezone(),
                     recurrence_id=None,
                     is_override=False,
                 ),
@@ -1842,8 +1846,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             OccurrenceRow(
                 occurrence=Occurrence(
                     ref=ref,
-                    start=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
-                    end=datetime(2026, 5, 1, 23, 45, tzinfo=UTC),
+                    start=datetime(2026, 5, 1, 23, 0).astimezone(),
+                    end=datetime(2026, 5, 1, 23, 45).astimezone(),
                     recurrence_id=None,
                     is_override=False,
                 ),
@@ -1866,8 +1870,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             summary="Standup",
             description=None,
             location=None,
-            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-            dtend=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+            dtstart=datetime(2026, 5, 1, 9, 0).astimezone(),
+            dtend=datetime(2026, 5, 1, 9, 30).astimezone(),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -1879,8 +1883,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             OccurrenceRow(
                 occurrence=Occurrence(
                     ref=ref,
-                    start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-                    end=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+                    start=datetime(2026, 5, 1, 9, 0).astimezone(),
+                    end=datetime(2026, 5, 1, 9, 30).astimezone(),
                     recurrence_id=None,
                     is_override=False,
                 ),
@@ -1909,8 +1913,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             OccurrenceRow(
                 occurrence=Occurrence(
                     ref=ref,
-                    start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-                    end=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+                    start=datetime(2026, 5, 1, 9, 0).astimezone(),
+                    end=datetime(2026, 5, 1, 9, 30).astimezone(),
                     recurrence_id=None,
                     is_override=False,
                 ),
@@ -1922,8 +1926,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
                     summary=label,
                     description=None,
                     location=None,
-                    dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-                    dtend=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+                    dtstart=datetime(2026, 5, 1, 9, 0).astimezone(),
+                    dtend=datetime(2026, 5, 1, 9, 30).astimezone(),
                     status=None,
                     local_flags=frozenset(),
                     server_flags=frozenset(),
@@ -1953,8 +1957,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             summary="Workshop",
             description=None,
             location=None,
-            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-            dtend=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+            dtstart=datetime(2026, 5, 1, 9, 0).astimezone(),
+            dtend=datetime(2026, 5, 1, 11, 0).astimezone(),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -1966,8 +1970,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             OccurrenceRow(
                 occurrence=Occurrence(
                     ref=ref,
-                    start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-                    end=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+                    start=datetime(2026, 5, 1, 9, 0).astimezone(),
+                    end=datetime(2026, 5, 1, 11, 0).astimezone(),
                     recurrence_id=None,
                     is_override=False,
                 ),
@@ -2006,8 +2010,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             summary="Late Call",
             description=None,
             location=None,
-            dtstart=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
-            dtend=datetime(2026, 5, 2, 1, 0, tzinfo=UTC),
+            dtstart=datetime(2026, 5, 1, 23, 0).astimezone(),
+            dtend=datetime(2026, 5, 2, 1, 0).astimezone(),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -2019,8 +2023,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             OccurrenceRow(
                 occurrence=Occurrence(
                     ref=ref,
-                    start=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
-                    end=datetime(2026, 5, 2, 1, 0, tzinfo=UTC),
+                    start=datetime(2026, 5, 1, 23, 0).astimezone(),
+                    end=datetime(2026, 5, 2, 1, 0).astimezone(),
                     recurrence_id=None,
                     is_override=False,
                 ),
@@ -2057,8 +2061,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             summary="All-Morning Meeting",
             description=None,
             location=None,
-            dtstart=datetime(2026, 5, 1, 8, 0, tzinfo=UTC),
-            dtend=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+            dtstart=datetime(2026, 5, 1, 8, 0).astimezone(),
+            dtend=datetime(2026, 5, 1, 11, 0).astimezone(),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),
@@ -2074,8 +2078,8 @@ class TimelineGridHelpersTest(unittest.TestCase):
             summary="Standup",
             description=None,
             location=None,
-            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-            dtend=datetime(2026, 5, 1, 9, 30, tzinfo=UTC),
+            dtstart=datetime(2026, 5, 1, 9, 0).astimezone(),
+            dtend=datetime(2026, 5, 1, 9, 30).astimezone(),
             status=None,
             local_flags=frozenset(),
             server_flags=frozenset(),

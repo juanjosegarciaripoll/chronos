@@ -204,11 +204,10 @@ def gather_todos(
 def format_friendly_start(start: datetime, today: date) -> str:
     """Render a datetime using day-of-week / Today / Tomorrow shortcuts.
 
-    Anchored to UTC for determinism — every fixture and live ICS in
-    chronos stores instants as UTC. Switching to local time is a
-    separate concern (needs a per-account or per-app TZ).
+    Converts to the system local timezone so displayed times match the
+    clock on the user's machine.
     """
-    moment = start.astimezone(UTC)
+    moment = start.astimezone()
     moment_date = moment.date()
     delta = (moment_date - today).days
     time_str = moment.strftime("%H:%M")
@@ -279,7 +278,7 @@ def format_event_row(
         event_time = "all day"
         duration = ""
     else:
-        event_time = row.occurrence.start.astimezone(UTC).strftime("%H:%M")
+        event_time = row.occurrence.start.astimezone().strftime("%H:%M")
         duration = format_duration(row.occurrence.start, row.occurrence.end)
     raw_summary = row.component.summary or "(no summary)"
     summary = f"📋 {raw_summary}" if is_todo else raw_summary
@@ -301,7 +300,7 @@ def _format_event_day(start: datetime, today: date) -> str:
     width pin in `EventList` stays predictable, and never includes
     the year — the view title carries that.
     """
-    moment = start.astimezone(UTC)
+    moment = start.astimezone()
     delta = (moment.date() - today).days
     if delta == 0:
         return "Today"
@@ -332,7 +331,7 @@ def _occurrence_is_past(occurrence: Occurrence, now: datetime) -> bool:
 
 def format_todo_row(todo: VTodo) -> tuple[str, str, str, str]:
     due = (
-        todo.due.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+        todo.due.astimezone().strftime("%Y-%m-%d %H:%M")
         if todo.due is not None
         else ""
     )

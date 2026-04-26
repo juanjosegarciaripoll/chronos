@@ -224,8 +224,8 @@ def _compute_hour_range(
         for row in events:
             if _is_full_day(row):
                 continue
-            occ_start = row.occurrence.start.astimezone(UTC)
-            occ_end = (row.occurrence.end or row.occurrence.start).astimezone(UTC)
+            occ_start = row.occurrence.start.astimezone()
+            occ_end = (row.occurrence.end or row.occurrence.start).astimezone()
             start_hour = min(start_hour, occ_start.hour)
             # End-hour ceiling: if event ends at 22:30, we want a 22:30
             # row, so end_hour must be 23.
@@ -262,10 +262,10 @@ def _cell_for_slot(
     for row in events:
         if _is_full_day(row):
             continue
-        occ_start = row.occurrence.start.astimezone(UTC)
+        occ_start = row.occurrence.start.astimezone()
         if occ_start.date() != day:
             continue
-        occ_end_dt = (row.occurrence.end or row.occurrence.start).astimezone(UTC)
+        occ_end_dt = (row.occurrence.end or row.occurrence.start).astimezone()
         start_min = occ_start.hour * 60 + occ_start.minute
         end_min = (
             24 * 60
