@@ -36,6 +36,7 @@ dev = [
     "pytest-cov>=7.1.0",
 ]
 build = [
+    "build>=1.2",
     "pyinstaller>=6.0",
 ]
 docs = [

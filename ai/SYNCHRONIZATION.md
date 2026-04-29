@@ -97,7 +97,7 @@ The CTag (and sync-token, when available) for every calendar are obtained in the
 For each in-scope calendar, compare the CTag returned by `list_calendars` to `calendar_sync_state.ctag`:
 
 - **Fast path** — CTag unchanged. No further server I/O. Emit local-pending changes only (§7 step 5).
-- **Medium path** — CTag changed *and* we have a stored `sync_token` in `calendar_sync_state`. Issue `sync-collection` REPORT (RFC 6578); apply its delta of added/changed/removed hrefs. On `valid-sync-token` error (expired token), clear the token and fall through to the slow path, then re-acquire a fresh token via `PROPFIND DAV:sync-token`. **Status: planned (Milestone 12); currently the engine always takes the slow path when CTag changes.**
+- **Medium path** — CTag changed *and* we have a stored `sync_token` in `calendar_sync_state`. Issue `sync-collection` REPORT (RFC 6578); apply its delta of added/changed/removed hrefs. On `valid-sync-token` error (expired token), clear the token and fall through to the slow path, then re-acquire a fresh token via `PROPFIND DAV:sync-token`.
 - **Slow path** — CTag changed and no `sync_token` stored (first sync or after expiry). Issue a full `calendar-query` REPORT returning `(href, getetag)` pairs; compare to the local etag map. After a successful slow path, acquire the current `DAV:sync-token` via `PROPFIND` and store it for the next sync.
 
 The fast path must stay zero-I/O beyond the CTag `PROPFIND`. Any regression that adds I/O on the fast path is a bug.

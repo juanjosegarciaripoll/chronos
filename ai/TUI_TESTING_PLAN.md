@@ -1,6 +1,6 @@
 # TUI_TESTING_PLAN.md
 
-How `chronos`'s Textual UI is tested. Lands together with Milestone 8.
+How `chronos`'s Textual UI is tested.
 
 ## 1. Layers
 
@@ -35,7 +35,7 @@ Layer 1 carries most of the assertions. Layer 2 verifies that the bindings, scre
 
 `unittest.IsolatedAsyncioTestCase` so we can `await App.run_test()`. Each test owns its temp dir, builds a fresh `TuiServices`, and runs one flow.
 
-Required flows (matching the Milestone 8 acceptance criterion):
+Required flows:
 
 - **F1 — Five views navigable.** Press `d`/`w`/`m`/`a`/`t` in turn; assert `MainScreen._view` becomes `ViewKind.DAY` … `ViewKind.TODOS`. Assert `#view-title` text starts with the expected label.
 - **F2 — Today resets viewed_date.** Press `m` → page back via direct `_viewed_date` mutation → press `T`; assert `_viewed_date == services.now().date()`.
