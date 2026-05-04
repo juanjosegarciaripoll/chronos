@@ -33,10 +33,11 @@ uv run python -m pytest --cov=chronos --cov-branch --cov-fail-under=85 tests/
 - `icalendar`
 - `python-dateutil`
 - `textual`
-- `mcp`
 - `tomli-w`
 
-`anyio` is available transitively through `mcp` and may be used in MCP transport code.
+MCP transport uses only the Python standard library (`asyncio`, `json`, `sys`).
+The MCP SDK (`mcp`) and its transitive dependencies (`anyio`, HTTP stack) are
+not present.
 
 ## Versioning and changelog
 

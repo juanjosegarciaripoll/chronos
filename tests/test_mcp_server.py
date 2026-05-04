@@ -2,23 +2,22 @@
 
 Each test stands up an in-process MCP server backed by a real
 `SqliteIndexRepository` and `VdirMirrorRepository` (no mocking),
-connects a `ClientSession` through
-`create_connected_server_and_client_session`, and exercises all tools.
+drives it through a lightweight JSON-RPC 2.0 client built on asyncio
+queues, and exercises all tools.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-
-from mcp.client.session import ClientSession
-from mcp.shared.memory import create_connected_server_and_client_session
-from mcp.types import TextContent
+from typing import Any
 
 from chronos.domain import (
     CalendarRef,
@@ -29,8 +28,140 @@ from chronos.domain import (
     VTodo,
 )
 from chronos.index_store import SqliteIndexRepository
-from chronos.mcp_server import SERVER_NAME, build_server
+from chronos.mcp_server import SERVER_NAME, McpServer, build_server  # noqa: I001
 from chronos.storage import VdirMirrorRepository
+
+# ---------------------------------------------------------------------------
+# Lightweight in-process MCP client (no external SDK)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TextContent:
+    type: str
+    text: str
+
+
+@dataclass
+class _ToolInfo:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+@dataclass
+class _ListToolsResult:
+    tools: list[_ToolInfo]
+
+
+@dataclass
+class _CallToolResult:
+    content: list[TextContent]
+    is_error: bool
+
+
+class _Client:
+    """Minimal MCP JSON-RPC client backed by asyncio queues."""
+
+    def __init__(
+        self,
+        req_queue: asyncio.Queue[bytes],
+        resp_queue: asyncio.Queue[bytes],
+    ) -> None:
+        self._req = req_queue
+        self._resp = resp_queue
+        self._next_id = 0
+
+    async def _request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        self._next_id += 1
+        msg_id = self._next_id
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id, "method": method}
+        if params is not None:
+            msg["params"] = params
+        await self._req.put(json.dumps(msg).encode() + b"\n")
+        while True:
+            raw = await self._resp.get()
+            resp = json.loads(raw)
+            if resp.get("id") == msg_id:
+                if "error" in resp:
+                    raise RuntimeError(resp["error"]["message"])
+                return resp["result"]
+
+    async def _initialize(self) -> None:
+        await self._request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        )
+
+    async def list_tools(self) -> _ListToolsResult:
+        result = await self._request("tools/list")
+        tools = [
+            _ToolInfo(
+                name=t["name"],
+                description=t.get("description", ""),
+                input_schema=t.get("inputSchema", {}),
+            )
+            for t in result["tools"]
+        ]
+        return _ListToolsResult(tools=tools)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> _CallToolResult:
+        result = await self._request(
+            "tools/call", {"name": name, "arguments": arguments}
+        )
+        content = [
+            TextContent(type=c["type"], text=c["text"])
+            for c in result.get("content", [])
+        ]
+        return _CallToolResult(content=content, is_error=result.get("isError", False))
+
+
+@asynccontextmanager
+async def _connected_session(
+    index: SqliteIndexRepository,
+    mirror: VdirMirrorRepository | None = None,
+) -> AsyncIterator[_Client]:
+    if mirror is None:
+        mirror = _McpServerTestCase._default_mirror  # type: ignore[attr-defined]
+    server: McpServer = build_server(index=index, mirror=mirror)
+
+    req_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    resp_queue: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def readline() -> bytes:
+        return await req_queue.get()
+
+    async def writeline(data: bytes) -> None:
+        await resp_queue.put(data)
+
+    task = asyncio.create_task(
+        server._serve(readline, writeline)  # pyright: ignore[reportPrivateUsage]
+    )
+    client = _Client(req_queue, resp_queue)
+    await client._initialize()
+    try:
+        yield client
+    finally:
+        await req_queue.put(b"")  # EOF: unblock _serve so it exits cleanly
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def _text(content: list[TextContent]) -> str:
+    """Extract the first text block from a tool result."""
+    assert content, "tool returned no content"
+    block = content[0]
+    assert isinstance(block, TextContent), f"unexpected block type: {block!r}"
+    return block.text
+
+
+# ---------------------------------------------------------------------------
+# Test fixtures
+# ---------------------------------------------------------------------------
 
 
 def _ref(account: str, calendar: str, uid: str) -> ComponentRef:
@@ -96,29 +227,6 @@ def _vtodo(
     )
 
 
-@asynccontextmanager
-async def _connected_session(
-    index: SqliteIndexRepository,
-    mirror: VdirMirrorRepository | None = None,
-) -> AsyncIterator[ClientSession]:
-    if mirror is None:
-        mirror = _McpServerTestCase._default_mirror  # type: ignore[attr-defined]
-    server = build_server(index=index, mirror=mirror)
-    async with create_connected_server_and_client_session(
-        server, raise_exceptions=True
-    ) as session:
-        await session.initialize()
-        yield session
-
-
-def _text(content: list[TextContent]) -> str:
-    """Extract the first text block from a tool result."""
-    assert content, "tool returned no content"
-    block = content[0]
-    assert isinstance(block, TextContent), f"unexpected block type: {block!r}"
-    return block.text
-
-
 class _McpServerTestCase(unittest.IsolatedAsyncioTestCase):
     _default_mirror: VdirMirrorRepository  # set in setUp
 
@@ -133,6 +241,11 @@ class _McpServerTestCase(unittest.IsolatedAsyncioTestCase):
 # Keep the old name as an alias so the helper above can reference it
 # before subclasses exist.
 McpServerTestCase = _McpServerTestCase
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
 class ListToolsTest(McpServerTestCase):
@@ -154,9 +267,6 @@ class ListToolsTest(McpServerTestCase):
 
     async def test_no_destructive_tools_present(self) -> None:
         # AGENTS.md §7.6: MCP tools may add data but not destroy it.
-        # Any tool name suggestive of deletion or bulk overwrite is
-        # rejected here. `import_ics` is intentionally absent from the
-        # forbidden list because it is additive.
         forbidden_substrings = (
             "delete",
             "remove",
@@ -203,8 +313,6 @@ class ListCalendarsToolTest(McpServerTestCase):
 
 class QueryRangeToolTest(McpServerTestCase):
     def _seed_with_occurrences(self) -> None:
-        # Two events on different days; only the first should match
-        # the half-open window [2026-05-01, 2026-05-02).
         morning = _vevent(uid="morning@example.com", summary="Morning standup")
         afternoon = _vevent(
             uid="afternoon@example.com",
@@ -264,7 +372,7 @@ class QueryRangeToolTest(McpServerTestCase):
                     "end": "2026-05-01T00:00:00+00:00",
                 },
             )
-        self.assertTrue(result.isError)
+        self.assertTrue(result.is_error)
 
     async def test_invalid_iso_raises(self) -> None:
         async with _connected_session(self.index, self.mirror) as session:
@@ -272,7 +380,7 @@ class QueryRangeToolTest(McpServerTestCase):
                 "query_range",
                 {"start": "not-a-date", "end": "2026-05-02T00:00:00+00:00"},
             )
-        self.assertTrue(result.isError)
+        self.assertTrue(result.is_error)
 
 
 class SearchToolTest(McpServerTestCase):
@@ -364,9 +472,6 @@ class GetEventToolTest(McpServerTestCase):
         self.assertIsNone(json.loads(_text(result.content)))
 
     async def test_get_event_on_a_vtodo_returns_null(self) -> None:
-        # A VTODO with the same lookup keys must not be returned
-        # by get_event — the kind discriminates so an LLM asking
-        # for an event doesn't get a todo silently substituted.
         self.index.upsert_component(_vtodo(uid="task@example.com"))
         async with _connected_session(self.index, self.mirror) as session:
             result = await session.call_tool(
@@ -513,8 +618,7 @@ class ImportIcsToolTest(McpServerTestCase):
                     "ics": ics,
                 },
             )
-        self.assertTrue(result.isError)
-        # Error message names the valid calendars so the agent can retry.
+        self.assertTrue(result.is_error)
         self.assertIn("personal/work", _text(result.content))
 
     async def test_import_ics_invalid_on_conflict_returns_error(self) -> None:
@@ -532,18 +636,154 @@ class ImportIcsToolTest(McpServerTestCase):
                     "on_conflict": "explode",
                 },
             )
-        self.assertTrue(result.isError)
+        self.assertTrue(result.is_error)
 
 
 class ServerMetadataTest(McpServerTestCase):
     async def test_server_name_and_initialization(self) -> None:
         async with _connected_session(self.index, self.mirror) as session:
-            # `initialize()` was called inside the helper; round-trip
+            # initialize() was called inside the helper; round-trip
             # a list_tools to confirm the server is responsive.
             tools = await session.list_tools()
         self.assertTrue(tools.tools)
-        # Module-level constant is what we expose to clients.
         self.assertEqual(SERVER_NAME, "chronos")
+
+
+# ---------------------------------------------------------------------------
+# McpServer unit tests (handler branches and schema generation)
+# ---------------------------------------------------------------------------
+
+
+class McpServerHandleTest(unittest.IsolatedAsyncioTestCase):
+    """Direct tests against McpServer._handle and _serve for branch coverage."""
+
+    def setUp(self) -> None:
+        from chronos.mcp_server import McpServer
+
+        self.server = McpServer("test")
+
+        @self.server.tool()
+        def echo(  # pyright: ignore[reportUnusedFunction]
+            message: str,
+            count: int,
+            flag: bool = False,  # noqa: ARG001
+        ) -> str:
+            """Echo the message count times."""
+            return message * count
+
+    def _handle(
+        self, method: str, params: dict[str, Any] | None = None, msg_id: int = 1
+    ) -> dict[str, Any] | None:
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id, "method": method}
+        if params is not None:
+            msg["params"] = params
+        return self.server._handle(msg)  # pyright: ignore[reportPrivateUsage]
+
+    def test_ping(self) -> None:
+        resp = self._handle("ping")
+        assert resp is not None
+        self.assertEqual(resp["result"], {})
+
+    def test_resources_list(self) -> None:
+        resp = self._handle("resources/list")
+        assert resp is not None
+        self.assertEqual(resp["result"]["resources"], [])
+
+    def test_prompts_list(self) -> None:
+        resp = self._handle("prompts/list")
+        assert resp is not None
+        self.assertEqual(resp["result"]["prompts"], [])
+
+    def test_resources_templates_list(self) -> None:
+        resp = self._handle("resources/templates/list")
+        assert resp is not None
+        self.assertEqual(resp["result"]["resourceTemplates"], [])
+
+    def test_unknown_method_with_id_returns_error(self) -> None:
+        resp = self._handle("unknown/method")
+        assert resp is not None
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32601)
+
+    def test_unknown_notification_returns_none(self) -> None:
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "method": "unknown/notification"}
+        resp = self.server._handle(msg)  # pyright: ignore[reportPrivateUsage]
+        self.assertIsNone(resp)
+
+    def test_unknown_tool_name_returns_error(self) -> None:
+        resp = self._handle("tools/call", {"name": "does_not_exist", "arguments": {}})
+        assert resp is not None
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32601)
+
+    def test_bool_hint_in_tool_schema(self) -> None:
+        schema = self.server._tools[0].input_schema  # pyright: ignore[reportPrivateUsage]
+        self.assertEqual(schema["properties"]["flag"]["type"], "boolean")
+
+    async def test_malformed_json_is_skipped(self) -> None:
+        req_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        resp_queue: asyncio.Queue[bytes] = asyncio.Queue()
+
+        async def readline() -> bytes:
+            return await req_queue.get()
+
+        async def writeline(data: bytes) -> None:
+            await resp_queue.put(data)
+
+        task = asyncio.create_task(
+            self.server._serve(readline, writeline)  # pyright: ignore[reportPrivateUsage]
+        )
+        # Malformed JSON — server must skip it and keep running.
+        await req_queue.put(b"not valid json\n")
+        # A valid ping proves the server is still alive.
+        await req_queue.put(
+            json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}).encode() + b"\n"
+        )
+        raw = await asyncio.wait_for(resp_queue.get(), timeout=1.0)
+        self.assertEqual(json.loads(raw)["id"], 9)
+        # EOF to stop the server.
+        await req_queue.put(b"")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+class HintToSchemaTest(unittest.TestCase):
+    """Unit tests for _hint_to_schema type-to-JSON-Schema conversion."""
+
+    def _s(self, hint: Any) -> dict[str, Any]:
+        from chronos.mcp_server import _hint_to_schema  # pyright: ignore[reportPrivateUsage]  # noqa: I001
+
+        return _hint_to_schema(hint)
+
+    def test_str(self) -> None:
+        self.assertEqual(self._s(str), {"type": "string"})
+
+    def test_int(self) -> None:
+        self.assertEqual(self._s(int), {"type": "integer"})
+
+    def test_bool(self) -> None:
+        self.assertEqual(self._s(bool), {"type": "boolean"})
+
+    def test_float(self) -> None:
+        self.assertEqual(self._s(float), {"type": "number"})
+
+    def test_none_type(self) -> None:
+        self.assertEqual(self._s(type(None)), {"type": "null"})
+
+    def test_list(self) -> None:
+        self.assertEqual(self._s(list), {"type": "array"})
+
+    def test_dict(self) -> None:
+        self.assertEqual(self._s(dict), {"type": "object"})
+
+    def test_optional_str(self) -> None:
+        self.assertEqual(self._s(str | None), {"type": "string"})
+
+    def test_unknown_falls_back_to_string(self) -> None:
+        class _Custom:
+            pass
+
+        self.assertEqual(self._s(_Custom), {"type": "string"})
 
 
 # Reference type alias to satisfy basedpyright unused-import rule

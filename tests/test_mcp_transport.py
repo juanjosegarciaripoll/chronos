@@ -135,9 +135,7 @@ class TcpTestCase(unittest.IsolatedAsyncioTestCase):
         await probe.wait_closed()
 
         bound_state = McpServerState(port=port, token=state.token)
-        task = asyncio.create_task(
-            serve_tcp(server, state=bound_state)  # type: ignore[arg-type]
-        )
+        task = asyncio.create_task(serve_tcp(server, state=bound_state))
         await asyncio.sleep(0.05)  # let the server bind
         return task, port
 

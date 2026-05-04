@@ -1,6 +1,6 @@
 """MCP transport layer: TCP server, stdio bridge, and stdio self-contained mode.
 
-Three async entry points (all running under anyio with asyncio backend):
+Three async entry points (all pure asyncio — no external MCP SDK):
 
 `serve_tcp(server, *, state)`
     Accepts MCP connections on 127.0.0.1:state.port.  Each client must
@@ -13,11 +13,10 @@ Three async entry points (all running under anyio with asyncio backend):
     Used by `chronos mcp` when a long-running instance is detected.
 
 `run_stdio_standalone(server)`
-    Runs an MCP session directly over stdin/stdout using the standard
-    mcp.server.stdio.stdio_server() transport.  Used by `chronos mcp`
-    when no running instance is detected.
+    Runs an MCP session directly over stdin/stdout.
+    Used by `chronos mcp` when no running instance is detected.
 
-Message framing: newline-delimited JSON (one SessionMessage per line).
+Message framing: newline-delimited JSON (one JSON-RPC object per line).
 Auth frame: `{"auth": "<token>"}\\n` — first line from the client before
 any MCP traffic.
 """
@@ -27,14 +26,9 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from typing import Any
+from collections.abc import Callable
 
-import anyio
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from mcp.server.lowlevel import Server
-from mcp.shared.message import SessionMessage
-from mcp.types import JSONRPCMessage
-
+from chronos.mcp_server import McpServer
 from chronos.mcp_state import McpServerState
 
 AUTH_TIMEOUT: float = 2.0
@@ -42,11 +36,17 @@ CONNECT_TIMEOUT: float = 0.5
 
 
 async def serve_tcp(
-    server: Server[Any, Any],
+    server: McpServer,
     *,
     state: McpServerState,
+    on_bound: Callable[[McpServerState], None] | None = None,
 ) -> None:
-    """Accept MCP connections on 127.0.0.1:state.port until cancelled."""
+    """Accept MCP connections on 127.0.0.1:state.port until cancelled.
+
+    If *on_bound* is provided it is called with the actual `McpServerState`
+    (which may have a different port than *state* when port=0 was requested)
+    once the socket is bound and ready to accept connections.
+    """
 
     async def _handle(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -59,6 +59,9 @@ async def serve_tcp(
             writer.close()
 
     tcp_server = await asyncio.start_server(_handle, "127.0.0.1", state.port)
+    actual_port: int = tcp_server.sockets[0].getsockname()[1]
+    if on_bound is not None:
+        on_bound(McpServerState(port=actual_port, token=state.token))
     async with tcp_server:
         await tcp_server.serve_forever()
 
@@ -95,30 +98,32 @@ async def run_stdio_bridge(state: McpServerState) -> None:
             sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
 
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(stdin_to_tcp)
-        tg.start_soon(tcp_to_stdout)
+    tasks = [
+        asyncio.create_task(stdin_to_tcp()),
+        asyncio.create_task(tcp_to_stdout()),
+    ]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def run_stdio_standalone(server: Server[Any, Any]) -> None:
+async def run_stdio_standalone(server: McpServer) -> None:
     """Run an MCP session directly over stdin/stdout."""
-    from mcp.server.stdio import stdio_server
-
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+    await server._run_stdio()  # pyright: ignore[reportPrivateUsage]
 
 
-# Connection handler ----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Connection handler
+# ---------------------------------------------------------------------------
 
 
 async def _serve_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    server: Server[Any, Any],
+    server: McpServer,
     token: str,
 ) -> None:
     """Authenticate one TCP connection then run an MCP session on it."""
@@ -130,46 +135,14 @@ async def _serve_connection(
     except (TimeoutError, json.JSONDecodeError, AttributeError):
         return
 
-    in_send: MemoryObjectSendStream[SessionMessage | Exception]
-    in_recv: MemoryObjectReceiveStream[SessionMessage | Exception]
-    out_send: MemoryObjectSendStream[SessionMessage]
-    out_recv: MemoryObjectReceiveStream[SessionMessage]
+    async def readline() -> bytes:
+        return await reader.readline()
 
-    in_send, in_recv = anyio.create_memory_object_stream(max_buffer_size=16)
-    out_send, out_recv = anyio.create_memory_object_stream(max_buffer_size=16)
+    async def writeline(data: bytes) -> None:
+        writer.write(data)
+        await writer.drain()
 
-    async def tcp_to_in() -> None:
-        async with in_send:
-            while True:
-                line = await reader.readline()
-                if not line:
-                    break
-                try:
-                    msg = JSONRPCMessage.model_validate_json(line)
-                    await in_send.send(SessionMessage(message=msg))
-                except Exception as exc:  # noqa: BLE001
-                    await in_send.send(exc)
-
-    async def out_to_tcp() -> None:
-        async with out_recv:
-            async for session_msg in out_recv:
-                serialized = (
-                    session_msg.message.model_dump_json(
-                        by_alias=True, exclude_none=True
-                    )
-                    + "\n"
-                )
-                writer.write(serialized.encode())
-                await writer.drain()
-
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(tcp_to_in)
-        tg.start_soon(out_to_tcp)
-        await server.run(
-            in_recv,
-            out_send,
-            server.create_initialization_options(),
-        )
+    await server._serve(readline, writeline)  # pyright: ignore[reportPrivateUsage]
 
 
 __all__ = [

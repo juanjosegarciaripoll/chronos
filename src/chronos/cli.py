@@ -985,11 +985,11 @@ def cmd_mcp(ctx: CliContext) -> int:
     print to stdout while the server runs (stdin/stdout carry the
     JSON-RPC stream).
     """
-    import anyio
+    import asyncio
 
     from chronos.mcp_server import run_mcp_stdio
 
-    anyio.run(lambda: run_mcp_stdio(index=ctx.index, mirror=ctx.mirror))
+    asyncio.run(run_mcp_stdio(index=ctx.index, mirror=ctx.mirror))
     return 0
 
 

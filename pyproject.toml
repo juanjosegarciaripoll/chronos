@@ -9,7 +9,6 @@ dependencies = [
     "icalendar>=5.0",
     "python-dateutil>=2.9",
     "textual>=0.80",
-    "mcp>=1.0",
     "tomli-w>=1.0",
 ]
 

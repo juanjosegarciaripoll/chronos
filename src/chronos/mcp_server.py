@@ -16,25 +16,28 @@ Exposes six tools backed by the same `IndexRepository` and
 No destructive tools are present (see `ai/AGENTS.md` §7.6`): an
 over-eager LLM can add data but cannot delete events or calendars.
 
-Transports
-----------
+Transport
+---------
 stdio (default)
     ``chronos mcp``
     Use with Claude Desktop or any local MCP client.
 
-Streamable HTTP
-    ``chronos mcp --port 8765``
-    Use in Docker or remote deployments.
+Implements the MCP stdio wire format (newline-delimited JSON-RPC 2.0)
+directly without the MCP SDK, eliminating its HTTP-stack transitive
+dependencies.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
-from collections.abc import Sequence
+import sys
+import typing
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
-
-from mcp.server.fastmcp import FastMCP
+from typing import Any, TypeVar
 
 from chronos.domain import (
     CalendarRef,
@@ -48,15 +51,227 @@ from chronos.domain import (
 from chronos.protocols import IndexRepository, MirrorRepository
 
 SERVER_NAME = "chronos"
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+# ---------------------------------------------------------------------------
+# Minimal MCP server (no external SDK)
+# ---------------------------------------------------------------------------
+
+_EMPTY_LIST_RESPONSES: dict[str, str] = {
+    "resources/list": "resources",
+    "prompts/list": "prompts",
+    "resources/templates/list": "resourceTemplates",
+}
 
 
-def build_mcp_server(*, index: IndexRepository, mirror: MirrorRepository) -> FastMCP:
-    """Build a `FastMCP` instance with all chronos tools registered.
+@dataclass
+class _Tool:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    fn: Callable[..., Any]
 
-    The returned server captures `index` and `mirror` in closures;
-    callers control their lifecycles.
-    """
-    mcp: FastMCP = FastMCP(SERVER_NAME)
+
+def _hint_to_schema(hint: Any) -> dict[str, Any]:
+    """Best-effort Python type hint → JSON Schema fragment."""
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+    if origin is not None and args and type(None) in args:
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            return _hint_to_schema(non_none[0])
+    if hint is str or hint is bytes:
+        return {"type": "string"}
+    if hint is int:
+        return {"type": "integer"}
+    if hint is bool:
+        return {"type": "boolean"}
+    if hint is float:
+        return {"type": "number"}
+    if hint is type(None):
+        return {"type": "null"}
+    if origin is list or hint is list:
+        return {"type": "array"}
+    if origin is dict or hint is dict:
+        return {"type": "object"}
+    return {"type": "string"}
+
+
+def _build_input_schema(fn: Callable[..., Any]) -> dict[str, Any]:
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        hints = {}
+    sig = inspect.signature(fn)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, param in sig.parameters.items():
+        properties[name] = _hint_to_schema(hints.get(name, str))
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+    return {"type": "object", "properties": properties, "required": required}
+
+
+class McpServer:
+    """Minimal MCP server: register tools, serve over stdio or a stream pair."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._tools: list[_Tool] = []
+
+    def tool(self) -> Callable[[_F], _F]:
+        """Decorator: register a callable as an MCP tool."""
+
+        def decorator(fn: _F) -> _F:
+            self._tools.append(
+                _Tool(
+                    name=fn.__name__,
+                    description=(fn.__doc__ or "").strip(),
+                    input_schema=_build_input_schema(fn),
+                    fn=fn,
+                )
+            )
+            return fn
+
+        return decorator
+
+    def _handle(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+        """Dispatch one JSON-RPC 2.0 message; return a response or None."""
+        method: str = msg.get("method", "")
+        msg_id = msg.get("id")
+        params: dict[str, Any] = msg.get("params") or {}
+
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "protocolVersion": _MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": self._name, "version": "1.0"},
+                },
+            }
+
+        if method in {
+            "notifications/initialized",
+            "notifications/cancelled",
+            "notifications/progress",
+        }:
+            return None
+
+        if method == "ping":
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+
+        if method == "tools/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "tools": [
+                        {
+                            "name": t.name,
+                            "description": t.description,
+                            "inputSchema": t.input_schema,
+                        }
+                        for t in self._tools
+                    ]
+                },
+            }
+
+        if method == "tools/call":
+            name = params.get("name", "")
+            arguments: dict[str, Any] = params.get("arguments") or {}
+            tool = next((t for t in self._tools if t.name == name), None)
+            if tool is None:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32601, "message": f"Unknown tool: {name}"},
+                }
+            try:
+                result = tool.fn(**arguments)
+                text = (
+                    result
+                    if isinstance(result, str)
+                    else json.dumps(result, default=str)
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": text}],
+                        "isError": False,
+                    },
+                }
+            except Exception as exc:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": str(exc)}],
+                        "isError": True,
+                    },
+                }
+
+        if method in _EMPTY_LIST_RESPONSES:
+            key = _EMPTY_LIST_RESPONSES[method]
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {key: []}}
+
+        if msg_id is not None:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+            }
+        return None
+
+    async def _serve(
+        self,
+        readline: Callable[[], Any],
+        writeline: Callable[[bytes], Any],
+    ) -> None:
+        """Read/dispatch/write loop shared by stdio and TCP handlers."""
+        while True:
+            raw = await readline()
+            if not raw:
+                break
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            response = self._handle(msg)
+            if response is not None:
+                line = json.dumps(response, separators=(",", ":")).encode() + b"\n"
+                await writeline(line)
+
+    def run(self) -> None:
+        """Run the MCP server over stdin/stdout (blocking)."""
+        asyncio.run(self._run_stdio())
+
+    async def _run_stdio(self) -> None:
+        loop = asyncio.get_running_loop()
+        stdin_buf = sys.stdin.buffer
+        stdout_buf = sys.stdout.buffer
+
+        async def readline() -> bytes:
+            return await loop.run_in_executor(None, stdin_buf.readline)
+
+        async def writeline(data: bytes) -> None:
+            stdout_buf.write(data)
+            stdout_buf.flush()
+
+        await self._serve(readline, writeline)
+
+
+# ---------------------------------------------------------------------------
+# Server factory
+# ---------------------------------------------------------------------------
+
+
+def build_mcp_server(*, index: IndexRepository, mirror: MirrorRepository) -> McpServer:
+    """Build a `McpServer` with all chronos tools registered."""
+    mcp = McpServer(SERVER_NAME)
 
     @mcp.tool()
     def list_calendars() -> str:  # pyright: ignore[reportUnusedFunction]
@@ -134,13 +349,18 @@ def build_mcp_server(*, index: IndexRepository, mirror: MirrorRepository) -> Fas
     return mcp
 
 
-def build_server(*, index: IndexRepository, mirror: MirrorRepository) -> Any:
-    """Return the underlying low-level MCP Server for in-process testing.
+def build_server(*, index: IndexRepository, mirror: MirrorRepository) -> McpServer:
+    """Return a configured `McpServer`.
 
-    Tests drive this via `mcp.shared.memory.create_connected_server_and_client_session`.
-    Production code should use `run_mcp_stdio` or `start_tcp_server`.
+    Used by tests and the CLI.  Production callers should use
+    `run_mcp_stdio` or `start_tcp_server` instead.
     """
-    return build_mcp_server(index=index, mirror=mirror)._mcp_server  # pyright: ignore[reportPrivateUsage]
+    return build_mcp_server(index=index, mirror=mirror)
+
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
 
 
 async def run_mcp_stdio(
@@ -155,8 +375,6 @@ async def run_mcp_stdio(
     port is not reachable, runs a self-contained MCP session directly
     over stdin/stdout.
     """
-    import asyncio
-
     from chronos.mcp_state import read_state, remove_state
     from chronos.mcp_transport import (
         CONNECT_TIMEOUT,
@@ -194,7 +412,6 @@ async def start_tcp_server(
     The state file is removed on exit.  Intended for the TUI and
     future daemon mode — not called from the CLI.
     """
-    import asyncio
     import secrets
 
     from chronos.mcp_state import McpServerState, remove_state, write_state
@@ -202,25 +419,16 @@ async def start_tcp_server(
 
     token = secrets.token_hex(32)
     server = build_server(index=index, mirror=mirror)
-
-    # Bind to get the actual port before writing the state file.
-    async def _noop(_r: asyncio.StreamReader, _w: asyncio.StreamWriter) -> None:
-        pass
-
-    probe = await asyncio.start_server(_noop, "127.0.0.1", port)
-    actual_port: int = probe.sockets[0].getsockname()[1]
-    probe.close()
-    await probe.wait_closed()
-
-    state = McpServerState(port=actual_port, token=token)
-    write_state(state)
+    draft = McpServerState(port=port, token=token)
     try:
-        await serve_tcp(server, state=state)
+        await serve_tcp(server, state=draft, on_bound=write_state)
     finally:
         remove_state()
 
 
-# Tool implementations --------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
 
 
 def _tool_list_calendars(index: IndexRepository) -> list[dict[str, str]]:
@@ -243,7 +451,7 @@ def _tool_query_range(
     for calendar_ref in index.list_calendars():
         for occ in index.query_occurrences(calendar_ref, window_start, window_end):
             out.append(_occurrence_to_dict(calendar_ref, occ, index))
-    out.sort(key=lambda row: cast(str, row["start"]))
+    out.sort(key=lambda row: str(row["start"]))
     return out
 
 
@@ -275,8 +483,6 @@ def _tool_get_component(
         ComponentKind.VEVENT if isinstance(component, VEvent) else ComponentKind.VTODO
     )
     if actual_kind != kind:
-        # Asked for a VEVENT but found a VTODO (or vice versa): treat as
-        # not-found so an LLM asking for an event doesn't get a todo.
         return None
     return _full_dict(component)
 
@@ -321,7 +527,9 @@ def _tool_import_ics(
     }
 
 
-# Serialisation helpers -------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Serialisation helpers
+# ---------------------------------------------------------------------------
 
 
 def _summary_dict(component: StoredComponent) -> dict[str, Any]:
@@ -391,13 +599,10 @@ def _parse_datetime(value: str, *, label: str) -> datetime:
 
 
 __all__ = [
+    "McpServer",
     "SERVER_NAME",
     "build_mcp_server",
     "build_server",
     "run_mcp_stdio",
     "start_tcp_server",
 ]
-
-# Keep Sequence imported so basedpyright sees all collection types used
-# in return annotations of the tool helpers above.
-_ = Sequence
