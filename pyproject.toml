@@ -9,8 +9,12 @@ dependencies = [
     "icalendar>=5.0",
     "python-dateutil>=2.9",
     "textual>=0.80",
+    "tinymcp",
     "tomli-w>=1.0",
 ]
+
+[tool.uv.sources]
+tinymcp = { path = "../tinymcp", editable = true }
 
 [project.scripts]
 chronos = "chronos.cli:main"

@@ -1,4 +1,4 @@
-"""Tests for mcp_state.py and mcp_transport.py.
+"""Tests for mcp_state.py and TCP/bridge transport (backed by tinymcp).
 
 All tests use asyncio (via IsolatedAsyncioTestCase) and real TCP sockets
 bound to ephemeral ports — no mocking of network I/O.
@@ -14,10 +14,11 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tinymcp import AUTH_TIMEOUT, serve_tcp
+
 from chronos.domain import ComponentRef, LocalStatus, VEvent
 from chronos.index_store import SqliteIndexRepository
 from chronos.mcp_state import McpServerState, read_state, remove_state, write_state
-from chronos.mcp_transport import AUTH_TIMEOUT, serve_tcp
 from chronos.storage import VdirMirrorRepository
 
 # ---------------------------------------------------------------------------
@@ -28,7 +29,6 @@ from chronos.storage import VdirMirrorRepository
 class McpStateTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = self.enterContext(tempfile.TemporaryDirectory())
-        # Redirect state file into the temp dir by monkey-patching the module.
         import chronos.mcp_state as _mod
         import chronos.paths as _paths
 
@@ -109,35 +109,32 @@ class TcpTestCase(unittest.IsolatedAsyncioTestCase):
         self.mirror = VdirMirrorRepository(tmp / "mirror")
         self.addCleanup(self.index.close)
 
-    def _server_and_token(self) -> tuple[object, McpServerState]:
-        """Return (low-level Server, McpServerState) on an ephemeral port."""
+    def _server_and_token(self) -> tuple[object, str]:
+        """Return (McpServer, token)."""
         from chronos.mcp_server import build_server
 
         server = build_server(index=self.index, mirror=self.mirror)
         token = secrets.token_hex(16)
-        return server, McpServerState(port=0, token=token)
+        return server, token
 
     async def _start_tcp(
-        self, server: object, state: McpServerState
+        self, server: object, token: str
     ) -> tuple[asyncio.Task[None], int]:
-        """Start serve_tcp in a background task; return (task, actual_port).
+        """Start serve_tcp on an ephemeral port; return (task, actual_port)."""
+        port_holder: list[int] = []
 
-        Port 0 binds to an ephemeral port. We probe to find the actual
-        port before starting the real server.
-        """
+        def on_bound(p: int) -> None:
+            port_holder.append(p)
 
-        async def _noop(_r: asyncio.StreamReader, _w: asyncio.StreamWriter) -> None:
-            pass
-
-        probe = await asyncio.start_server(_noop, "127.0.0.1", 0)
-        port: int = probe.sockets[0].getsockname()[1]
-        probe.close()
-        await probe.wait_closed()
-
-        bound_state = McpServerState(port=port, token=state.token)
-        task = asyncio.create_task(serve_tcp(server, state=bound_state))
-        await asyncio.sleep(0.05)  # let the server bind
-        return task, port
+        task = asyncio.create_task(
+            serve_tcp(server, port=0, token=token, on_bound=on_bound)  # type: ignore[arg-type]
+        )
+        for _ in range(40):
+            if port_holder:
+                break
+            await asyncio.sleep(0.025)
+        self.assertTrue(port_holder, "server did not bind in time")
+        return task, port_holder[0]
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +144,12 @@ class TcpTestCase(unittest.IsolatedAsyncioTestCase):
 
 class AuthTest(TcpTestCase):
     async def test_wrong_token_closes_connection(self) -> None:
-        server, state = self._server_and_token()
-        task, port = await self._start_tcp(server, state)
+        server, token = self._server_and_token()
+        task, port = await self._start_tcp(server, token)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             writer.write(json.dumps({"auth": "WRONG_TOKEN"}).encode() + b"\n")
             await writer.drain()
-            # Server closes connection without responding.
             data = await asyncio.wait_for(reader.read(256), timeout=1.0)
             self.assertEqual(data, b"")
             writer.close()
@@ -162,12 +158,10 @@ class AuthTest(TcpTestCase):
             await asyncio.gather(task, return_exceptions=True)
 
     async def test_no_auth_frame_times_out_and_closes(self) -> None:
-
-        server, state = self._server_and_token()
-        task, port = await self._start_tcp(server, state)
+        server, token = self._server_and_token()
+        task, port = await self._start_tcp(server, token)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            # Send nothing — server should close after AUTH_TIMEOUT.
             data = await asyncio.wait_for(reader.read(256), timeout=AUTH_TIMEOUT + 1.0)
             self.assertEqual(data, b"")
             writer.close()
@@ -176,13 +170,12 @@ class AuthTest(TcpTestCase):
             await asyncio.gather(task, return_exceptions=True)
 
     async def test_correct_token_keeps_connection_open(self) -> None:
-        server, state = self._server_and_token()
-        task, port = await self._start_tcp(server, state)
+        server, token = self._server_and_token()
+        task, port = await self._start_tcp(server, token)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            writer.write(json.dumps({"auth": state.token}).encode() + b"\n")
+            writer.write(json.dumps({"auth": token}).encode() + b"\n")
             await writer.drain()
-            # Send a valid MCP initialize request.
             init = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -195,7 +188,6 @@ class AuthTest(TcpTestCase):
             }
             writer.write(json.dumps(init).encode() + b"\n")
             await writer.drain()
-            # Should receive a response line.
             line = await asyncio.wait_for(reader.readline(), timeout=2.0)
             response = json.loads(line)
             self.assertEqual(response.get("id"), 1)
@@ -217,7 +209,6 @@ class BridgeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.index = SqliteIndexRepository(tmp / "index.sqlite3")
         self.mirror = VdirMirrorRepository(tmp / "mirror")
         self.addCleanup(self.index.close)
-        # Redirect state file into temp dir.
         import chronos.mcp_state as _mod
         import chronos.paths as _paths
 
@@ -252,10 +243,9 @@ class BridgeDetectionTest(unittest.IsolatedAsyncioTestCase):
             nonlocal standalone_called
             standalone_called = True
 
-        with mock.patch("chronos.mcp_transport.run_stdio_standalone", _fake_standalone):
+        with mock.patch("tinymcp.run_stdio_standalone", _fake_standalone):
             await run_mcp_stdio(index=self.index, mirror=self.mirror)
 
-        # State file must have been removed before standalone was called.
         self.assertIsNone(_read())
         self.assertTrue(standalone_called)
 
@@ -274,10 +264,9 @@ class BridgeDetectionTest(unittest.IsolatedAsyncioTestCase):
             nonlocal standalone_called
             standalone_called = True
 
-        with mock.patch("chronos.mcp_transport.run_stdio_standalone", _fake_standalone):
+        with mock.patch("tinymcp.run_stdio_standalone", _fake_standalone):
             await run_mcp_stdio(index=self.index, mirror=self.mirror)
 
-        # No state file was created (no TCP server started).
         self.assertIsNone(_read())
         self.assertTrue(standalone_called)
 
@@ -312,18 +301,15 @@ class BridgeForwardingTest(TcpTestCase):
 
     async def test_bridge_forwards_list_tools_request(self) -> None:
         """Verify a message round-trips through the bridge to the TCP server."""
-        server, state = self._server_and_token()
-        task, port = await self._start_tcp(server, state)
-        bound_state = McpServerState(port=port, token=state.token)
-        write_state(bound_state)
+        server, token = self._server_and_token()
+        task, port = await self._start_tcp(server, token)
+        write_state(McpServerState(port=port, token=token))
 
         try:
-            # Connect directly (simulating what run_stdio_bridge does).
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            writer.write(json.dumps({"auth": bound_state.token}).encode() + b"\n")
+            writer.write(json.dumps({"auth": token}).encode() + b"\n")
             await writer.drain()
 
-            # MCP initialize handshake.
             init = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -337,15 +323,12 @@ class BridgeForwardingTest(TcpTestCase):
             writer.write(json.dumps(init).encode() + b"\n")
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), timeout=2.0)
-            init_resp = json.loads(line)
-            self.assertEqual(init_resp.get("id"), 1)
+            self.assertEqual(json.loads(line).get("id"), 1)
 
-            # Send initialized notification.
             notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
             writer.write(json.dumps(notif).encode() + b"\n")
             await writer.drain()
 
-            # Request tools list.
             tools_req = {
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -371,10 +354,6 @@ class BridgeForwardingTest(TcpTestCase):
 
 
 class StartTcpServerTest(TcpTestCase):
-    """Acceptance test for Milestone 14: start_tcp_server writes the state
-    file, a run_mcp_stdio call detects it and bridges, and the state file
-    is removed when the server exits."""
-
     def setUp(self) -> None:
         super().setUp()
         tmp_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -416,7 +395,6 @@ class StartTcpServerTest(TcpTestCase):
             self.assertGreater(state.port, 0)
             self.assertTrue(state.token)
 
-            # The state file port is reachable and responds to auth + MCP.
             reader, writer = await asyncio.open_connection("127.0.0.1", state.port)
             writer.write(json.dumps({"auth": state.token}).encode() + b"\n")
             await writer.drain()
@@ -441,7 +419,6 @@ class StartTcpServerTest(TcpTestCase):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-        # State file must be removed after server exits.
         self.assertIsNone(read_state())
 
     async def test_run_mcp_stdio_bridges_to_running_server(self) -> None:
@@ -456,19 +433,19 @@ class StartTcpServerTest(TcpTestCase):
         try:
             state = await self._wait_for_state()
 
-            bridged_with: McpServerState | None = None
+            bridged_port: int | None = None
+            bridged_token: str | None = None
 
-            async def _capture_bridge(s: McpServerState) -> None:
-                nonlocal bridged_with
-                bridged_with = s
+            async def _capture_bridge(*, host: str, port: int, token: str) -> None:  # noqa: ARG001
+                nonlocal bridged_port, bridged_token
+                bridged_port = port
+                bridged_token = token
 
-            with mock.patch("chronos.mcp_transport.run_stdio_bridge", _capture_bridge):
+            with mock.patch("tinymcp.run_stdio_bridge", _capture_bridge):
                 await run_mcp_stdio(index=self.index, mirror=self.mirror)
 
-            self.assertIsNotNone(bridged_with)
-            assert bridged_with is not None
-            self.assertEqual(bridged_with.port, state.port)
-            self.assertEqual(bridged_with.token, state.token)
+            self.assertEqual(bridged_port, state.port)
+            self.assertEqual(bridged_token, state.token)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

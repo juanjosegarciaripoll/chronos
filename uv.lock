@@ -158,6 +158,7 @@ dependencies = [
     { name = "icalendar" },
     { name = "python-dateutil" },
     { name = "textual" },
+    { name = "tinymcp" },
     { name = "tomli-w" },
 ]
 
@@ -187,6 +188,7 @@ requires-dist = [
     { name = "icalendar", specifier = ">=5.0" },
     { name = "python-dateutil", specifier = ">=2.9" },
     { name = "textual", specifier = ">=0.80" },
+    { name = "tinymcp", editable = "../tinymcp" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
 
@@ -1252,6 +1254,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/89/bec5709fb759f9c784bbcb30b2e3497df3f901691d13c2b864dbf6694a17/textual-8.2.4.tar.gz", hash = "sha256:d4e2b2ddd7157191d00b228592b7c739ea080b7d792fd410f23ca75f05ea76c4", size = 1848933, upload-time = "2026-04-19T04:20:45.845Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/32/02932f0d597cdbb34e34bf24266ff0f2cf292ccb3aafc37dd9efcb0cc416/textual-8.2.4-py3-none-any.whl", hash = "sha256:a83bd3f0cc7125ca203845af753f9d6b6be030025ecd1b05cc75ebe645b9c4ba", size = 724390, upload-time = "2026-04-19T04:20:49.968Z" },
+]
+
+[[package]]
+name = "tinymcp"
+version = "0.1.0"
+source = { editable = "../tinymcp" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "basedpyright", specifier = ">=1.17" },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

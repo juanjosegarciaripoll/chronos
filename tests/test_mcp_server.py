@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tinymcp import McpServer  # noqa: I001
+
 from chronos.domain import (
     CalendarRef,
     ComponentRef,
@@ -28,7 +30,7 @@ from chronos.domain import (
     VTodo,
 )
 from chronos.index_store import SqliteIndexRepository
-from chronos.mcp_server import SERVER_NAME, McpServer, build_server  # noqa: I001
+from chronos.mcp_server import SERVER_NAME, build_server
 from chronos.storage import VdirMirrorRepository
 
 # ---------------------------------------------------------------------------
@@ -751,7 +753,7 @@ class HintToSchemaTest(unittest.TestCase):
     """Unit tests for _hint_to_schema type-to-JSON-Schema conversion."""
 
     def _s(self, hint: Any) -> dict[str, Any]:
-        from chronos.mcp_server import _hint_to_schema  # pyright: ignore[reportPrivateUsage]  # noqa: I001
+        from tinymcp.server import _hint_to_schema  # pyright: ignore[reportPrivateUsage]  # noqa: I001
 
         return _hint_to_schema(hint)
 
