@@ -25,7 +25,6 @@ stdio (default)
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime
 from typing import Any, cast
@@ -157,25 +156,17 @@ async def run_mcp_stdio(
     port is not reachable, runs a self-contained MCP session directly
     over stdin/stdout.
     """
-    from tinymcp import CONNECT_TIMEOUT, run_stdio_bridge, run_stdio_standalone
+    from tinymcp import run_mcp
 
     from chronos.mcp_state import read_state, remove_state
 
     state = read_state()
-    if state is not None:
-        try:
-            _reader, _writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", state.port),
-                timeout=CONNECT_TIMEOUT,
-            )
-            _writer.close()
-            await run_stdio_bridge(host="127.0.0.1", port=state.port, token=state.token)
-            return
-        except (TimeoutError, ConnectionRefusedError, OSError):
-            remove_state()
-
-    server = build_server(index=index, mirror=mirror)
-    await run_stdio_standalone(server)
+    await run_mcp(
+        build_server(index=index, mirror=mirror),
+        remote_port=state.port if state is not None else None,
+        remote_token=state.token if state is not None else None,
+        on_unreachable=remove_state,
+    )
 
 
 async def start_tcp_server(
