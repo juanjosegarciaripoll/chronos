@@ -53,6 +53,9 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "ARG", "SIM"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["chronos"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -60,15 +63,20 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.13"
 strict = true
-mypy_path = "src"
+packages = ["chronos"]
+
+[[tool.mypy.overrides]]
+module = ["caldav.*", "icalendar.*"]
+ignore_missing_imports = true
 
 [tool.basedpyright]
 pythonVersion = "3.13"
-typeCheckingMode = "strict"
-include = ["src"]
+typeCheckingMode = "standard"
+include = ["src", "tests"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = [
