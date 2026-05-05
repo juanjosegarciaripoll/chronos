@@ -188,7 +188,7 @@ requires-dist = [
     { name = "icalendar", specifier = ">=5.0" },
     { name = "python-dateutil", specifier = ">=2.9" },
     { name = "textual", specifier = ">=0.80" },
-    { name = "tinymcp", editable = "../tinymcp" },
+    { name = "tinymcp", git = "https://github.com/juanjosegarciaripoll/tinymcp.git" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
 
@@ -1259,18 +1259,7 @@ wheels = [
 [[package]]
 name = "tinymcp"
 version = "0.1.0"
-source = { editable = "../tinymcp" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "basedpyright", specifier = ">=1.17" },
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8.3" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "ruff", specifier = ">=0.6" },
-]
+source = { git = "https://github.com/juanjosegarciaripoll/tinymcp.git#8108d9bf32849f295032def7acfee7deda1cdfc4" }
 
 [[package]]
 name = "tomli-w"
