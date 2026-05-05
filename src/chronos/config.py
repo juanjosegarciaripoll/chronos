@@ -8,8 +8,6 @@ import tomllib
 from pathlib import Path
 from typing import cast
 
-import tomli_w
-
 from chronos.domain import (
     GOOGLE_CALDAV_URL,
     AccountConfig,
@@ -264,6 +262,57 @@ def _optional_int(
     return value
 
 
+def _toml_str(v: str) -> str:
+    return (
+        '"'
+        + v.replace("\\", "\\\\")
+         .replace('"', '\\"')
+         .replace("\n", "\\n")
+         .replace("\r", "\\r")
+         .replace("\t", "\\t")
+        + '"'
+    )
+
+
+def _toml_scalar(v: str | int | bool) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    return _toml_str(v)
+
+
+def _toml_array(items: list[str]) -> str:
+    return "[" + ", ".join(_toml_str(s) for s in items) + "]"
+
+
+def _toml_inline_table(d: dict[str, object]) -> str:
+    pairs = [
+        f"{k} = {_toml_array(cast(list[str], v)) if isinstance(v, list) else _toml_scalar(cast(str | int | bool, v))}"
+        for k, v in d.items()
+    ]
+    return "{ " + ", ".join(pairs) + " }"
+
+
+def _dumps_toml(data: dict[str, object]) -> str:
+    lines: list[str] = []
+    for k, v in data.items():
+        if k == "accounts":
+            continue
+        lines.append(f"{k} = {_toml_scalar(cast(str | int | bool, v))}")
+    for account in cast(list[dict[str, object]], data.get("accounts", [])):
+        lines.append("")
+        lines.append("[[accounts]]")
+        for k, v in account.items():
+            if isinstance(v, dict):
+                lines.append(f"{k} = {_toml_inline_table(cast(dict[str, object], v))}")
+            elif isinstance(v, list):
+                lines.append(f"{k} = {_toml_array(cast(list[str], v))}")
+            else:
+                lines.append(f"{k} = {_toml_scalar(cast(str | int | bool, v))}")
+    return "\n".join(lines) + "\n"
+
+
 def dump(config: AppConfig) -> dict[str, object]:
     """Serialise AppConfig to a TOML-writeable dict.
 
@@ -283,7 +332,7 @@ def dump(config: AppConfig) -> dict[str, object]:
 
 def save(config: AppConfig, path: Path) -> None:
     """Write `config` to `path` atomically (temp-file + rename)."""
-    payload = tomli_w.dumps(dump(config)).encode("utf-8")
+    payload = _dumps_toml(dump(config)).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".toml", dir=path.parent)
     try:

@@ -362,11 +362,10 @@ def _sample_config(**overrides: object) -> AppConfig:
 
 class DumpTest(unittest.TestCase):
     def test_dump_produces_valid_toml(self) -> None:
-        import tomli_w  # noqa: PLC0415 — local to keep deps explicit
+        from chronos.config import _dumps_toml  # noqa: PLC0415
 
         config = _sample_config()
-        data = dump(config)
-        rendered = tomli_w.dumps(data)
+        rendered = _dumps_toml(dump(config))
         # Round-trip through tomllib to prove the output is valid TOML.
         reparsed = tomllib.loads(rendered)
         self.assertEqual(reparsed["config_version"], 1)
