@@ -11,7 +11,6 @@ src/chronos/
   version.py
   authorization.py
   bootstrap.py
-  caldav_client.py
   cli.py
   config.py
   credentials.py
@@ -22,8 +21,6 @@ src/chronos/
   index_store.py
   locking.py
   mcp_server.py
-  mcp_state.py
-  mcp_transport.py
   mutations.py
   oauth.py
   paths.py
@@ -33,6 +30,17 @@ src/chronos/
   storage.py
   storage_indexing.py
   sync.py
+  caldav/
+    __init__.py
+    errors.py
+    xml.py
+    protocol.py
+    session.py
+  http/
+    __init__.py
+    auth.py
+    client.py
+    errors.py
   tui/
     app.py
     bindings.py
@@ -66,11 +74,11 @@ src/chronos/
 - Calendar semantics:
   - `ical_parser.py`, `recurrence.py`, `mutations.py`, `ingest.py`
 - Sync and remote access:
-  - `authorization.py`, `credentials.py`, `oauth.py`, `caldav_client.py`, `sync.py`
+  - `authorization.py`, `credentials.py`, `oauth.py`, `caldav/`, `http/`, `sync.py`
 - User-facing surfaces:
   - `cli.py`, `tui/`
 - MCP transport and tools:
-  - `mcp_server.py`, `mcp_state.py`, `mcp_transport.py`
+  - `mcp_server.py`
 
 ## Notes that matter
 
