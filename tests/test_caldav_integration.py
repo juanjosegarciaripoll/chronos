@@ -23,7 +23,7 @@ import os
 import unittest
 import uuid
 
-from chronos.caldav_client import CalDAVHttpSession
+from chronos.caldav import CalDAVHttpSession
 
 
 def _integration_enabled() -> bool:

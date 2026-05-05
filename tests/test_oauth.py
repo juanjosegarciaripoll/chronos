@@ -11,7 +11,6 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 from chronos.oauth import (
@@ -28,19 +27,10 @@ from chronos.oauth import (
 )
 
 
-def _mock_response(*, status: int = 200, json_body: dict[str, Any]) -> MagicMock:
-    response = MagicMock()
-    response.status_code = status
-    response.json.return_value = json_body
-    return response
-
-
 class RefreshAccessTokenTest(unittest.TestCase):
     def test_returns_new_access_token_and_expiry(self) -> None:
         post = MagicMock(
-            return_value=_mock_response(
-                json_body={"access_token": "new-at", "expires_in": 3600}
-            )
+            return_value={"access_token": "new-at", "expires_in": 3600}
         )
         token, expiry = refresh_access_token(
             client_id="c",
@@ -122,9 +112,6 @@ class TokenStoreTest(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
     def test_save_keyboard_interrupt_preserves_prior_file(self) -> None:
-        # If a Ctrl-C lands inside save_tokens, the prior token file
-        # must remain readable and complete; otherwise the next sync
-        # would fail to load tokens and force re-auth.
         path = self.tmp / "tokens.json"
         save_tokens(
             path,
@@ -180,37 +167,26 @@ class BearerTokenAuthTest(unittest.TestCase):
             now=lambda: now_val,
         )
 
-    def test_sets_authorization_header(self) -> None:
+    def test_returns_bearer_header(self) -> None:
         auth = self._auth(post=MagicMock(), now_val=500_000.0)
-        request = MagicMock()
-        request.headers = {}
-        auth(request)
-        self.assertEqual(request.headers["Authorization"], "Bearer at-initial")
+        self.assertEqual(auth.get_header(), "Bearer at-initial")
 
     def test_refreshes_when_expired(self) -> None:
         post = MagicMock(
-            return_value=_mock_response(
-                json_body={"access_token": "at-refreshed", "expires_in": 3600}
-            )
+            return_value={"access_token": "at-refreshed", "expires_in": 3600}
         )
         # now > expiry_unix - skew → refresh triggered
         auth = self._auth(post=post, now_val=2_000_000.0)
-        request = MagicMock()
-        request.headers = {}
-        auth(request)
-        self.assertEqual(request.headers["Authorization"], "Bearer at-refreshed")
+        header = auth.get_header()
+        self.assertEqual(header, "Bearer at-refreshed")
         self.assertTrue(auth.rotated)
 
     def test_persist_writes_rotated_tokens(self) -> None:
         post = MagicMock(
-            return_value=_mock_response(
-                json_body={"access_token": "at-refreshed", "expires_in": 100}
-            )
+            return_value={"access_token": "at-refreshed", "expires_in": 100}
         )
         auth = self._auth(post=post, now_val=2_000_000.0)
-        request = MagicMock()
-        request.headers = {}
-        auth(request)
+        auth.get_header()
         auth.persist()
         self.assertTrue(self.token_path.exists())
         reloaded = load_tokens(self.token_path)
@@ -218,9 +194,7 @@ class BearerTokenAuthTest(unittest.TestCase):
 
     def test_persist_is_noop_when_not_rotated(self) -> None:
         auth = self._auth(post=MagicMock(), now_val=500_000.0)
-        request = MagicMock()
-        request.headers = {}
-        auth(request)
+        auth.get_header()
         auth.persist()
         self.assertFalse(self.token_path.exists())
 
@@ -296,9 +270,6 @@ class BuildAuthorizationUrlTest(unittest.TestCase):
         self.assertEqual(params["state"], "csrf-state-token")
         self.assertEqual(params["code_challenge"], "abc123")
         self.assertEqual(params["code_challenge_method"], "S256")
-        # offline + prompt=consent are required to receive a refresh
-        # token on every flow (Google's default returns access_token only
-        # after the first authorization).
         self.assertEqual(params["access_type"], "offline")
         self.assertEqual(params["prompt"], "consent")
 
@@ -306,14 +277,12 @@ class BuildAuthorizationUrlTest(unittest.TestCase):
 class ExchangeCodeForTokensTest(unittest.TestCase):
     def test_returns_stored_tokens_from_response(self) -> None:
         post = MagicMock(
-            return_value=_mock_response(
-                json_body={
-                    "access_token": "at",
-                    "refresh_token": "rt",
-                    "expires_in": 3600,
-                    "scope": "https://example/scope",
-                }
-            )
+            return_value={
+                "access_token": "at",
+                "refresh_token": "rt",
+                "expires_in": 3600,
+                "scope": "https://example/scope",
+            }
         )
         tokens = exchange_code_for_tokens(
             client_id="c",
@@ -328,19 +297,14 @@ class ExchangeCodeForTokensTest(unittest.TestCase):
         self.assertEqual(tokens.access_token, "at")
         self.assertEqual(tokens.refresh_token, "rt")
         self.assertEqual(tokens.expiry_unix, 4600.0)
-        # And the request carried PKCE + the auth code.
-        ((_url,), kwargs) = post.call_args
-        sent = kwargs["data"]
-        self.assertEqual(sent["code"], "auth-code-from-redirect")
-        self.assertEqual(sent["code_verifier"], "pkce-verifier")
-        self.assertEqual(sent["grant_type"], "authorization_code")
+        # The request carried the auth code and PKCE verifier
+        (url, sent_data, timeout) = post.call_args.args
+        self.assertEqual(sent_data["code"], "auth-code-from-redirect")
+        self.assertEqual(sent_data["code_verifier"], "pkce-verifier")
+        self.assertEqual(sent_data["grant_type"], "authorization_code")
 
     def test_http_error_raises(self) -> None:
-        post = MagicMock(
-            return_value=_mock_response(
-                status=400, json_body={"error": "invalid_grant"}
-            )
-        )
+        post = MagicMock(side_effect=OAuthError("HTTP 400 {'error': 'invalid_grant'}"))
         with self.assertRaises(OAuthError) as ctx:
             exchange_code_for_tokens(
                 client_id="c",
@@ -357,23 +321,14 @@ class ExchangeCodeForTokensTest(unittest.TestCase):
 class LoopbackFlowTest(unittest.TestCase):
     """`run_loopback_flow` end-to-end: real `HTTPServer` on `127.0.0.1:0`,
     an in-test "browser" that fires the redirect via `urllib.request`,
-    and a mocked token endpoint. The callback path runs through the
-    actual handler the production code uses."""
+    and a mocked token endpoint."""
 
     def _browser_that_calls_back(
         self,
         *,
         code: str = "auth-code-xyz",
         state_override: str | None = None,
-    ) -> tuple[Any, dict[str, str]]:
-        """Returns `(open_browser, captured)`.
-
-        The returned `open_browser` triggers a real HTTP GET to the
-        redirect URI in a daemon thread, simulating the browser
-        completing the consent flow. `state_override=None` echoes back
-        whatever state was in the auth URL (happy path); pass a literal
-        to force a CSRF mismatch.
-        """
+    ) -> tuple[object, dict[str, str]]:
         import contextlib
         import threading
         import urllib.request
@@ -401,37 +356,31 @@ class LoopbackFlowTest(unittest.TestCase):
 
     def test_happy_path_exchanges_code(self) -> None:
         token_post = MagicMock(
-            return_value=_mock_response(
-                json_body={
-                    "access_token": "at",
-                    "refresh_token": "rt",
-                    "expires_in": 3600,
-                    "scope": "https://example/scope",
-                }
-            )
+            return_value={
+                "access_token": "at",
+                "refresh_token": "rt",
+                "expires_in": 3600,
+                "scope": "https://example/scope",
+            }
         )
         open_browser, captured = self._browser_that_calls_back(code="auth-code-xyz")
         tokens = run_loopback_flow(
             client_id="cid",
             client_secret="cs",
             scope="https://example/scope",
-            open_browser=open_browser,
+            open_browser=open_browser,  # type: ignore[arg-type]
             http_post=token_post,
             now=lambda: 5000.0,
             timeout_seconds=10,
         )
-        # Browser was opened with an auth URL pointing at our local
-        # ephemeral port (`http://127.0.0.1:<port>/`).
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1%3A", captured["auth_url"])
-        # Tokens flowed through the exchange.
         self.assertEqual(tokens.access_token, "at")
         self.assertEqual(tokens.refresh_token, "rt")
         self.assertEqual(tokens.expiry_unix, 8600.0)
-        # And the token endpoint received the code captured at the
-        # redirect.
-        sent = token_post.call_args.kwargs["data"]
-        self.assertEqual(sent["code"], "auth-code-xyz")
-        self.assertEqual(sent["grant_type"], "authorization_code")
+        # Token endpoint received the code
+        (url, sent_data, timeout) = token_post.call_args.args
+        self.assertEqual(sent_data["code"], "auth-code-xyz")
+        self.assertEqual(sent_data["grant_type"], "authorization_code")
 
     def test_no_browser_raises(self) -> None:
         with self.assertRaises(OAuthError) as ctx:
@@ -451,7 +400,7 @@ class LoopbackFlowTest(unittest.TestCase):
                 client_id="c",
                 client_secret="s",
                 scope="x",
-                open_browser=open_browser,
+                open_browser=open_browser,  # type: ignore[arg-type]
                 timeout_seconds=10,
             )
         self.assertIn("state", str(ctx.exception).lower())
@@ -462,18 +411,12 @@ class LoopbackFlowTest(unittest.TestCase):
                 client_id="c",
                 client_secret="s",
                 scope="x",
-                open_browser=lambda _url: True,  # opens but never calls back
+                open_browser=lambda _url: True,
                 timeout_seconds=1,
             )
         self.assertIn("timed out", str(ctx.exception))
 
     def test_keyboard_interrupt_releases_listening_port(self) -> None:
-        # Bind a real HTTPServer on 127.0.0.1:0, then raise
-        # KeyboardInterrupt out of `open_browser`. The `try/finally`
-        # in `run_loopback_flow` must call `server_close()` so the
-        # ephemeral port is released — otherwise the next OAuth
-        # attempt could fail to bind, or the OS keeps the port
-        # tied to a dead process.
         import http.server as _http_server
         import socket
 
@@ -500,14 +443,7 @@ class LoopbackFlowTest(unittest.TestCase):
                 timeout_seconds=1,
             )
 
-        # The listening socket must be closed: a fresh bind on the
-        # same port either succeeds (Linux/macOS, where SO_REUSEADDR
-        # lets the next bind grab a freed port immediately) or
-        # raises a clean OSError that doesn't mention the original
-        # process. Either way, server.fileno() is -1 once closed.
         srv = captured["server"]
         self.assertEqual(srv.socket.fileno(), -1)
-        # Sanity: another HTTPServer can bind to a fresh ephemeral
-        # port without colliding with the leftover state.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", 0))

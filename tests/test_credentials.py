@@ -128,7 +128,7 @@ class BuildAuthTest(unittest.TestCase):
         account = _account(EnvCredential(variable="PW"), username="alice@example.com")
         auth = provider.build_auth(account)
         self.assertEqual(auth.basic, ("alice@example.com", "secret"))
-        self.assertIsNone(auth.http_auth)
+        self.assertIsNone(auth.bearer_token_fn)
         self.assertIsNone(auth.on_commit)
 
 
@@ -170,7 +170,7 @@ class GoogleBackendTest(unittest.TestCase):
             token_path=token_path,
         )
         self.assertIsNone(auth.basic)
-        self.assertIs(auth.http_auth, bearer)
+        self.assertIs(auth.bearer_token_fn, bearer.get_header)
         self.assertIs(auth.on_commit, bearer.persist)
 
 
@@ -227,7 +227,7 @@ class InteractiveAuthorizerTest(unittest.TestCase):
         self.assertTrue(token_path.exists())
         # build_bearer_auth runs after persistence so it sees real tokens.
         mock_build.assert_called_once()
-        self.assertIs(auth.http_auth, bearer)
+        self.assertIs(auth.bearer_token_fn, bearer.get_header)
 
     def test_missing_tokens_without_authorizer_raises_clean_error(self) -> None:
         from chronos.domain import OAuthCredential

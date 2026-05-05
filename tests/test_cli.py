@@ -95,9 +95,11 @@ class CliTestCase(unittest.TestCase):
 
 
 class ParserTest(CliTestCase):
-    def test_missing_subcommand_exits_nonzero(self) -> None:
-        with self.assertRaises(SystemExit):
-            cli.main([])
+    def test_no_subcommand_defaults_to_tui(self) -> None:
+        # chronos with no args defaults to the tui command; without a
+        # config it returns 2 (missing-config path), not a parser error.
+        result = cli.main([])
+        self.assertEqual(result, 2)
 
     def test_unknown_subcommand_exits_nonzero(self) -> None:
         with self.assertRaises(SystemExit):
@@ -248,7 +250,7 @@ class SyncCommandTest(CliTestCase):
 
     def test_sync_without_factory_builds_caldav_http_session(self) -> None:
         from chronos.authorization import Authorization
-        from chronos.caldav_client import CalDAVHttpSession
+        from chronos.caldav import CalDAVHttpSession
         from chronos.cli import _default_session_factory
 
         session = _default_session_factory(
@@ -258,7 +260,7 @@ class SyncCommandTest(CliTestCase):
 
     def test_sync_reports_caldav_error_from_session(self) -> None:
         from chronos.authorization import Authorization
-        from chronos.caldav_client import CalDAVError
+        from chronos.caldav import CalDAVError
 
         def broken_factory(
             _account: AccountConfig, _auth: Authorization
@@ -282,7 +284,7 @@ class SyncCommandTest(CliTestCase):
         email-discovery failing in the default factory) must be reported
         per-account, not crash the whole sync."""
         from chronos.authorization import Authorization
-        from chronos.caldav_client import CalDAVError
+        from chronos.caldav import CalDAVError
 
         def broken_factory(
             _account: AccountConfig, _auth: Authorization
@@ -417,7 +419,7 @@ class BuildSyncRunnerTest(CliTestCase):
 
     def test_caldav_error_lands_in_errors(self) -> None:
         from chronos.authorization import Authorization
-        from chronos.caldav_client import CalDAVError
+        from chronos.caldav import CalDAVError
 
         def broken_factory(
             _account: AccountConfig, _auth: Authorization
@@ -455,7 +457,7 @@ class BuildSyncRunnerTest(CliTestCase):
         constructing the session (e.g. Google email-discovery failing).
         That must land in the per-account errors tuple, not crash."""
         from chronos.authorization import Authorization
-        from chronos.caldav_client import CalDAVError
+        from chronos.caldav import CalDAVError
 
         def broken_factory(
             _account: AccountConfig, _auth: Authorization

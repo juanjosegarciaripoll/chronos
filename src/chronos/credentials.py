@@ -134,7 +134,7 @@ def _build_oauth_authorization(
         )
     except OAuthError as exc:
         raise CredentialResolutionError(f"{account_name}: {exc}") from exc
-    return Authorization(http_auth=bearer, on_commit=bearer.persist)
+    return Authorization(bearer_token_fn=bearer.get_header, on_commit=bearer.persist)
 
 
 def _resolve_command(account_name: str, spec: CommandCredential) -> str:

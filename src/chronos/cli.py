@@ -25,7 +25,7 @@ from chronos.bootstrap import (
     offer_bootstrap,
     write_template,
 )
-from chronos.caldav_client import CalDAVError, CalDAVHttpSession
+from chronos.caldav import CalDAVError, CalDAVHttpSession
 from chronos.config import ConfigError
 from chronos.config import load as load_config
 from chronos.config import save as save_config
@@ -216,12 +216,10 @@ _LOG_DATEFMT = "%H:%M:%S"
 class _DropH3DowngradeFilter(logging.Filter):
     """Drop urllib3's per-request "Retrying after MustDowngradeError" line.
 
-    niquests advertises HTTP/3, urllib3 picks it up from the server's
-    Alt-Svc header, then bails because it can't actually serve h3 —
-    every CalDAV request retries on HTTP/2 and logs a WARNING. The
-    retry is automatic and harmless; the warning just clutters the
-    sync output. We still want every other urllib3 WARNING (real
-    network errors, redirects, etc.).
+    Some HTTP libraries advertise HTTP/3 and then fall back to HTTP/2,
+    logging a WARNING for each request. The retry is automatic and
+    harmless; the warning just clutters the sync output. We still want
+    every other WARNING (real network errors, redirects, etc.).
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -310,7 +308,7 @@ def _default_cli_authorizer(
         sys.stdout.flush()
         raise
     except Exception as exc:
-        # Network/HTTP errors from niquests are not OAuthError; convert
+        # Network/HTTP errors are not OAuthError; convert
         # them so the credentials provider's standard wrapping applies.
         sys.stdout.write(
             f"\n[{account_name}] OAuth setup failed (network/HTTP "

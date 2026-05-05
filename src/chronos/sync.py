@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
-from chronos.caldav_client import (
+from chronos.caldav.errors import (
     CalDAVConflictError,
     CalDAVError,
     SyncTokenExpiredError,
@@ -473,7 +473,7 @@ def _slow_path_reconcile(
     )
 
     # When the server returns an empty etag (CalDAV gateways that omit
-    # getetag, see caldav_client._MISSING_SERVER_ETAG), we can't compare
+    # getetag, see caldav.xml._MISSING_SERVER_ETAG), we can't compare
     # — trust the local copy and skip the refetch. CTag still drives
     # slow-path entry, so missed in-place modifications on such servers
     # are bounded by CTag granularity, not by every-sync churn.
@@ -770,7 +770,7 @@ def _apply_server_deletions(
 _INGEST_PROGRESS_INTERVAL = 50
 
 # How many hrefs go into one `calendar-multiget` REPORT. Mirrors
-# `caldav_client._MULTIGET_BATCH_SIZE` deliberately: the session
+# `caldav.xml._MULTIGET_BATCH_SIZE` deliberately: the session
 # already chunks internally, but the producer thread here pre-chunks
 # so it can hand each chunk to the consumer as soon as the network
 # returns rather than buffering the entire response set.

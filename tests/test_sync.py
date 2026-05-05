@@ -960,7 +960,7 @@ class FetchIngestPipelineTest(SyncTestCase):
         # as the same exception type, not get swallowed in the worker.
         self._seed(3)
 
-        from chronos.caldav_client import CalDAVError
+        from chronos.caldav import CalDAVError
 
         def boom(
             calendar_url: str, hrefs: Sequence[str]
@@ -1185,7 +1185,7 @@ class MediumPathTest(SyncTestCase):
         self.assertEqual(len(rows), 10)
 
     def test_acquire_sync_token_returns_none_on_caldav_error(self) -> None:
-        from chronos.caldav_client import CalDAVError
+        from chronos.caldav import CalDAVError
         from chronos.sync import _acquire_sync_token
 
         original = self.session.get_sync_token

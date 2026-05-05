@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from chronos.caldav_client import SyncTokenExpiredError
+from chronos.caldav.errors import SyncTokenExpiredError
 from chronos.domain import ComponentKind, RemoteCalendar
 
 

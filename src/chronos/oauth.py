@@ -15,13 +15,12 @@ Pieces:
 - **Token store** (`save_tokens`, `load_tokens`) — plain JSON under
   `paths.oauth_token_dir()`, with a best-effort 0600 chmod (ignored
   on Windows). Contains the refresh token; keep it safe.
-- **Bearer auth** (`BearerTokenAuth`) — a `niquests.auth.AuthBase`
-  that sets `Authorization: Bearer <access_token>` on every request
-  and refreshes expired access tokens using the refresh grant (RFC
-  6749 §6) against `_TOKEN_URL`.
+- **Bearer auth** (`BearerTokenAuth`) — checks the expiry and invokes
+  the refresh grant (RFC 6749 §6) against `_TOKEN_URL` when needed.
+  Call `get_header()` to get the current ``Authorization`` header value.
 
 Implementation note: we deliberately do not depend on `google-auth`
-because its transport layer requires `requests`, which we don't ship.
+or `niquests`/`requests`; all HTTP is done via `urllib.request`.
 """
 
 from __future__ import annotations
@@ -37,15 +36,14 @@ import stat
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-
-import niquests
-from niquests.auth import AuthBase
 
 _AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -81,6 +79,34 @@ class StoredTokens:
     refresh_token: str
     expiry_unix: float
     scope: str
+
+
+# Default HTTP POST using stdlib urllib -----------------------------------
+
+
+def _default_http_post(
+    url: str, data: dict[str, str], timeout: float
+) -> dict[str, object]:
+    """POST form data to `url` and return parsed JSON dict."""
+    encoded = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=encoded, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        try:
+            payload = json.loads(body.decode())
+        except (ValueError, UnicodeDecodeError):
+            payload = None
+        raise OAuthError(f"HTTP {exc.code} {payload!r}") from exc
+    except OSError as exc:
+        raise OAuthError(f"network error: {exc}") from exc
+    try:
+        return cast(dict[str, object], json.loads(body.decode()))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise OAuthError("invalid JSON response") from exc
 
 
 # Loopback flow (RFC 8252 + PKCE) ---------------------------------------------
@@ -137,32 +163,24 @@ def exchange_code_for_tokens(
     code_verifier: str,
     redirect_uri: str,
     scope: str,
-    http_post: Callable[..., Any] | None = None,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]]
+    | None = None,
     now: Callable[[], float] | None = None,
 ) -> StoredTokens:
     """Exchange an authorization code (loopback flow) for tokens."""
-    post = http_post or niquests.post
+    post = http_post or _default_http_post
     clock = now or time.time
-    response = cast(
-        Any,
-        post(
-            _TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "code": code,
-                "code_verifier": code_verifier,
-                "grant_type": "authorization_code",
-                "redirect_uri": redirect_uri,
-            },
-            timeout=30,
-        ),
-    )
-    _raise_for_status(response, "token exchange")
-    data = response.json()
-    if not isinstance(data, dict):
-        raise OAuthError(f"token exchange returned non-object JSON: {data!r}")
-    payload = cast(dict[str, object], data)
+    data: dict[str, str] = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "code_verifier": code_verifier,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    payload = post(_TOKEN_URL, data, 30.0)
+    if not isinstance(payload, dict):
+        raise OAuthError(f"token exchange returned non-object JSON: {payload!r}")
     expires_in = _optional_int(payload, "expires_in", default=3600)
     return StoredTokens(
         access_token=_require_str(payload, "access_token"),
@@ -176,11 +194,7 @@ def _make_callback_handler(
     received: dict[str, str],
     done: threading.Event,
 ) -> type[http.server.BaseHTTPRequestHandler]:
-    """HTTPRequestHandler class that captures the OAuth redirect query string.
-
-    Closure-bound so each loopback flow has its own state — class
-    attributes would race if two flows ever overlap.
-    """
+    """HTTPRequestHandler class that captures the OAuth redirect query string."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "chronos-oauth/1"
@@ -206,9 +220,6 @@ def _make_callback_handler(
             done.set()
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, ARG002
-            # Silence the default per-request stderr logging — the
-            # loopback callback is internal plumbing, not server
-            # traffic the user needs to see.
             pass
 
     return Handler
@@ -226,20 +237,11 @@ def run_loopback_flow(
     ]
     | None = None,
     timeout_seconds: float = _LOOPBACK_TIMEOUT_SECONDS,
-    http_post: Callable[..., Any] | None = None,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]]
+    | None = None,
     now: Callable[[], float] | None = None,
 ) -> StoredTokens:
-    """OAuth 2.0 loopback flow with PKCE for Desktop-class clients.
-
-    Listens on a random local port, opens the user's browser to
-    Google's consent screen with that port as the redirect URI, waits
-    for the redirect carrying the auth code (or error), and exchanges
-    the code for tokens.
-
-    Raises `OAuthError` if no browser is available, the redirect times
-    out, the state token doesn't match (CSRF), or Google reports an
-    error.
-    """
+    """OAuth 2.0 loopback flow with PKCE for Desktop-class clients."""
     open_browser = open_browser or webbrowser.open
     make_server = server_factory or http.server.HTTPServer
     received: dict[str, str] = {}
@@ -308,14 +310,7 @@ def run_loopback_flow(
 
 
 def save_tokens(path: Path, tokens: StoredTokens) -> None:
-    """Atomic write of tokens to `path`. Sets 0600 perms on POSIX.
-
-    Same crash-safety contract as `storage.VdirMirrorRepository.write`:
-    bytes go into a freshly-named temp file in the target directory,
-    are fsync'd, then `os.replace`'d into place. On any exception
-    (including `KeyboardInterrupt`) the temp file is unlinked so the
-    next sync doesn't trip over half-written token data.
-    """
+    """Atomic write of tokens to `path`. Sets 0600 perms on POSIX."""
     payload = json.dumps(
         {
             "access_token": tokens.access_token,
@@ -337,8 +332,7 @@ def save_tokens(path: Path, tokens: StoredTokens) -> None:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp_name)
         raise
-    # Best-effort permission tightening on POSIX; chmod is a no-op on
-    # Windows but harmless.
+    # Best-effort permission tightening on POSIX.
     with contextlib.suppress(OSError):
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
@@ -372,44 +366,36 @@ def refresh_access_token(
     client_id: str,
     client_secret: str,
     refresh_token: str,
-    http_post: Callable[..., Any] | None = None,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]]
+    | None = None,
     now: Callable[[], float] | None = None,
 ) -> tuple[str, float]:
     """Exchange a refresh token for a new access token.
 
     Returns `(access_token, expiry_unix)`.
     """
-    post = http_post or niquests.post
+    post = http_post or _default_http_post
     clock = now or time.time
-    response = cast(
-        Any,
-        post(
-            _TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-            timeout=30,
-        ),
-    )
-    _raise_for_status(response, "token refresh")
-    data = response.json()
-    if not isinstance(data, dict):
-        raise OAuthError(f"token refresh returned non-object JSON: {data!r}")
-    payload = cast(dict[str, object], data)
+    data: dict[str, str] = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+    payload = post(_TOKEN_URL, data, 30.0)
+    if not isinstance(payload, dict):
+        raise OAuthError(f"token refresh returned non-object JSON: {payload!r}")
     access_token = _require_str(payload, "access_token")
     expires_in = _optional_int(payload, "expires_in", default=3600)
     return access_token, clock() + expires_in
 
 
-class BearerTokenAuth(AuthBase):
-    """Sign HTTP requests with an access token; refresh on expiry.
+class BearerTokenAuth:
+    """Provides Bearer auth headers; refreshes expired access tokens.
 
     Holds the last known access/refresh tokens and the expiry. On every
-    `__call__`, checks the expiry against `now()` (with a 60s skew
-    margin) and invokes the refresh grant if needed. The caller can
+    `get_header()` call, checks the expiry against `now()` (with a 60s
+    skew margin) and invokes the refresh grant if needed. The caller can
     ask whether the token `rotated` and call `persist()` to write the
     new token back to disk.
     """
@@ -422,7 +408,8 @@ class BearerTokenAuth(AuthBase):
         client_secret: str,
         scope: str,
         token_path: Path,
-        http_post: Callable[..., Any] | None = None,
+        http_post: Callable[[str, dict[str, str], float], dict[str, object]]
+        | None = None,
         now: Callable[[], float] | None = None,
     ) -> None:
         self._token = stored.access_token
@@ -436,7 +423,8 @@ class BearerTokenAuth(AuthBase):
         self._now = now or time.time
         self._initial_token = stored.access_token
 
-    def __call__(self, request: Any) -> Any:
+    def get_header(self) -> str:
+        """Return 'Bearer <token>', refreshing if expired."""
         if self._now() >= self._expiry_unix - _EXPIRY_SKEW_SECONDS:
             new_token, new_expiry = refresh_access_token(
                 client_id=self._client_id,
@@ -447,8 +435,7 @@ class BearerTokenAuth(AuthBase):
             )
             self._token = new_token
             self._expiry_unix = new_expiry
-        request.headers["Authorization"] = f"Bearer {self._token}"
-        return request
+        return f"Bearer {self._token}"
 
     @property
     def rotated(self) -> bool:
@@ -488,17 +475,6 @@ def build_bearer_auth(
 
 
 # Helpers ---------------------------------------------------------------------
-
-
-def _raise_for_status(response: Any, label: str) -> None:
-    status = int(getattr(response, "status_code", 0))
-    if 200 <= status < 300:
-        return
-    try:
-        body = response.json()
-    except (ValueError, niquests.exceptions.RequestException):
-        body = None
-    raise OAuthError(f"{label} failed: HTTP {status} {body!r}")
 
 
 def _require_str(data: dict[str, object], key: str) -> str:
