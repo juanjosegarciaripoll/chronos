@@ -512,14 +512,23 @@ class PutTest(unittest.TestCase):
 
 
 class DeleteTest(unittest.TestCase):
-    def test_delete_calls_client(self) -> None:
+    def test_delete_passes_if_match_header(self) -> None:
         client = MagicMock()
         client.request.return_value = _resp(204, b"")
         session = _session_with_mock_client(client)
-        session.delete("https://x/cal/a.ics", etag="ignored")
+        session.delete("https://x/cal/a.ics", etag="etag-v1")
         client.request.assert_called_once()
         call = client.request.call_args
         self.assertEqual(call[0][0], "DELETE")
+        headers = call[1].get("headers", {})
+        self.assertEqual(headers.get("If-Match"), "etag-v1")
+
+    def test_412_raises_conflict_error(self) -> None:
+        client = MagicMock()
+        client.request.side_effect = HttpStatusError(412, b"Precondition Failed", {})
+        session = _session_with_mock_client(client)
+        with self.assertRaises(CalDAVConflictError):
+            session.delete("https://x/cal/a.ics", etag="stale-etag")
 
     def test_not_found_translated(self) -> None:
         client = MagicMock()

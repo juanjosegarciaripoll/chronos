@@ -837,14 +837,29 @@ class DeleteResourceTest(unittest.TestCase):
         client.request.return_value = _resp(204, b"")
         delete_resource(client, self._URL)
         method, path = client.request.call_args[0]
+        headers = client.request.call_args[1].get("headers", {})
         self.assertEqual(method, "DELETE")
         self.assertEqual(path, "/cal/work/a.ics")
+        self.assertNotIn("If-Match", headers)
 
     def test_returns_none_on_success(self) -> None:
         client = _client()
         client.request.return_value = _resp(204, b"")
         result = delete_resource(client, self._URL)
         self.assertIsNone(result)
+
+    def test_if_match_sets_header(self) -> None:
+        client = _client()
+        client.request.return_value = _resp(204, b"")
+        delete_resource(client, self._URL, if_match="etag-v1")
+        headers = client.request.call_args[1].get("headers", {})
+        self.assertEqual(headers.get("If-Match"), "etag-v1")
+
+    def test_412_raises_conflict_error(self) -> None:
+        client = _client()
+        client.request.side_effect = _err(412)
+        with self.assertRaises(CalDAVConflictError):
+            delete_resource(client, self._URL, if_match="etag-v1")
 
     def test_404_raises_not_found(self) -> None:
         client = _client()

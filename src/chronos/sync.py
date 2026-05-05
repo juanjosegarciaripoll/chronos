@@ -1078,6 +1078,9 @@ def _push_trashed(
             continue
         try:
             session.delete(component.href, etag)
+        except CalDAVConflictError:
+            logger.info("delete deferred: etag mismatch for %s (will retry)", component.href)
+            continue
         except Exception:  # noqa: BLE001 — any server error means retry next sync
             continue
         hrefs_done.add(component.href)

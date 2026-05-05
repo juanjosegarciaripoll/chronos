@@ -323,12 +323,24 @@ def put_resource(
     return etag.strip().strip('"')
 
 
-def delete_resource(client: Client, resource_url: str) -> None:
-    """Unconditional DELETE."""
+def delete_resource(
+    client: Client,
+    resource_url: str,
+    *,
+    if_match: str | None = None,
+) -> None:
+    """DELETE a resource, optionally conditional on the current etag."""
     path = urlsplit(resource_url).path or resource_url
+    headers: dict[str, str] = {}
+    if if_match is not None:
+        headers["If-Match"] = if_match
     try:
-        client.request("DELETE", path)
+        client.request("DELETE", path, headers=headers)
     except HttpStatusError as exc:
+        if exc.status == 412:
+            raise CalDAVConflictError(
+                f"DELETE {path}: precondition failed (412)"
+            ) from exc
         if exc.status == 404:
             raise CalDAVNotFoundError(
                 f"DELETE {path}: not found (404)"

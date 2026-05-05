@@ -62,7 +62,7 @@ class CalDAVHttpSession:
 
     def delete(self, href: str, etag: str) -> None:
         path = urlsplit(href).path
-        protocol.delete_resource(self._client, path)
+        protocol.delete_resource(self._client, path, if_match=etag)
 
     def sync_collection(
         self,
