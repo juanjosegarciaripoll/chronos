@@ -343,7 +343,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "(DEBUG/INFO/WARNING/ERROR)."
         ),
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.set_defaults(command="tui")
+    sub = parser.add_subparsers(dest="command")
 
     sync_p = sub.add_parser(
         "sync", help="Synchronise configured accounts with their servers."

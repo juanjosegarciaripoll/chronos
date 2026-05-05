@@ -64,10 +64,26 @@ class TimelineGrid(DataTable[str]):
         # Day column width — recomputed in show_days() from the widget's
         # actual pixel width so empty space to the right is minimised.
         self._day_col_width: int = _DAY_COL_WIDTH
+        # Last args passed to show_days() so on_resize can re-render with
+        # the correct width after the first layout pass (size is 0 during
+        # on_mount, so the initial call uses the fallback _DAY_COL_WIDTH).
+        self._last_days: Sequence[tuple[date, Sequence[OccurrenceRow]]] | None = None
+        self._last_today: date | None = None
 
     def on_mount(self) -> None:
         self.cursor_type = "cell"
         self.zebra_stripes = False
+
+    def on_resize(self) -> None:
+        if self._last_days is None or self._last_today is None:
+            return
+        num_days = len(self._last_days)
+        if num_days > 0:
+            available = self.size.width - _TIME_COL_WIDTH
+            new_width = max(_DAY_COL_WIDTH, available // num_days)
+            if new_width == self._day_col_width:
+                return
+        self.show_days(self._last_days, today=self._last_today)
 
     def show_days(
         self,
@@ -81,6 +97,12 @@ class TimelineGrid(DataTable[str]):
         widget renders one column per pair, plus a leftmost time
         column. Pre-existing rows / columns are cleared first.
         """
+        self._last_days = days
+        self._last_today = today
+        # Defer rendering until on_resize delivers the real width; avoids
+        # a flash of narrow columns before the first layout pass completes.
+        if self.size.width == 0:
+            return
         self.clear(columns=True)
         self._cells.clear()
         self._col_alt.clear()
@@ -88,9 +110,6 @@ class TimelineGrid(DataTable[str]):
             self.add_column("(no days)")
             return
 
-        # Distribute available width across day columns so the grid fills
-        # the widget horizontally.  self.size.width is 0 before the first
-        # layout pass, so _DAY_COL_WIDTH acts as a safe minimum.
         num_days = len(days)
         available = self.size.width - _TIME_COL_WIDTH
         self._day_col_width = max(_DAY_COL_WIDTH, available // num_days)
