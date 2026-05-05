@@ -1,4 +1,4 @@
-"""Tests for mcp_state.py, start_tcp_server, and run_mcp_stdio.
+"""Tests for start_tcp_server and run_mcp_stdio.
 
 TCP auth, bridge forwarding, and bridge-or-standalone logic are tested in
 tinymcp/tests/test_server.py.  This file covers Chronos-specific behaviour:
@@ -18,7 +18,7 @@ from pathlib import Path
 from tinymcp import serve_tcp
 
 from chronos.index_store import SqliteIndexRepository
-from chronos.mcp_state import McpServerState, read_state, remove_state, write_state
+from chronos.mcp_server import McpServerState, read_state, remove_state, write_state
 from chronos.storage import VdirMirrorRepository
 
 # ---------------------------------------------------------------------------
@@ -28,51 +28,33 @@ from chronos.storage import VdirMirrorRepository
 
 class McpStateTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = self.enterContext(tempfile.TemporaryDirectory())
-        import chronos.mcp_state as _mod
-        import chronos.paths as _paths
-
-        self._orig_path = _paths.mcp_server_state_path
-
-        def _patched() -> Path:
-            return Path(self._tmp) / "mcp_server.json"
-
-        _paths.mcp_server_state_path = _patched  # type: ignore[assignment]
-        _mod.mcp_server_state_path = _patched  # type: ignore[assignment]
-
-    def tearDown(self) -> None:
-        import chronos.mcp_state as _mod
-        import chronos.paths as _paths
-
-        _paths.mcp_server_state_path = self._orig_path  # type: ignore[assignment]
-        _mod.mcp_server_state_path = self._orig_path  # type: ignore[assignment]
+        self._tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.state_file = self._tmp / "mcp_server.json"
 
     def test_write_and_read_round_trip(self) -> None:
         state = McpServerState(port=12345, token="abc123")
-        write_state(state)
-        loaded = read_state()
+        write_state(self.state_file, state)
+        loaded = read_state(self.state_file)
         self.assertEqual(loaded, state)
 
     def test_read_returns_none_when_absent(self) -> None:
-        self.assertIsNone(read_state())
+        self.assertIsNone(read_state(self.state_file))
 
     def test_read_returns_none_on_malformed_json(self) -> None:
-        path = Path(self._tmp) / "mcp_server.json"
-        path.write_bytes(b"not json {{{")
-        self.assertIsNone(read_state())
+        self.state_file.write_bytes(b"not json {{{")
+        self.assertIsNone(read_state(self.state_file))
 
     def test_remove_is_silent_when_absent(self) -> None:
-        remove_state()  # must not raise
+        remove_state(self.state_file)  # must not raise
 
     def test_remove_deletes_file(self) -> None:
-        write_state(McpServerState(port=1, token="t"))
-        remove_state()
-        self.assertIsNone(read_state())
+        write_state(self.state_file, McpServerState(port=1, token="t"))
+        remove_state(self.state_file)
+        self.assertIsNone(read_state(self.state_file))
 
     def test_written_file_has_correct_content(self) -> None:
-        state = McpServerState(port=9876, token="secret")
-        write_state(state)
-        raw = json.loads(Path(self._tmp).joinpath("mcp_server.json").read_bytes())
+        write_state(self.state_file, McpServerState(port=9876, token="secret"))
+        raw = json.loads(self.state_file.read_bytes())
         self.assertEqual(raw["port"], 9876)
         self.assertEqual(raw["token"], "secret")
 
@@ -90,27 +72,15 @@ class TcpTestCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.index.close)
 
     def _server_and_token(self) -> tuple[object, str]:
-        from chronos.mcp_server import build_server
+        from chronos.mcp_server import build_mcp_server
 
-        return build_server(index=self.index, mirror=self.mirror), secrets.token_hex(16)
+        return build_mcp_server(index=self.index, mirror=self.mirror), secrets.token_hex(16)
 
     async def _start_tcp(
         self, server: object, token: str
     ) -> tuple[asyncio.Task[None], int]:
-        port_holder: list[int] = []
-
-        def on_bound(p: int) -> None:
-            port_holder.append(p)
-
-        task = asyncio.create_task(
-            serve_tcp(server, port=0, token=token, on_bound=on_bound)  # type: ignore[arg-type]
-        )
-        for _ in range(40):
-            if port_holder:
-                break
-            await asyncio.sleep(0.025)
-        self.assertTrue(port_holder, "server did not bind in time")
-        return task, port_holder[0]
+        port, task = await serve_tcp(server, port=0, token=token)  # type: ignore[arg-type]
+        return task, port
 
 
 class StartTcpServerTest(TcpTestCase):
@@ -118,29 +88,11 @@ class StartTcpServerTest(TcpTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        tmp_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        import chronos.mcp_state as _mod
-        import chronos.paths as _paths
-
-        self._orig_path = _paths.mcp_server_state_path
-
-        def _patched() -> Path:
-            return tmp_dir / "mcp_server.json"
-
-        _paths.mcp_server_state_path = _patched  # type: ignore[assignment]
-        _mod.mcp_server_state_path = _patched  # type: ignore[assignment]
-
-    def tearDown(self) -> None:
-        import chronos.mcp_state as _mod
-        import chronos.paths as _paths
-
-        _paths.mcp_server_state_path = self._orig_path  # type: ignore[assignment]
-        _mod.mcp_server_state_path = self._orig_path  # type: ignore[assignment]
-        super().tearDown()
+        self.state_file = Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
 
     async def _wait_for_state(self) -> McpServerState:
         for _ in range(40):
-            state = read_state()
+            state = read_state(self.state_file)
             if state is not None:
                 return state
             await asyncio.sleep(0.05)
@@ -150,7 +102,7 @@ class StartTcpServerTest(TcpTestCase):
         from chronos.mcp_server import start_tcp_server
 
         task = asyncio.create_task(
-            start_tcp_server(index=self.index, mirror=self.mirror)
+            start_tcp_server(index=self.index, mirror=self.mirror, state_file=self.state_file)
         )
         try:
             state = await self._wait_for_state()
@@ -181,7 +133,7 @@ class StartTcpServerTest(TcpTestCase):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-        self.assertIsNone(read_state())
+        self.assertIsNone(read_state(self.state_file))
 
     async def test_run_mcp_stdio_without_state_goes_standalone(self) -> None:
         """No state file → run_mcp_stdio uses standalone mode directly."""
@@ -191,7 +143,7 @@ class StartTcpServerTest(TcpTestCase):
 
         standalone = AsyncMock()
         with patch("tinymcp.transport.run_stdio_standalone", standalone):
-            await run_mcp_stdio(index=self.index, mirror=self.mirror)
+            await run_mcp_stdio(index=self.index, mirror=self.mirror, state_file=self.state_file)
         standalone.assert_awaited_once()
 
     async def test_run_mcp_stdio_bridges_to_running_server(self) -> None:
@@ -201,7 +153,7 @@ class StartTcpServerTest(TcpTestCase):
         from chronos.mcp_server import run_mcp_stdio, start_tcp_server
 
         task = asyncio.create_task(
-            start_tcp_server(index=self.index, mirror=self.mirror)
+            start_tcp_server(index=self.index, mirror=self.mirror, state_file=self.state_file)
         )
         try:
             state = await self._wait_for_state()
@@ -215,7 +167,7 @@ class StartTcpServerTest(TcpTestCase):
                 bridged_token = token
 
             with patch("tinymcp.transport.run_stdio_bridge", _capture_bridge):
-                await run_mcp_stdio(index=self.index, mirror=self.mirror)
+                await run_mcp_stdio(index=self.index, mirror=self.mirror, state_file=self.state_file)
 
             self.assertEqual(bridged_port, state.port)
             self.assertEqual(bridged_token, state.token)

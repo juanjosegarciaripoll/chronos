@@ -30,7 +30,7 @@ from chronos.domain import (
     VTodo,
 )
 from chronos.index_store import SqliteIndexRepository
-from chronos.mcp_server import SERVER_NAME, build_server
+from chronos.mcp_server import SERVER_NAME, build_mcp_server
 from chronos.storage import VdirMirrorRepository
 
 # ---------------------------------------------------------------------------
@@ -112,9 +112,15 @@ class _Client:
         return _ListToolsResult(tools=tools)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> _CallToolResult:
-        result = await self._request(
-            "tools/call", {"name": name, "arguments": arguments}
-        )
+        try:
+            result = await self._request(
+                "tools/call", {"name": name, "arguments": arguments}
+            )
+        except RuntimeError as exc:
+            return _CallToolResult(
+                content=[TextContent(type="text", text=str(exc))],
+                is_error=True,
+            )
         content = [
             TextContent(type=c["type"], text=c["text"])
             for c in result.get("content", [])
@@ -129,7 +135,7 @@ async def _connected_session(
 ) -> AsyncIterator[_Client]:
     if mirror is None:
         mirror = _McpServerTestCase._default_mirror  # type: ignore[attr-defined]
-    server: McpServer = build_server(index=index, mirror=mirror)
+    server: McpServer = build_mcp_server(index=index, mirror=mirror)
 
     req_queue: asyncio.Queue[bytes] = asyncio.Queue()
     resp_queue: asyncio.Queue[bytes] = asyncio.Queue()

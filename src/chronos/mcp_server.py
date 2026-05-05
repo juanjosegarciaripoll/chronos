@@ -25,8 +25,13 @@ stdio (default)
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, cast
 
 from tinymcp import McpServer
@@ -43,6 +48,48 @@ from chronos.domain import (
 from chronos.protocols import IndexRepository, MirrorRepository
 
 SERVER_NAME = "chronos"
+
+
+# ---------------------------------------------------------------------------
+# State file (port + auth token for the running TCP server)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class McpServerState:
+    port: int
+    token: str
+
+
+def write_state(state_file: Path, state: McpServerState) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"port": state.port, "token": state.token}).encode()
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-mcp-", dir=state_file.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.name != "nt":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, state_file)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
+def read_state(state_file: Path) -> McpServerState | None:
+    try:
+        data = json.loads(state_file.read_bytes())
+        return McpServerState(port=int(data["port"]), token=str(data["token"]))
+    except (FileNotFoundError, KeyError, ValueError, TypeError):
+        return None
+
+
+def remove_state(state_file: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        state_file.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -130,15 +177,6 @@ def build_mcp_server(*, index: IndexRepository, mirror: MirrorRepository) -> Mcp
     return mcp
 
 
-def build_server(*, index: IndexRepository, mirror: MirrorRepository) -> McpServer:
-    """Return a configured `McpServer`.
-
-    Used by tests and the CLI.  Production callers should use
-    `run_mcp_stdio` or `start_tcp_server` instead.
-    """
-    return build_mcp_server(index=index, mirror=mirror)
-
-
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
@@ -148,6 +186,7 @@ async def run_mcp_stdio(
     *,
     index: IndexRepository,
     mirror: MirrorRepository,
+    state_file: Path | None = None,
 ) -> None:
     """Entry point for `chronos mcp`.
 
@@ -156,16 +195,18 @@ async def run_mcp_stdio(
     port is not reachable, runs a self-contained MCP session directly
     over stdin/stdout.
     """
-    from tinymcp import run_mcp
+    from tinymcp import LOOPBACK_HOST, run_mcp
 
-    from chronos.mcp_state import read_state, remove_state
+    if state_file is None:
+        from chronos.paths import mcp_server_state_path
+        state_file = mcp_server_state_path()
 
-    state = read_state()
+    state = read_state(state_file)
+    remote = (LOOPBACK_HOST, state.port, state.token) if state is not None else None
     await run_mcp(
-        build_server(index=index, mirror=mirror),
-        remote_port=state.port if state is not None else None,
-        remote_token=state.token if state is not None else None,
-        on_unreachable=remove_state,
+        build_mcp_server(index=index, mirror=mirror),
+        remote=remote,
+        on_unreachable=lambda: remove_state(state_file),  # type: ignore[arg-type]
     )
 
 
@@ -174,6 +215,7 @@ async def start_tcp_server(
     index: IndexRepository,
     mirror: MirrorRepository,
     port: int = 0,
+    state_file: Path | None = None,
 ) -> None:
     """Start the MCP TCP server, write the state file, and run until cancelled.
 
@@ -186,19 +228,19 @@ async def start_tcp_server(
 
     from tinymcp import serve_tcp
 
-    from chronos.mcp_state import McpServerState, remove_state, write_state
+    if state_file is None:
+        from chronos.paths import mcp_server_state_path
+        state_file = mcp_server_state_path()
 
     token = secrets.token_hex(32)
-    server = build_server(index=index, mirror=mirror)
-    draft = McpServerState(port=port, token=token)
-
-    def on_bound(actual_port: int) -> None:
-        write_state(McpServerState(port=actual_port, token=token))
+    server = build_mcp_server(index=index, mirror=mirror)
 
     try:
-        await serve_tcp(server, port=draft.port, token=draft.token, on_bound=on_bound)
+        actual_port, serve_task = await serve_tcp(server, port=port, token=token)
+        write_state(state_file, McpServerState(port=actual_port, token=token))
+        await serve_task
     finally:
-        remove_state()
+        remove_state(state_file)
 
 
 # ---------------------------------------------------------------------------
@@ -374,10 +416,12 @@ def _parse_datetime(value: str, *, label: str) -> datetime:
 
 
 __all__ = [
-    "McpServer",
+    "McpServerState",
     "SERVER_NAME",
     "build_mcp_server",
-    "build_server",
+    "read_state",
+    "remove_state",
     "run_mcp_stdio",
     "start_tcp_server",
+    "write_state",
 ]
