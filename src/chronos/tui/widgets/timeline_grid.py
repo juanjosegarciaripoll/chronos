@@ -66,6 +66,9 @@ class TimelineGrid(DataTable[str]):
     def on_mount(self) -> None:
         self.cursor_type = "cell"
         self.zebra_stripes = False
+        # Keep rendered cell width equal to declared column width.
+        # Default DataTable padding inserts 1 char on each side.
+        self.cell_padding = 0
 
     def on_resize(self) -> None:
         if self._last_days is None or self._last_today is None:
@@ -214,11 +217,11 @@ class TimelineGrid(DataTable[str]):
         return fallback
 
     def _event_fill_bg(self) -> str:
-        return self._theme_color("accent", "#0087AF")
+        return self._theme_color("panel", "#303030")
 
     def _event_start_style(self) -> str:
         fg = self._theme_color("foreground", "#FFFFFF")
-        return f"bold {fg} on {self._event_fill_bg()}"
+        return f"{fg} on {self._event_fill_bg()}"
 
     def _event_body_style(self) -> str:
         return f"on {self._event_fill_bg()}"
