@@ -254,6 +254,7 @@ def run_loopback_flow(
     done = threading.Event()
     handler_cls = _make_callback_handler(received, done)
     server = make_server(("127.0.0.1", 0), handler_cls)
+    thread: threading.Thread | None = None
     try:
         port = server.server_port  # OS-assigned ephemeral port
         redirect_uri = f"http://127.0.0.1:{port}/"
@@ -283,7 +284,11 @@ def run_loopback_flow(
             )
         server.shutdown()
         thread.join(timeout=5)
+        thread = None
     finally:
+        if thread is not None:
+            server.shutdown()
+            thread.join(timeout=5)
         server.server_close()
 
     if received.get("state") != state:
