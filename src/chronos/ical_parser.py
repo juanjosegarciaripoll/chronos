@@ -80,8 +80,6 @@ def _get_recurrence_id(component: object) -> str | None:
 
 
 def _to_utc(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
 

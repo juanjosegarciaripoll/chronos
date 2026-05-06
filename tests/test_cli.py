@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import re
 import tempfile
@@ -177,6 +178,156 @@ class SyncCommandTest(CliTestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("Nothing to reset", self.stdout.getvalue())
+
+    def test_reset_refuses_when_mcp_server_reachable(self) -> None:
+        import socket
+
+        from chronos.mcp_server import McpServerState, write_state
+
+        self._seed_server()
+
+        def factory(_account: AccountConfig, _auth: Any) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            state_file = (
+                Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
+            )
+            write_state(state_file, McpServerState(port=port, token="tok"))
+            index_path = self.index._path  # type: ignore[attr-defined]
+            mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+            code = cli.cmd_reset(
+                ctx,
+                yes=True,
+                index_path=index_path,
+                mirror_dir=mirror_dir,
+                mcp_state_file=state_file,
+            )
+        finally:
+            srv.close()
+
+        self.assertEqual(code, 2)
+        self.assertIn("TUI", self.stderr.getvalue())
+        self.assertIn(str(port), self.stderr.getvalue())
+        self.assertTrue(index_path.exists())
+
+    def test_reset_refuses_when_sync_lock_held(self) -> None:
+        from chronos.locking import SyncLockError
+
+        self._seed_server()
+
+        def factory(_account: AccountConfig, _auth: Any) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        index_path = self.index._path  # type: ignore[attr-defined]
+        mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+
+        @contextlib.contextmanager
+        def _contended(_path: Path):  # type: ignore[return]
+            raise SyncLockError("another chronos sync is already running (pid=1234)")
+            yield  # noqa: unreachable
+
+        with mock.patch("chronos.cli.acquire_sync_lock", new=_contended):
+            code = cli.cmd_reset(
+                ctx,
+                yes=True,
+                index_path=index_path,
+                mirror_dir=mirror_dir,
+                mcp_state_file=tmp / "mcp_server.json",  # doesn't exist → no TUI
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("refusing to reset", self.stderr.getvalue())
+        self.assertIn("1234", self.stderr.getvalue())
+        self.assertTrue(index_path.exists())
+
+    def test_reset_force_bypasses_presence_checks(self) -> None:
+        import socket
+
+        from chronos.mcp_server import McpServerState, write_state
+
+        self._seed_server()
+
+        def factory(_account: AccountConfig, _auth: Any) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            state_file = (
+                Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
+            )
+            write_state(state_file, McpServerState(port=port, token="tok"))
+            index_path = self.index._path  # type: ignore[attr-defined]
+            mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+            code = cli.cmd_reset(
+                ctx,
+                yes=True,
+                force=True,
+                index_path=index_path,
+                mirror_dir=mirror_dir,
+                mcp_state_file=state_file,
+            )
+        finally:
+            srv.close()
+
+        self.assertEqual(code, 0)
+        self.assertFalse(index_path.exists())
+        self.assertIn("Reset complete", self.stdout.getvalue())
+
+    def test_reset_proceeds_when_state_file_stale(self) -> None:
+        import socket
+
+        from chronos.mcp_server import McpServerState, write_state
+
+        self._seed_server()
+
+        def factory(_account: AccountConfig, _auth: Any) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+
+        # Bind, capture port, then immediately close so nothing is listening.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        state_file = tmp / "mcp_server.json"
+        write_state(state_file, McpServerState(port=port, token="tok"))
+
+        index_path = self.index._path  # type: ignore[attr-defined]
+        mirror_dir = self.mirror._root  # type: ignore[attr-defined]
+        code = cli.cmd_reset(
+            ctx,
+            yes=True,
+            index_path=index_path,
+            mirror_dir=mirror_dir,
+            mcp_state_file=state_file,
+            lock_path=tmp / "sync.lock",
+        )
+
+        self.assertEqual(code, 0)
+        self.assertFalse(index_path.exists())
+        self.assertFalse(state_file.exists())
 
     def test_reset_refuses_without_yes_when_non_interactive(self) -> None:
         self._seed_server()

@@ -170,8 +170,12 @@ class GoogleBackendTest(unittest.TestCase):
             token_path=token_path,
         )
         self.assertIsNone(auth.basic)
-        self.assertIs(auth.bearer_token_fn, bearer.get_header)
-        self.assertIs(auth.on_commit, bearer.persist)
+        assert auth.bearer_token_fn is not None
+        auth.bearer_token_fn()
+        bearer.get_header.assert_called_once()
+        assert auth.on_commit is not None
+        auth.on_commit()
+        bearer.persist.assert_called_once()
 
 
 class InteractiveAuthorizerTest(unittest.TestCase):
@@ -227,7 +231,9 @@ class InteractiveAuthorizerTest(unittest.TestCase):
         self.assertTrue(token_path.exists())
         # build_bearer_auth runs after persistence so it sees real tokens.
         mock_build.assert_called_once()
-        self.assertIs(auth.bearer_token_fn, bearer.get_header)
+        assert auth.bearer_token_fn is not None
+        auth.bearer_token_fn()
+        bearer.get_header.assert_called_once()
 
     def test_missing_tokens_without_authorizer_raises_clean_error(self) -> None:
         from chronos.domain import OAuthCredential
@@ -279,3 +285,85 @@ class InteractiveAuthorizerTest(unittest.TestCase):
         # The empty-handed authorizer must NOT have left a token file
         # behind: persistence only happens on success.
         self.assertFalse(token_path.exists())
+
+
+class InvalidGrantReauthTest(unittest.TestCase):
+    """When a refresh token is revoked the bearer wrapper re-runs the
+    interactive authorizer and continues transparently."""
+
+    def test_invalid_grant_triggers_reauth_when_authorizer_available(self) -> None:
+        from unittest.mock import MagicMock, call, patch
+
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import InvalidGrantError, StoredTokens
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        token_path = tmp / "tok.json"
+        token_path.write_text("{}", encoding="utf-8")
+
+        fresh_tokens = StoredTokens(
+            access_token="new_at",
+            refresh_token="new_rt",
+            expiry_unix=1e12,
+            scope="s",
+        )
+        reauth_called: list[str] = []
+
+        def authorizer(
+            account_name: str, _spec: OAuthCredential, _path: Path
+        ) -> StoredTokens:
+            reauth_called.append(account_name)
+            return fresh_tokens
+
+        provider = DefaultCredentialsProvider(env={}, interactive_authorizer=authorizer)
+        account = _account(
+            OAuthCredential(
+                client_id="cid", client_secret="cs", scope="s", token_path=token_path
+            )
+        )
+
+        stale_bearer = MagicMock()
+        stale_bearer.get_header.side_effect = InvalidGrantError("revoked")
+        fresh_bearer = MagicMock()
+        fresh_bearer.get_header.return_value = "Bearer new_at"
+
+        bearers = [stale_bearer, fresh_bearer]
+        with patch(
+            "chronos.credentials.build_bearer_auth", side_effect=bearers
+        ):
+            auth = provider.build_auth(account)
+
+        assert auth.bearer_token_fn is not None
+        result = auth.bearer_token_fn()
+
+        self.assertEqual(result, "Bearer new_at")
+        self.assertEqual(reauth_called, ["acct"])
+        # token file was replaced with fresh tokens
+        self.assertTrue(token_path.exists())
+
+    def test_invalid_grant_without_authorizer_propagates_error(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import InvalidGrantError, OAuthError
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        token_path = tmp / "tok.json"
+        token_path.write_text("{}", encoding="utf-8")
+
+        provider = DefaultCredentialsProvider(env={})  # no authorizer
+        account = _account(
+            OAuthCredential(
+                client_id="cid", client_secret="cs", scope="s", token_path=token_path
+            )
+        )
+
+        bearer = MagicMock()
+        bearer.get_header.side_effect = InvalidGrantError("revoked")
+
+        with patch("chronos.credentials.build_bearer_auth", return_value=bearer):
+            auth = provider.build_auth(account)
+
+        assert auth.bearer_token_fn is not None
+        with self.assertRaises(OAuthError):
+            auth.bearer_token_fn()

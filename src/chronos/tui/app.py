@@ -81,47 +81,24 @@ class ChronosApp(App[None]):
        The dialog box then carries an explicit width so the centring
        has something to act on (auto-width inside a flex parent
        expands to fill, defeating the centre rule). */
-    SyncConfirmScreen, ConfirmScreen, SyncProgressScreen, EventDetailScreen {
+    SyncConfirmScreen, ConfirmScreen, SyncProgressScreen,
+    EventDetailScreen, OAuthProgressScreen {
         align: center middle;
     }
-    #event-detail {
+    .dialog-box {
         background: $surface;
-        border: thick $accent;
-        padding: 1 2;
-        width: 80;
-        height: auto;
-        max-height: 80%;
-    }
-    #sync-confirm-box, #confirm-box, #sync-progress-box {
-        background: $surface;
-        border: thick $accent;
+        border: solid $accent;
         padding: 1 2;
         height: auto;
     }
-    #sync-confirm-box {
-        width: 80;
-    }
-    #confirm-box {
-        width: 60;
-    }
-    /* Progress dialog: live log tail + summary line. Wider than the
-       confirm dialogs so per-batch fetch lines fit without wrapping. */
-    #sync-progress-box {
-        width: 100;
-        max-height: 80%;
-    }
-    #sync-confirm-box .dialog-title,
-    #confirm-box .dialog-title,
-    #sync-progress-box .dialog-title {
+    .dialog-box .dialog-title {
         text-style: bold;
         margin-bottom: 1;
     }
-    #sync-confirm-box .dialog-empty {
+    .dialog-box .dialog-empty {
         color: $text-muted;
     }
-    #sync-confirm-box .dialog-actions,
-    #confirm-box .dialog-actions,
-    #sync-progress-box .dialog-actions {
+    .dialog-box .dialog-actions {
         margin-top: 1;
         align-horizontal: right;
         /* `height: 3` reserves room for the standard Textual button
@@ -130,11 +107,16 @@ class ChronosApp(App[None]):
            the action row to zero. */
         height: 3;
     }
-    #sync-confirm-box .dialog-actions Button,
-    #confirm-box .dialog-actions Button,
-    #sync-progress-box .dialog-actions Button {
+    .dialog-box .dialog-actions Button {
         margin-left: 1;
     }
+    /* Per-dialog width and height overrides. */
+    #event-detail    { width: 80; max-height: 80%; }
+    #sync-confirm-box { width: 80; }
+    #confirm-box     { width: 60; }
+    #sync-progress-box { width: 100; max-height: 80%; }
+    #oauth-box       { width: 70; }
+    #oauth-status    { color: $text-muted; margin-bottom: 1; }
     /* Scrollable progress log: bordered, scrolls automatically as
        new lines come in via `RichLog.write`. */
     #sync-progress-log {

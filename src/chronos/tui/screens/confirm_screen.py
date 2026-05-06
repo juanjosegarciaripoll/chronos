@@ -33,7 +33,7 @@ class ConfirmScreen(ModalScreen[None]):
         self._on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
+        with Vertical(id="confirm-box", classes="dialog-box"):
             yield Label(self._prompt, classes="dialog-title")
             with Horizontal(classes="dialog-actions"):
                 yield Button("Yes", id="confirm-yes", variant="primary")

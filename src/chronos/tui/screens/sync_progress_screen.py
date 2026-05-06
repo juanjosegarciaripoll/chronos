@@ -49,7 +49,7 @@ class SyncProgressScreen(ModalScreen[None]):
         self._state: str = "running"
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="sync-progress-box"):
+        with Vertical(id="sync-progress-box", classes="dialog-box"):
             yield Label("Syncing", id="sync-progress-title", classes="dialog-title")
             # `RichLog` auto-scrolls as `write()` is called from
             # `_append_message`. `max_lines` caps the in-memory

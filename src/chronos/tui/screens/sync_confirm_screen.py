@@ -38,7 +38,7 @@ class SyncConfirmScreen(ModalScreen[None]):
         self._on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="sync-confirm-box"):
+        with Vertical(id="sync-confirm-box", classes="dialog-box"):
             yield Label("Sync the following accounts?", classes="dialog-title")
             if not self._accounts:
                 yield Label("(no accounts configured)", classes="dialog-empty")

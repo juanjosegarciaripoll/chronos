@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import logging
 import os
@@ -372,6 +373,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the interactive confirmation prompt.",
     )
+    reset_p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Skip the live-instance guard. Use when a stale presence file "
+            "blocks reset even though no chronos process is actually running."
+        ),
+    )
 
     list_p = sub.add_parser("list", help="List events and todos.")
     list_p.add_argument("--account", default=None)
@@ -556,11 +565,15 @@ def _dispatch(
     prompt: PromptFn,
     is_interactive: IsInteractiveFn,
 ) -> int:
-    command = str(args.command)
+    command = str(args.command) if args.command is not None else "tui"
     if command == "sync":
         return cmd_sync(ctx, force=bool(getattr(args, "force", False)))
     if command == "reset":
-        return cmd_reset(ctx, yes=bool(getattr(args, "yes", False)))
+        return cmd_reset(
+            ctx,
+            yes=bool(getattr(args, "yes", False)),
+            force=bool(getattr(args, "force", False)),
+        )
     if command == "list":
         return cmd_list(
             ctx,
@@ -753,8 +766,11 @@ def cmd_reset(
     ctx: CliContext,
     *,
     yes: bool = False,
+    force: bool = False,
     index_path: Path | None = None,
     mirror_dir: Path | None = None,
+    mcp_state_file: Path | None = None,
+    lock_path: Path | None = None,
 ) -> int:
     """Wipe the local index + mirror.
 
@@ -785,6 +801,19 @@ def cmd_reset(
         ctx.stdout.write("Nothing to reset (no local index or mirror found).\n")
         return 0
 
+    if not force:
+        from chronos.mcp_server import is_server_reachable
+        from chronos.paths import mcp_server_state_path
+
+        live = is_server_reachable(mcp_state_file or mcp_server_state_path())
+        if live is not None:
+            ctx.stderr.write(
+                f"refusing to reset: chronos TUI / MCP server is running "
+                f"(port {live.port}).\n"
+                "Close it and re-run `chronos reset`.\n"
+            )
+            return 2
+
     ctx.stdout.write("Reset will delete:\n")
     for path in targets:
         ctx.stdout.write(f"  {path}\n")
@@ -807,21 +836,28 @@ def cmd_reset(
             ctx.stdout.write("Cancelled.\n")
             return 1
 
-    # Close any open connections / file handles so Windows lets us
-    # delete the underlying files.
-    ctx.index.close()
+    effective_lock = lock_path or sync_lock_path()
+    lock_cm = acquire_sync_lock(effective_lock) if not force else contextlib.nullcontext()
+    try:
+        with lock_cm:
+            # Close any open connections / file handles so Windows lets us
+            # delete the underlying files.
+            ctx.index.close()
 
-    for path in targets:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            # `-wal` / `-shm` may disappear between the targets snapshot
-            # and the unlink: SQLite checkpoints + cleans them up the
-            # moment we close the connection a few lines above.
-            path.unlink(missing_ok=True)
+            for path in targets:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    # `-wal` / `-shm` may disappear between the targets snapshot
+                    # and the unlink: SQLite checkpoints + cleans them up the
+                    # moment we close the connection a few lines above.
+                    path.unlink(missing_ok=True)
 
-    ctx.stdout.write("Reset complete. Run `chronos sync` to repopulate.\n")
-    return 0
+            ctx.stdout.write("Reset complete. Run `chronos sync` to repopulate.\n")
+            return 0
+    except SyncLockError as exc:
+        ctx.stderr.write(f"refusing to reset: {exc}\n")
+        return 2
 
 
 def cmd_list(
@@ -1138,15 +1174,37 @@ def cmd_tui(ctx: CliContext) -> int:
     # Imported lazily so `chronos --help` and other commands don't pull
     # Textual into the import graph.
     from chronos.tui import ChronosApp, TuiServices
+    from chronos.tui.screens.oauth_progress_screen import OAuthProgressScreen
 
-    # The TUI owns the terminal, so the OAuth loopback flow can't open
-    # a browser inline. Swap in a creds provider whose authorizer
-    # surfaces a clear "go authorize from CLI" message instead.
+    # The TUI authorizer runs the OAuth loopback flow inside the app
+    # itself. We use a late-binding box because `app` doesn't exist yet
+    # when `build_sync_runner` captures the authorizer closure.
+    app_box: list[ChronosApp] = []
+
+    def tui_authorizer(
+        account_name: str, spec: OAuthCredential, token_path: Path
+    ) -> StoredTokens:
+        import threading
+
+        result_box: list[StoredTokens | BaseException] = []
+        done = threading.Event()
+
+        def on_complete(result: StoredTokens | BaseException) -> None:
+            result_box.append(result)
+            done.set()
+
+        screen = OAuthProgressScreen(account_name, spec, on_complete=on_complete)
+        app_box[0].call_from_thread(app_box[0].push_screen, screen)  # pyright: ignore[reportUnknownMemberType]
+        done.wait()
+
+        outcome = result_box[0]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
     tui_ctx = dataclasses.replace(
         ctx,
-        creds=DefaultCredentialsProvider(
-            interactive_authorizer=_tui_unsupported_authorizer
-        ),
+        creds=DefaultCredentialsProvider(interactive_authorizer=tui_authorizer),
     )
     services = TuiServices(
         config=tui_ctx.config,
@@ -1157,6 +1215,7 @@ def cmd_tui(ctx: CliContext) -> int:
         sync_runner=build_sync_runner(tui_ctx),
     )
     app = ChronosApp(services)
+    app_box.append(app)
     with _redirect_logs_to_file():
         app.run()
     return 0
@@ -1204,16 +1263,6 @@ class _LogRedirector:
             self._file_handler.close()
         root.handlers = self._previous_handlers
         root.setLevel(self._previous_level)
-
-
-def _tui_unsupported_authorizer(
-    account_name: str, _spec: OAuthCredential, _token_path: Path
-) -> StoredTokens:
-    raise OAuthError(
-        f"account {account_name!r} needs OAuth authorization, but the "
-        "TUI can't run the loopback flow inline. Quit the TUI and run "
-        "`chronos sync` once to authorize, then come back."
-    )
 
 
 def build_sync_runner(
@@ -1278,6 +1327,9 @@ def build_sync_runner(
                 continue
             except CalDAVError as exc:
                 results.append(_failure_result(account.name, f"CalDAV: {exc}"))
+                continue
+            except OAuthError as exc:
+                results.append(_failure_result(account.name, f"OAuth: {exc}"))
                 continue
             if auth.on_commit is not None:
                 auth.on_commit()

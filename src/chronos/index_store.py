@@ -591,8 +591,6 @@ def _decode_flags(value: object) -> Sequence[str]:
 def _datetime_to_sql(dt: datetime | None) -> str | None:
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC).isoformat()
 
 

@@ -58,7 +58,13 @@ def expand(
     if rrule_str is None and not rdates:
         return _single_occurrence(master, anchor, duration, window_start, window_end)
 
-    ruleset = _build_ruleset(anchor, rrule_str, rdates, exdates)
+    # Use the DTSTART from the raw ICS with its original timezone so that
+    # dateutil generates occurrences at the correct wall-clock time through
+    # DST transitions (e.g. a weekly 10:00 Madrid meeting stays at 10:00
+    # in summer, not 11:00). Fall back to the UTC anchor when unavailable.
+    rrule_anchor = _raw_tz_anchor(master.raw_ics, master.ref.uid) or anchor
+
+    ruleset = _build_ruleset(rrule_anchor, rrule_str, rdates, exdates)
     raw_occurrences = ruleset.between(
         _to_utc(window_start), _to_utc(window_end), inc=True
     )
@@ -73,13 +79,14 @@ def expand(
     override_map = _index_overrides(overrides)
     out: list[Occurrence] = []
     for occ_dt in in_window:
-        override = override_map.get(occ_dt)
+        occ_utc = _to_utc(occ_dt)
+        override = override_map.get(occ_utc)
         if override is None:
             out.append(
                 Occurrence(
                     ref=master.ref,
-                    start=occ_dt,
-                    end=occ_dt + duration if duration else None,
+                    start=occ_utc,
+                    end=occ_utc + duration if duration else None,
                     recurrence_id=None,
                     is_override=False,
                 )
@@ -226,8 +233,6 @@ def _end_time(
 
 
 def _to_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 
@@ -320,6 +325,40 @@ def _index_overrides(
         except ValueError:
             continue
     return mapping
+
+
+def _raw_tz_anchor(raw_ics: bytes, uid: str) -> datetime | None:
+    """Return DTSTART from the raw ICS with its original timezone preserved.
+
+    Unlike the stored `dtstart` (which is always UTC after parsing), this
+    value retains the TZID (e.g. Africa/Ceuta) so that `dateutil.rrule`
+    can generate occurrences at the correct wall-clock time through DST
+    transitions.  Returns `None` when the raw ICS cannot be parsed.
+    """
+    try:
+        cal = Calendar.from_ical(raw_ics)
+    except ValueError:
+        return None
+    for sub in cal.walk():  # pyright: ignore[reportUnknownMemberType]
+        name = _component_name(sub)
+        if name not in ("VEVENT", "VTODO"):
+            continue
+        if _component_get_str(sub, "UID") != uid:
+            continue
+        if _component_has(sub, "RECURRENCE-ID"):
+            continue
+        decoder = getattr(sub, "decoded", None)
+        if decoder is None:
+            return None
+        try:
+            value = decoder("DTSTART")
+        except (KeyError, ValueError):
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.astimezone()
+        if isinstance(value, date):
+            return datetime(value.year, value.month, value.day).astimezone()
+    return None
 
 
 def _extract_rules(

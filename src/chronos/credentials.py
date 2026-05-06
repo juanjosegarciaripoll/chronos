@@ -17,7 +17,14 @@ from chronos.domain import (
     OAuthCredential,
     PlaintextCredential,
 )
-from chronos.oauth import OAuthError, StoredTokens, build_bearer_auth, save_tokens
+from chronos.oauth import (
+    BearerTokenAuth,
+    InvalidGrantError,
+    OAuthError,
+    StoredTokens,
+    build_bearer_auth,
+    save_tokens,
+)
 from chronos.paths import oauth_token_path
 
 _COMMAND_TIMEOUT_SECONDS = 30
@@ -114,6 +121,29 @@ def _build_oauth_authorization(
     interactive_authorizer: InteractiveAuthorizer | None,
 ) -> Authorization:
     token_path = spec.token_path or oauth_token_path(account_name)
+
+    def _new_bearer() -> BearerTokenAuth:
+        return build_bearer_auth(
+            client_id=spec.client_id,
+            client_secret=spec.client_secret,
+            scope=spec.scope,
+            token_path=token_path,
+        )
+
+    def _reauthorize() -> None:
+        """Re-run the OAuth flow after a revoked refresh token."""
+        if interactive_authorizer is None:
+            raise InvalidGrantError(
+                f"{account_name}: refresh token has been revoked — "
+                "run `chronos sync` from an interactive terminal to re-authorize"
+            )
+        token_path.unlink(missing_ok=True)
+        try:
+            tokens = interactive_authorizer(account_name, spec, token_path)
+        except OAuthError as exc:
+            raise OAuthError(f"{account_name}: re-authorization failed: {exc}") from exc
+        save_tokens(token_path, tokens)
+
     if not token_path.exists():
         if interactive_authorizer is None:
             raise CredentialResolutionError(
@@ -125,16 +155,24 @@ def _build_oauth_authorization(
         except OAuthError as exc:
             raise CredentialResolutionError(f"{account_name}: {exc}") from exc
         save_tokens(token_path, tokens)
+
     try:
-        bearer = build_bearer_auth(
-            client_id=spec.client_id,
-            client_secret=spec.client_secret,
-            scope=spec.scope,
-            token_path=token_path,
-        )
+        slot = [_new_bearer()]
     except OAuthError as exc:
         raise CredentialResolutionError(f"{account_name}: {exc}") from exc
-    return Authorization(bearer_token_fn=bearer.get_header, on_commit=bearer.persist)
+
+    def get_header() -> str:
+        try:
+            return slot[0].get_header()
+        except InvalidGrantError:
+            _reauthorize()
+            slot[0] = _new_bearer()
+            return slot[0].get_header()
+
+    def on_commit() -> None:
+        slot[0].persist()
+
+    return Authorization(bearer_token_fn=get_header, on_commit=on_commit)
 
 
 def _resolve_command(account_name: str, spec: CommandCredential) -> str:

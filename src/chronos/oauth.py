@@ -73,6 +73,10 @@ class OAuthError(RuntimeError):
     pass
 
 
+class InvalidGrantError(OAuthError):
+    """Raised when the provider rejects the refresh token (revoked/expired)."""
+
+
 @dataclass(frozen=True, kw_only=True)
 class StoredTokens:
     access_token: str
@@ -100,6 +104,8 @@ def _default_http_post(
             payload = json.loads(body.decode())
         except (ValueError, UnicodeDecodeError):
             payload = None
+        if isinstance(payload, dict) and payload.get("error") == "invalid_grant":
+            raise InvalidGrantError("refresh token has been revoked or expired") from exc
         raise OAuthError(f"HTTP {exc.code} {payload!r}") from exc
     except OSError as exc:
         raise OAuthError(f"network error: {exc}") from exc
@@ -507,6 +513,7 @@ def _optional_float(data: dict[str, object], key: str, *, default: float) -> flo
 
 __all__ = [
     "BearerTokenAuth",
+    "InvalidGrantError",
     "OAuthError",
     "StoredTokens",
     "build_authorization_url",

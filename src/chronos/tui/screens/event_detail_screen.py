@@ -31,7 +31,7 @@ class EventDetailScreen(ModalScreen[None]):
         self._on_edit = on_edit
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="event-detail"):
+        with Vertical(id="event-detail", classes="dialog-box"):
             view = EventView()
             yield view
         yield Footer()

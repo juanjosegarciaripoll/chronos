@@ -92,6 +92,22 @@ def remove_state(state_file: Path) -> None:
         state_file.unlink()
 
 
+def is_server_reachable(state_file: Path, *, timeout: float = 0.5) -> McpServerState | None:
+    """Return the live state if its TCP port answers, else clean up stale file and return None."""
+    import socket
+
+    state = read_state(state_file)
+    if state is None:
+        return None
+    try:
+        conn = socket.create_connection(("127.0.0.1", state.port), timeout=timeout)
+        conn.close()
+        return state
+    except OSError:
+        remove_state(state_file)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
