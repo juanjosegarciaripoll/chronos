@@ -30,15 +30,7 @@ _DEFAULT_END_HOUR = 22
 _TIME_COL_WIDTH = 6
 _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
-_SHADED_ROW_STYLE = "on color(236)"
-# Hardcoded event-bar colors: two distinct dark hues so adjacent events
-# are always visually separable and white text has sufficient contrast.
-#   color(25) = rgb(0, 95, 175)  — dark blue,  contrast ~7.8:1 on white
-#   color(28) = rgb(0, 135, 0)   — dark green, contrast ~5.3:1 on white
-_EVENT_START_STYLE = "white on color(25)"
-_EVENT_BODY_STYLE = "on color(25)"
-_EVENT_ALT_START_STYLE = "white on color(28)"
-_EVENT_ALT_BODY_STYLE = "on color(28)"
+_EVENT_END_CHAR = "\u2582"  # LOWER ONE QUARTER BLOCK
 
 
 class TimelineGrid(DataTable[str]):
@@ -173,17 +165,23 @@ class TimelineGrid(DataTable[str]):
         # padded to the declared column width.
         row_index = self.row_count
         shaded = (slot_minutes_in_day // 60) % 2 == 1
+        shaded_row_style = self._shaded_row_style()
+        shaded_grid_bg_fg = self._shaded_grid_bg_fg()
+        unshaded_grid_bg_fg = self._unshaded_grid_bg_fg()
+        event_start_style = self._event_start_style()
+        event_body_style = self._event_body_style()
+        event_end_bg = self._event_fill_bg()
         # Only label the top of each hour; the :30 row is left blank so
         # the time column stays readable without clutter.
         is_hour = slot_minutes_in_day % 60 == 0
         time_text = _format_slot_time(slot_minutes_in_day) if is_hour else ""
         cells: list[Any] = [
-            Text(time_text.ljust(_TIME_COL_WIDTH), style=_SHADED_ROW_STYLE)
+            Text(time_text.ljust(_TIME_COL_WIDTH), style=shaded_row_style)
             if shaded
             else time_text
         ]
         for col_idx, (day_date, events) in enumerate(days, start=1):
-            content, ref, is_start = _cell_for_slot(
+            content, ref, is_start, is_end = _cell_for_slot(
                 day_date, slot_minutes_in_day, events
             )
             if ref is not None:
@@ -191,22 +189,58 @@ class TimelineGrid(DataTable[str]):
                 # back-to-back events always render in different shades.
                 if is_start:
                     self._col_alt[col_idx] = not self._col_alt.get(col_idx, False)
-                alt = self._col_alt.get(col_idx, False)
-                if alt:
+                if is_start:
+                    style = event_start_style
+                elif is_end:
                     style = (
-                        _EVENT_ALT_START_STYLE if is_start else _EVENT_ALT_BODY_STYLE
+                        f"{shaded_grid_bg_fg} on {event_end_bg}"
+                        if shaded
+                        else f"{unshaded_grid_bg_fg} on {event_end_bg}"
                     )
                 else:
-                    style = _EVENT_START_STYLE if is_start else _EVENT_BODY_STYLE
+                    style = event_body_style
                 w = self._day_col_width
-                text = content.ljust(w) if is_start else " " * w
+                if is_start:
+                    text = content.ljust(w)
+                elif is_end:
+                    text = _EVENT_END_CHAR * w
+                else:
+                    text = " " * w
                 cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
             elif shaded:
-                cells.append(Text(" " * self._day_col_width, style=_SHADED_ROW_STYLE))
+                cells.append(Text(" " * self._day_col_width, style=shaded_row_style))
             else:
                 cells.append("")
         self.add_row(*cells)
+
+    def _theme_color(self, name: str, fallback: str) -> str:
+        value = getattr(self.app.current_theme, name, None)
+        if isinstance(value, str) and value:
+            return value
+        return fallback
+
+    def _event_fill_bg(self) -> str:
+        return self._theme_color("accent", "#0087AF")
+
+    def _event_start_style(self) -> str:
+        fg = self._theme_color("foreground", "#FFFFFF")
+        return f"bold {fg} on {self._event_fill_bg()}"
+
+    def _event_body_style(self) -> str:
+        return f"on {self._event_fill_bg()}"
+
+    def _shaded_row_style(self) -> str:
+        # Hour stripe background follows theme panel tone.
+        return f"on {self._theme_color('panel', '#303030')}"
+
+    def _shaded_grid_bg_fg(self) -> str:
+        # End-cap foreground must match shaded stripe background.
+        return self._theme_color("panel", "#303030")
+
+    def _unshaded_grid_bg_fg(self) -> str:
+        # End-cap foreground must match unshaded grid background.
+        return self._theme_color("background", "#1E1E1E")
 
 
 # -- pure helpers (Layer-1 testable) --------------------------------------
@@ -257,7 +291,7 @@ def _cell_for_slot(
     day: date,
     slot_minutes_in_day: int,
     events: Sequence[OccurrenceRow],
-) -> tuple[str, ComponentRef | None, bool]:
+) -> tuple[str, ComponentRef | None, bool, bool]:
     """Figure out what data belongs in the (day, slot) cell.
 
     A slot spans `[slot_minutes_in_day, slot_minutes_in_day + 30)`.
@@ -267,12 +301,15 @@ def _cell_for_slot(
     slot; when several are active the first wins and a `+N` suffix
     indicates hidden extras.
 
-    Returns `(summary, ref, is_start)`:
+    Returns `(summary, ref, is_start, is_end)`:
     - `summary`: the primary event title (always set when `ref` is not None).
     - `ref`: the event to open on Enter; `None` when the slot is empty.
     - `is_start`: True when the primary event begins in this slot,
       False for a continuation slot.  The renderer uses this to decide
       whether to display the title or just the coloured bar.
+    - `is_end`: True when this continuation slot is the event's final
+      slot. The renderer draws a low-profile end cap for visual
+      separation from whatever follows.
     """
     slot_start = slot_minutes_in_day
     slot_end = slot_minutes_in_day + _SLOT_MINUTES
@@ -298,12 +335,20 @@ def _cell_for_slot(
                 continuing.append(row)
     active = starting + continuing
     if not active:
-        return "", None, False
+        return "", None, False, False
     first = active[0]
     summary = first.component.summary or "(no summary)"
     if len(active) > 1:
         summary = f"{summary} +{len(active) - 1}"
-    return summary, first.component.ref, bool(starting)
+    first_start = first.occurrence.start.astimezone()
+    first_end_dt = (first.occurrence.end or first.occurrence.start).astimezone()
+    first_start_min = first_start.hour * 60 + first_start.minute
+    first_end_min = (
+        24 * 60 if first_end_dt.date() > day else first_end_dt.hour * 60 + first_end_dt.minute
+    )
+    is_start = first_start_min >= slot_start
+    is_end = (not is_start) and first_end_min <= slot_end
+    return summary, first.component.ref, is_start, is_end
 
 
 def _full_day_summary(
