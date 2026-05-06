@@ -30,6 +30,7 @@ _DEFAULT_END_HOUR = 22
 _TIME_COL_WIDTH = 6
 _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
+_HOUR_MARKER_CHAR = "\u2594"  # UPPER ONE EIGHTH BLOCK
 _EVENT_END_CHAR = "\u2582"  # LOWER ONE QUARTER BLOCK
 
 
@@ -164,10 +165,8 @@ class TimelineGrid(DataTable[str]):
         # characters, not trailing whitespace, so every styled cell is
         # padded to the declared column width.
         row_index = self.row_count
-        shaded = (slot_minutes_in_day // 60) % 2 == 1
-        shaded_row_style = self._shaded_row_style()
-        shaded_grid_bg_fg = self._shaded_grid_bg_fg()
-        unshaded_grid_bg_fg = self._unshaded_grid_bg_fg()
+        grid_bg_fg = self._grid_bg_fg()
+        hour_marker_style = self._hour_marker_style()
         event_start_style = self._event_start_style()
         event_body_style = self._event_body_style()
         event_end_bg = self._event_fill_bg()
@@ -175,11 +174,7 @@ class TimelineGrid(DataTable[str]):
         # the time column stays readable without clutter.
         is_hour = slot_minutes_in_day % 60 == 0
         time_text = _format_slot_time(slot_minutes_in_day) if is_hour else ""
-        cells: list[Any] = [
-            Text(time_text.ljust(_TIME_COL_WIDTH), style=shaded_row_style)
-            if shaded
-            else time_text
-        ]
+        cells: list[Any] = [time_text]
         for col_idx, (day_date, events) in enumerate(days, start=1):
             content, ref, is_start, is_end = _cell_for_slot(
                 day_date, slot_minutes_in_day, events
@@ -192,11 +187,7 @@ class TimelineGrid(DataTable[str]):
                 if is_start:
                     style = event_start_style
                 elif is_end:
-                    style = (
-                        f"{shaded_grid_bg_fg} on {event_end_bg}"
-                        if shaded
-                        else f"{unshaded_grid_bg_fg} on {event_end_bg}"
-                    )
+                    style = f"{grid_bg_fg} on {event_end_bg}"
                 else:
                     style = event_body_style
                 w = self._day_col_width
@@ -208,8 +199,10 @@ class TimelineGrid(DataTable[str]):
                     text = " " * w
                 cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
-            elif shaded:
-                cells.append(Text(" " * self._day_col_width, style=shaded_row_style))
+            elif is_hour:
+                cells.append(
+                    Text(_HOUR_MARKER_CHAR * self._day_col_width, style=hour_marker_style)
+                )
             else:
                 cells.append("")
         self.add_row(*cells)
@@ -230,17 +223,13 @@ class TimelineGrid(DataTable[str]):
     def _event_body_style(self) -> str:
         return f"on {self._event_fill_bg()}"
 
-    def _shaded_row_style(self) -> str:
-        # Hour stripe background follows theme panel tone.
-        return f"on {self._theme_color('panel', '#303030')}"
-
-    def _shaded_grid_bg_fg(self) -> str:
-        # End-cap foreground must match shaded stripe background.
-        return self._theme_color("panel", "#303030")
-
-    def _unshaded_grid_bg_fg(self) -> str:
-        # End-cap foreground must match unshaded grid background.
+    def _grid_bg_fg(self) -> str:
+        # Foreground matching the default grid background tone.
         return self._theme_color("background", "#1E1E1E")
+
+    def _hour_marker_style(self) -> str:
+        # Subtle top marker for round-hour rows.
+        return self._theme_color("panel", "#303030")
 
 
 # -- pure helpers (Layer-1 testable) --------------------------------------
