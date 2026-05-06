@@ -4,7 +4,7 @@ import logging
 import re
 import threading
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import cast
 
 from dateutil.rrule import rrule, rruleset, rrulestr
@@ -355,10 +355,26 @@ def _raw_tz_anchor(raw_ics: bytes, uid: str) -> datetime | None:
         except (KeyError, ValueError):
             return None
         if isinstance(value, datetime):
-            return value if value.tzinfo is not None else value.astimezone()
+            return value if value.tzinfo is not None else _safe_localize_naive(value)
         if isinstance(value, date):
-            return datetime(value.year, value.month, value.day).astimezone()
+            return _safe_localize_naive(datetime(value.year, value.month, value.day))
     return None
+
+
+def _safe_localize_naive(value: datetime) -> datetime:
+    """Attach local tzinfo to naive datetimes without timestamp conversion.
+
+    We intentionally avoid calling `value.astimezone()` here: on Windows,
+    resolving very old/edge dates through localtime can raise
+    `OSError: [Errno 22] Invalid argument`. For floating DTSTART semantics,
+    we only need "local wall time", not an immediate epoch conversion.
+    """
+    return value.replace(tzinfo=_local_tzinfo())
+
+
+def _local_tzinfo() -> tzinfo:
+    tz = datetime.now().astimezone().tzinfo
+    return tz or UTC
 
 
 def _extract_rules(

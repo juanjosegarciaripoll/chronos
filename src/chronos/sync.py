@@ -340,7 +340,11 @@ def _sync_calendar(
     # valid.  When `affected_uids` is None (fast path), expansion is
     # needed only if something was pushed or deleted, since we don't have
     # per-UID change tracking for that path.
-    should_expand = bool(affected_uids) or (
+    # First sync for a calendar (no prior sync state) must rebuild the
+    # full occurrence cache even if `affected_uids` is unexpectedly empty
+    # (e.g. href canonicalization mismatch while collecting new_uids).
+    force_full_expand = prior_state is None
+    should_expand = force_full_expand or bool(affected_uids) or (
         affected_uids is None and (stats.pushed or stats.deleted_remote)
     )
     if should_expand:
@@ -349,7 +353,7 @@ def _sync_calendar(
             calendar=calendar_ref,
             window_start=now - _OCCURRENCE_WINDOW_PAST,
             window_end=now + _OCCURRENCE_WINDOW_FUTURE,
-            uids=affected_uids,
+            uids=None if force_full_expand else affected_uids,
             cancel_event=cancel_event,
         )
         # Raise after the transaction commits so partial expansion is

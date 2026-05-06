@@ -159,6 +159,18 @@ class ZeroDurationTest(unittest.TestCase):
         self.assertIsNone(occs[0].end)
 
 
+class LocalFloatingTimeTest(unittest.TestCase):
+    def test_safe_localize_naive_old_date_does_not_convert(self) -> None:
+        # Regression: Windows may raise OSError when naive ancient dates are
+        # pushed through astimezone(). We attach local tzinfo directly.
+        from chronos.recurrence import _safe_localize_naive
+
+        naive = datetime(1900, 1, 1, 9, 0)
+        localized = _safe_localize_naive(naive)
+        self.assertIsNotNone(localized.tzinfo)
+        self.assertEqual(localized.replace(tzinfo=None), naive)
+
+
 class WeeklyRecurrenceTest(unittest.TestCase):
     def _master(self) -> VEvent:
         return _event(

@@ -499,6 +499,36 @@ class IdempotencyTest(SyncTestCase):
         self.assertEqual(len(occurrences), 1)
         self.assertEqual(occurrences[0].ref.uid, "occ-a@example.com")
 
+    def test_first_sync_rebuilds_occurrences_even_when_affected_uids_empty(self) -> None:
+        # Regression: if slow-path UID collection returns an empty set on a
+        # first sync (e.g. href canonicalization mismatch), we must still do
+        # a full occurrence rebuild so this-week views are not empty.
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}a.ics",
+            ics=_ics_with_uid("occ-first-sync@example.com"),
+            etag="etag-a",
+        )
+
+        from chronos import sync as sync_mod
+
+        original = sync_mod._slow_path_reconcile
+
+        def wrapped_slow_path(*args: object, **kwargs: object) -> tuple[object, frozenset[str]]:
+            stats, _affected = original(*args, **kwargs)
+            return stats, frozenset()
+
+        with mock.patch("chronos.sync._slow_path_reconcile", side_effect=wrapped_slow_path):
+            self._run()
+
+        occurrences = self.index.query_occurrences(
+            CalendarRef(ACCOUNT_NAME, CALENDAR_NAME),
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2027, 1, 1, tzinfo=UTC),
+        )
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0].ref.uid, "occ-first-sync@example.com")
+
     def test_empty_server_etag_does_not_trigger_phantom_updates(self) -> None:
         # Regression: against servers that don't include getetag in
         # calendar-query responses (Exchange-style gateways), the slow
