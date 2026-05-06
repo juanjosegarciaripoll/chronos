@@ -87,17 +87,11 @@ class ChronosApp(App[None]):
         align: center middle;
     }
     .dialog-box {
-        background: $surface;
-        border: solid $accent;
         padding: 1 2;
         height: auto;
     }
     .dialog-box .dialog-title {
-        text-style: bold;
         margin-bottom: 1;
-    }
-    .dialog-box .dialog-empty {
-        color: $text-muted;
     }
     .dialog-box .dialog-actions {
         margin-top: 1;
@@ -117,18 +111,15 @@ class ChronosApp(App[None]):
     #confirm-box     { width: 60; }
     #sync-progress-box { width: 100; max-height: 80%; }
     #oauth-box       { width: 70; }
-    #oauth-status    { color: $text-muted; margin-bottom: 1; }
+    #oauth-status    { margin-bottom: 1; }
     /* Scrollable progress log: bordered, scrolls automatically as
        new lines come in via `RichLog.write`. */
     #sync-progress-log {
         height: 18;
-        border: solid $accent;
-        background: $boost;
         padding: 0 1;
     }
     #sync-progress-summary {
         margin-top: 1;
-        text-style: bold;
     }
     """
 

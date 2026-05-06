@@ -1431,6 +1431,22 @@ class HelpScreenTest(TuiFlowTestCase):
             await pilot.pause()
             self.assertIsInstance(pilot.app.screen, MainScreen)
 
+    async def test_help_dialog_body_widget_is_not_empty(self) -> None:
+        from chronos.tui.screens.help_screen import HelpScreen
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("f1")
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, HelpScreen)
+            screen = pilot.app.screen
+            assert isinstance(screen, HelpScreen)
+            text = screen._render_help()
+            self.assertIn("Views", text)
+            self.assertIn("Tools", text)
+
 
 class CommandPaletteDisabledTest(TuiFlowTestCase):
     async def test_ctrl_p_does_not_open_command_palette(self) -> None:

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-from rich.console import Group, RenderableType
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
+from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Static
+from textual.widgets import Footer, Label, Static
 
 from chronos.tui.bindings import BindingType
 
@@ -61,6 +59,12 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _Section:
+    title: str
+    bindings: tuple[tuple[str, str], ...]
+
+
 class HelpScreen(Screen[None]):
     """Read-only modal listing every visible key binding of the parent screen.
 
@@ -76,40 +80,84 @@ class HelpScreen(Screen[None]):
         Binding("escape", "close", "Back"),
         Binding("f1", "close", "Back", show=False),
     ]
+    CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+
+    #help-dialog {
+        width: auto;
+        max-width: 90;
+        height: auto;
+        border: solid $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+
+    #help-title {
+        text-style: bold;
+        content-align: center middle;
+        margin-bottom: 1;
+    }
+
+    #help-columns {
+        layout: horizontal;
+        height: auto;
+    }
+
+    .help-column {
+        width: 1fr;
+        height: auto;
+        padding: 0 2 0 0;
+    }
+
+    #help-hint {
+        color: $text-muted;
+        margin-top: 1;
+        content-align: center middle;
+    }
+    """
 
     def __init__(self, source_bindings: Sequence[BindingType]) -> None:
         super().__init__()
         self._source_bindings = tuple(source_bindings)
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="help-screen"):
-            yield Static(id="help-body")
+        left_sections, right_sections = self._column_sections()
+        with Vertical(id="help-dialog"):
+            yield Label("Keyboard shortcuts", id="help-title")
+            with Horizontal(id="help-columns"):
+                yield Static(_render_column(left_sections), classes="help-column")
+                yield Static(_render_column(right_sections), classes="help-column")
+            yield Static("Press F1 or Esc to close.", id="help-hint")
         yield Footer()
-
-    def on_mount(self) -> None:
-        body: Static = self.query_one("#help-body", Static)
-        body.update(self._render_help())
 
     def action_close(self) -> None:
         self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
 
-    def _render_help(self) -> RenderableType:
-        # Don't name this `_render` — Textual's `Widget._render` is a
-        # private method that returns a `Visual`, and overriding it
-        # here makes the parent screen's render pipeline crash with
-        # `'str' object has no attribute 'render_strips'`.
+    def _render_help(self) -> str:
+        left_sections, right_sections = self._column_sections()
+        left = _render_column(left_sections)
+        right = _render_column(right_sections)
+        return left if not right else f"{left}\n\n{right}"
+
+    def _column_sections(self) -> tuple[tuple[_Section, ...], tuple[_Section, ...]]:
         bucketed = self._bucket_bindings()
-        renderables: list[RenderableType] = []
-        for title, _ in _SECTIONS:
-            entries = bucketed.get(title)
-            if entries:
-                renderables.append(_section_panel(title, entries))
-        other = bucketed.get("Other")
-        if other:
-            renderables.append(_section_panel("Other", other))
-        if not renderables:
-            return Text("No keyboard shortcuts.", style="dim")
-        return Group(*renderables)
+        left_order = ("Views", "Agenda window", "Navigation")
+        right_order = ("Events", "Tools", "Other")
+        left: list[_Section] = []
+        right: list[_Section] = []
+        for title in left_order:
+            rows = bucketed.get(title)
+            if rows:
+                left.append(_Section(title, tuple(rows)))
+        for title in right_order:
+            rows = bucketed.get(title)
+            if rows:
+                right.append(_Section(title, tuple(rows)))
+        if not left and not right:
+            left.append(_Section("Shortcuts", (("n/a", "No keyboard shortcuts."),)))
+        return tuple(left), tuple(right)
 
     def _bucket_bindings(self) -> dict[str, list[tuple[str, str]]]:
         bucketed: dict[str, list[tuple[str, str]]] = {}
@@ -162,25 +210,18 @@ def _section_for(action: str) -> str:
     return "Other"
 
 
-def _section_panel(title: str, rows: Sequence[tuple[str, str]]) -> Panel:
-    table = Table(
-        show_header=False,
-        show_edge=False,
-        box=None,
-        pad_edge=False,
-        padding=(0, 2),
-    )
-    table.add_column(justify="right", style="bold yellow", no_wrap=True)
-    table.add_column(style="default")
-    for key, description in rows:
-        table.add_row(key, description)
-    return Panel(
-        table,
-        title=f"[bold cyan]{title}[/]",
-        title_align="left",
-        border_style="cyan",
-        padding=(0, 1),
-    )
+def _render_column(sections: Sequence[_Section]) -> str:
+    lines: list[str] = []
+    for idx, section in enumerate(sections):
+        if idx > 0:
+            lines.append("")
+        lines.append(f"[b $accent]{markup_escape(section.title)}[/b $accent]")
+        key_width = max(len(key) for key, _ in section.bindings) + 2
+        for key, desc in section.bindings:
+            lines.append(
+                f"[b]{markup_escape(key).ljust(key_width)}[/b] {markup_escape(desc)}"
+            )
+    return "\n".join(lines)
 
 
 __all__ = ["HelpScreen"]
