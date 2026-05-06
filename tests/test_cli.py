@@ -99,7 +99,10 @@ class ParserTest(CliTestCase):
     def test_no_subcommand_defaults_to_tui(self) -> None:
         # chronos with no args defaults to the tui command; without a
         # config it returns 2 (missing-config path), not a parser error.
-        result = cli.main([])
+        result = cli.main(
+            ["--config", "/nowhere/does/not/exist.toml"],
+            is_interactive=lambda: False,
+        )
         self.assertEqual(result, 2)
 
     def test_unknown_subcommand_exits_nonzero(self) -> None:

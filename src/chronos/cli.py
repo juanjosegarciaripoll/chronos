@@ -321,6 +321,16 @@ def _default_cli_authorizer(
         ) from exc
 
 
+def _tui_unsupported_authorizer(
+    account_name: str, _spec: OAuthCredential, _token_path: Path
+) -> StoredTokens:
+    raise OAuthError(
+        f"account {account_name!r} needs OAuth authorization, but the TUI "
+        "cannot complete the flow inline. Quit the TUI and run "
+        "`chronos sync` from the terminal to authorize."
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chronos", description="Terminal-first calendar client."

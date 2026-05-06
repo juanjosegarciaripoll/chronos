@@ -14,6 +14,7 @@ from chronos.protocols import (
     MirrorRepository,
 )
 from chronos.tui.screens.main_screen import MainScreen
+from chronos.tui.terminal import pop_terminal_title, push_terminal_title, set_terminal_title
 
 SyncRunner = Callable[..., Sequence[SyncResult]]
 """Runs every configured account's sync.
@@ -136,9 +137,14 @@ class ChronosApp(App[None]):
         self.services = services
 
     def on_mount(self) -> None:
+        push_terminal_title()
+        set_terminal_title(f"Chronos {datetime.now().strftime('%d/%m/%Y')}")
         self.push_screen(MainScreen())  # pyright: ignore[reportUnknownMemberType]
         if not self.is_headless:
             self._start_mcp_server()
+
+    def on_unmount(self) -> None:
+        pop_terminal_title()
 
     @work(exclusive=False, name="mcp-server", exit_on_error=False)
     async def _start_mcp_server(self) -> None:
