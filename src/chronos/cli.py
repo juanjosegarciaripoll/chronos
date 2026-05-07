@@ -107,8 +107,10 @@ def main(
 ) -> int:
     out = stdout if stdout is not None else sys.stdout
     err = stderr if stderr is not None else sys.stderr
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    argv_for_parse = _rewrite_ics_shortcut(raw_argv)
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv_for_parse)
     # `sync` defaults to INFO so the per-calendar / per-chunk progress
     # logger.info(...) calls are visible without forcing the user to
     # type `-v`. Other commands stay at WARNING (quiet by default).
@@ -212,6 +214,53 @@ def _default_context_factory(config_path: Path | None) -> CliContext:
 
 _LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 _LOG_DATEFMT = "%H:%M:%S"
+_SUBCOMMANDS = frozenset(
+    {
+        "sync",
+        "reset",
+        "list",
+        "show",
+        "add",
+        "edit",
+        "rm",
+        "doctor",
+        "tui",
+        "mcp",
+        "import",
+        "init",
+        "account",
+        "config",
+        "oauth",
+    }
+)
+
+
+def _rewrite_ics_shortcut(argv: Sequence[str]) -> list[str]:
+    """Translate `chronos file.ics` into `chronos tui --import-ics file.ics`."""
+    if not argv:
+        return list(argv)
+    first_positional: str | None = None
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in ("--config",):
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        first_positional = token
+        break
+    if first_positional is None:
+        return list(argv)
+    if first_positional in _SUBCOMMANDS:
+        return list(argv)
+    candidate = Path(first_positional)
+    if candidate.suffix.lower() != ".ics":
+        return list(argv)
+    before = list(argv[:i])
+    after = list(argv[i + 1 :])
+    return [*before, "tui", "--import-ics", first_positional, *after]
 
 
 class _DropH3DowngradeFilter(logging.Filter):
@@ -421,7 +470,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="Run diagnostics on the local state.")
 
-    sub.add_parser("tui", help="Launch the Textual UI.")
+    tui_p = sub.add_parser("tui", help="Launch the Textual UI.")
+    tui_p.add_argument(
+        "--import-ics",
+        type=Path,
+        default=None,
+        dest="import_ics",
+        help=argparse.SUPPRESS,
+    )
 
     sub.add_parser(
         "mcp",
@@ -618,7 +674,7 @@ def _dispatch(
     if command == "doctor":
         return cmd_doctor(ctx)
     if command == "tui":
-        return cmd_tui(ctx)
+        return cmd_tui(ctx, startup_ics_path=getattr(args, "import_ics", None))
     if command == "mcp":
         return cmd_mcp(ctx)
     if command == "import":
@@ -1180,7 +1236,7 @@ def _resolve_import_calendar(
     return calendars[choice - 1]
 
 
-def cmd_tui(ctx: CliContext) -> int:
+def cmd_tui(ctx: CliContext, *, startup_ics_path: Path | None = None) -> int:
     # Imported lazily so `chronos --help` and other commands don't pull
     # Textual into the import graph.
     from chronos.tui import ChronosApp, TuiServices
@@ -1223,6 +1279,7 @@ def cmd_tui(ctx: CliContext) -> int:
         creds=tui_ctx.creds,
         now=lambda: tui_ctx.now,
         sync_runner=build_sync_runner(tui_ctx),
+        startup_ics_path=startup_ics_path,
     )
     app = ChronosApp(services)
     app_box.append(app)

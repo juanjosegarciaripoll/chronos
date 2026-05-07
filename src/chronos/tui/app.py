@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from textual import work
 from textual.app import App
@@ -43,6 +44,7 @@ class TuiServices:
     creds: CredentialsProvider
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     sync_runner: SyncRunner | None = None
+    startup_ics_path: Path | None = None
 
 
 class ChronosApp(App[None]):
@@ -83,7 +85,7 @@ class ChronosApp(App[None]):
        has something to act on (auto-width inside a flex parent
        expands to fill, defeating the centre rule). */
     SyncConfirmScreen, ConfirmScreen, SyncProgressScreen,
-    EventDetailScreen, OAuthProgressScreen {
+    EventDetailScreen, OAuthProgressScreen, ImportIcsScreen {
         align: center middle;
     }
     .dialog-box {
@@ -109,6 +111,7 @@ class ChronosApp(App[None]):
     #event-detail    { width: 80; max-height: 80%; }
     #sync-confirm-box { width: 80; }
     #confirm-box     { width: 60; }
+    #import-ics-box  { width: 80; }
     #sync-progress-box { width: 100; max-height: 80%; }
     #oauth-box       { width: 70; }
     #oauth-status    { margin-bottom: 1; }

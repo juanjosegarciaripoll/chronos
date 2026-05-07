@@ -110,6 +110,25 @@ class ParserTest(CliTestCase):
             cli.main(["nope"])
 
 
+class IcsShortcutParseTest(unittest.TestCase):
+    def test_rewrites_bare_ics_to_tui_import(self) -> None:
+        argv = cli._rewrite_ics_shortcut(["meeting.ics"])  # pyright: ignore[reportPrivateUsage]
+        self.assertEqual(argv, ["tui", "--import-ics", "meeting.ics"])
+
+    def test_rewrites_after_global_flags(self) -> None:
+        argv = cli._rewrite_ics_shortcut(  # pyright: ignore[reportPrivateUsage]
+            ["--config", "cfg.toml", "-v", "meeting.ics"]
+        )
+        self.assertEqual(
+            argv,
+            ["--config", "cfg.toml", "-v", "tui", "--import-ics", "meeting.ics"],
+        )
+
+    def test_keeps_regular_subcommands(self) -> None:
+        argv = cli._rewrite_ics_shortcut(["sync"])  # pyright: ignore[reportPrivateUsage]
+        self.assertEqual(argv, ["sync"])
+
+
 class SyncCommandTest(CliTestCase):
     def _seed_server(self) -> None:
         self.session.add_calendar(url="https://cal.example.com/work/", name="work")

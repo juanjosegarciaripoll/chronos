@@ -39,6 +39,7 @@ from chronos.tui.screens.event_detail_screen import EventDetailScreen
 from chronos.tui.screens.event_edit_screen import EditDraft, EventEditScreen
 from chronos.tui.screens.grid_view_screen import title_for as grid_title
 from chronos.tui.screens.grid_view_screen import window_for as grid_window_for
+from chronos.tui.screens.import_ics_screen import ImportIcsScreen
 from chronos.tui.screens.main_screen import MainScreen
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
@@ -861,12 +862,25 @@ class TuiFlowTestCase(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         sync_runner: object | None = None,
+        startup_ics_path: Path | None = None,
     ) -> TuiServices:
         services = _services(self.tmp, sync_runner=sync_runner)
+        services.startup_ics_path = startup_ics_path
         # SQLite needs an explicit close on Windows or the temp dir
         # rmtree races against the still-open WAL file.
         self.addCleanup(services.index.close)
         return services
+
+
+class StartupIcsModalTest(TuiFlowTestCase):
+    async def test_shows_modal_when_started_with_ics_path(self) -> None:
+        ics_path = self.tmp / "invite.ics"
+        ics_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
+        services = self.services(startup_ics_path=ics_path)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, ImportIcsScreen)
 
 
 class ViewSwitchTest(TuiFlowTestCase):

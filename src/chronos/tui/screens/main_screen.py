@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from dateutil.relativedelta import relativedelta
@@ -48,6 +49,7 @@ from chronos.tui.screens.grid_view_screen import (
     title_for as grid_title,
 )
 from chronos.tui.screens.help_screen import HelpScreen
+from chronos.tui.screens.import_ics_screen import ImportIcsScreen
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
 from chronos.tui.screens.sync_progress_screen import SyncProgressScreen
@@ -131,6 +133,7 @@ class MainScreen(Screen[None]):
         saved = _load_last_view()
         if saved != ViewKind.AGENDA:
             self._set_view(saved)
+        self._maybe_offer_startup_ics_import()
 
     def action_toggle_calendars(self) -> None:
         panel = self.query_one(CalendarPanel)
@@ -587,6 +590,60 @@ class MainScreen(Screen[None]):
         # to refresh the view once it dismisses.
         screen = SyncProgressScreen(runner, on_finished=self._sync_finished)
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def _maybe_offer_startup_ics_import(self) -> None:
+        startup_ics = self._services().startup_ics_path
+        if startup_ics is None:
+            return
+        calendars = all_calendar_refs(
+            self._services().config,
+            self._services().mirror,
+        )
+        if not calendars:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                "No calendars available. Add an account first."
+            )
+            return
+        screen = ImportIcsScreen(
+            file_label=str(startup_ics),
+            calendars=calendars,
+            on_add_sync=lambda target: self._import_ics(target, startup_ics, sync=True),
+            on_add_only=lambda target: self._import_ics(
+                target, startup_ics, sync=False
+            ),
+        )
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def _import_ics(self, target: CalendarRef, path: Path, *, sync: bool) -> None:
+        from chronos.ingest import IngestError, ingest_ics_bytes
+
+        services = self._services()
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Import failed: {exc}", severity="error"
+            )
+            return
+        try:
+            report = ingest_ics_bytes(
+                payload,
+                target=target,
+                mirror=services.mirror,
+                index=services.index,
+                on_conflict="skip",
+            )
+        except IngestError as exc:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Import failed: {exc}", severity="error"
+            )
+            return
+        self.refresh_view()
+        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+            f"Imported {report.imported} (skipped {report.skipped})"
+        )
+        if sync:
+            self._run_sync()
 
     def _sync_finished(
         self,
