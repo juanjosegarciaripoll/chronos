@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
@@ -15,6 +15,11 @@ class ComponentKind(StrEnum):
 class LocalStatus(StrEnum):
     ACTIVE = "active"
     TRASHED = "trashed"
+
+
+class AlarmAction(StrEnum):
+    DISPLAY = "DISPLAY"
+    AUDIO = "AUDIO"
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,40 @@ class VTodo:
 
 
 StoredComponent = VEvent | VTodo
+
+
+@dataclass(frozen=True, kw_only=True)
+class ParsedAlarm:
+    """A VALARM subcomponent extracted from raw ICS before trigger resolution.
+
+    ``trigger_offset`` is a timedelta (relative to start/end) or an absolute
+    UTC datetime.  ``trigger_related`` is only meaningful for timedelta offsets
+    and is either ``"START"`` (default) or ``"END"``.
+    """
+
+    action: AlarmAction
+    trigger_offset: timedelta | datetime
+    trigger_related: str
+    description: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class AlarmRecord:
+    """One row in the ``alarms`` table: a fully resolved, absolute trigger time.
+
+    ``db_id`` is ``None`` for newly constructed records and is populated
+    when the row is read back from SQLite.  ``summary`` comes from the
+    parent component and is used as the desktop notification title.
+    """
+
+    db_id: int | None
+    ref: ComponentRef
+    summary: str | None
+    occurrence_start: datetime
+    trigger_at: datetime
+    action: AlarmAction
+    description: str | None
+    fired_at: datetime | None
 
 
 @dataclass(frozen=True, kw_only=True)

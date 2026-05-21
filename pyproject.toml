@@ -5,6 +5,7 @@ description = "Terminal-first calendar client with CalDAV synchronisation."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "desktop-notifier>=3.5",
     "icalendar>=5.0",
     "python-dateutil>=2.9",
     "textual>=0.80",

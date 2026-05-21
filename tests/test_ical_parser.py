@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from chronos.domain import ComponentKind
-from chronos.ical_parser import IcalParseError, parse_vcalendar
+from chronos.domain import AlarmAction, ComponentKind
+from chronos.ical_parser import IcalParseError, extract_alarm_triggers, parse_vcalendar
 from tests import corpus
 
 
@@ -85,3 +85,56 @@ class ParseEveryCorpusFixtureTest(unittest.TestCase):
             with self.subTest(fixture=name):
                 components = parse_vcalendar(data)
                 self.assertGreaterEqual(len(components), 1, msg=name)
+
+
+class ExtractAlarmTriggersTest(unittest.TestCase):
+    def test_display_alarm_relative_to_start(self) -> None:
+        raw = corpus.event_with_display_alarm(-15)
+        alarms = extract_alarm_triggers(raw, "alarm-display-1@example.com")
+        self.assertEqual(len(alarms), 1)
+        a = alarms[0]
+        self.assertEqual(a.action, AlarmAction.DISPLAY)
+        self.assertIsInstance(a.trigger_offset, timedelta)
+        self.assertEqual(a.trigger_offset, timedelta(minutes=-15))
+        self.assertEqual(a.trigger_related, "START")
+        self.assertEqual(a.description, "Time to go")
+
+    def test_audio_alarm_kept(self) -> None:
+        raw = corpus.event_with_audio_alarm()
+        alarms = extract_alarm_triggers(raw, "alarm-audio-1@example.com")
+        self.assertEqual(len(alarms), 1)
+        self.assertEqual(alarms[0].action, AlarmAction.AUDIO)
+
+    def test_email_alarm_skipped(self) -> None:
+        raw = corpus.event_with_email_alarm()
+        alarms = extract_alarm_triggers(raw, "alarm-email-1@example.com")
+        self.assertEqual(alarms, [])
+
+    def test_end_related_alarm(self) -> None:
+        raw = corpus.event_with_end_related_alarm()
+        alarms = extract_alarm_triggers(raw, "alarm-end-1@example.com")
+        self.assertEqual(len(alarms), 1)
+        self.assertEqual(alarms[0].trigger_related, "END")
+        self.assertEqual(alarms[0].trigger_offset, timedelta(minutes=-5))
+
+    def test_absolute_alarm(self) -> None:
+        raw = corpus.event_with_absolute_alarm()
+        alarms = extract_alarm_triggers(raw, "alarm-abs-1@example.com")
+        self.assertEqual(len(alarms), 1)
+        self.assertIsInstance(alarms[0].trigger_offset, datetime)
+        expected = datetime(2026, 5, 1, 8, 30, tzinfo=UTC)
+        self.assertEqual(alarms[0].trigger_offset, expected)
+
+    def test_no_alarms_returns_empty(self) -> None:
+        raw = corpus.simple_event()
+        alarms = extract_alarm_triggers(raw, "simple-event-1@example.com")
+        self.assertEqual(alarms, [])
+
+    def test_wrong_uid_returns_empty(self) -> None:
+        raw = corpus.event_with_display_alarm()
+        alarms = extract_alarm_triggers(raw, "no-such-uid@example.com")
+        self.assertEqual(alarms, [])
+
+    def test_invalid_ics_returns_empty(self) -> None:
+        alarms = extract_alarm_triggers(b"NOT ICS", "any-uid@example.com")
+        self.assertEqual(alarms, [])

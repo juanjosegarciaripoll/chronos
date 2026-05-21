@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import cast
 
 from chronos.domain import (
+    AlarmAction,
+    AlarmRecord,
     CalendarRef,
     ComponentKind,
     ComponentRef,
@@ -79,6 +81,23 @@ CREATE INDEX IF NOT EXISTS ix_occurrences_component
 
 CREATE INDEX IF NOT EXISTS ix_occurrences_range
     ON occurrences(occurrence_start, occurrence_end);
+
+CREATE TABLE IF NOT EXISTS alarms(
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    component_id     INTEGER NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    occurrence_start TEXT NOT NULL,
+    trigger_at       TEXT NOT NULL,
+    action           TEXT NOT NULL DEFAULT 'DISPLAY',
+    description      TEXT,
+    fired_at         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_alarms_component
+    ON alarms(component_id);
+
+CREATE INDEX IF NOT EXISTS ix_alarms_pending
+    ON alarms(trigger_at, fired_at)
+    WHERE fired_at IS NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS components_fts USING fts5(
     summary, description, location,
@@ -416,6 +435,64 @@ class SqliteIndexRepository:
             cursor = conn.execute("DELETE FROM calendar_sync_state")
             return cursor.rowcount or 0
 
+    def set_alarms(
+        self,
+        ref: ComponentRef,
+        occurrence_start: datetime,
+        alarms: Sequence[AlarmRecord],
+    ) -> None:
+        """Replace all alarm rows for one (component, occurrence_start) pair."""
+        with self.connection() as conn:
+            component_id = _find_component_id(conn, ref)
+            if component_id is None:
+                return
+            occ_sql = _datetime_to_sql(occurrence_start)
+            conn.execute(
+                "DELETE FROM alarms WHERE component_id = ? AND occurrence_start = ?",
+                (component_id, occ_sql),
+            )
+            for alarm in alarms:
+                conn.execute(
+                    "INSERT INTO alarms "
+                    "(component_id, occurrence_start, trigger_at, action, description, fired_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        component_id,
+                        occ_sql,
+                        _datetime_to_sql(alarm.trigger_at),
+                        alarm.action.value,
+                        alarm.description,
+                        _datetime_to_sql(alarm.fired_at),
+                    ),
+                )
+
+    def query_pending_alarms(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> tuple[AlarmRecord, ...]:
+        """Return unfired alarms with trigger_at in [window_start, window_end)."""
+        start_sql = _datetime_to_sql(window_start)
+        end_sql = _datetime_to_sql(window_end)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT a.id, c.account_name, c.calendar_name, c.uid, c.recurrence_id, "
+                "c.summary, a.occurrence_start, a.trigger_at, a.action, a.description "
+                "FROM alarms a JOIN components c ON c.id = a.component_id "
+                "WHERE a.trigger_at >= ? AND a.trigger_at < ? AND a.fired_at IS NULL",
+                (start_sql, end_sql),
+            )
+            rows = cursor.fetchall()
+        return tuple(_row_to_alarm_record(r) for r in rows)
+
+    def mark_alarm_fired(self, alarm_id: int, fired_at: datetime) -> None:
+        """Record when an alarm notification was sent."""
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE alarms SET fired_at = ? WHERE id = ?",
+                (_datetime_to_sql(fired_at), alarm_id),
+            )
+
 
 def _find_component_id(conn: sqlite3.Connection, ref: ComponentRef) -> int | None:
     cursor = conn.execute(
@@ -468,6 +545,43 @@ def _row_to_occurrence(row: tuple[object, ...]) -> Occurrence:
         end=_sql_to_datetime(_opt_str(occurrence_end)),
         recurrence_id=_opt_str(recurrence_id),
         is_override=bool(is_override),
+    )
+
+
+def _row_to_alarm_record(row: tuple[object, ...]) -> AlarmRecord:
+    (
+        db_id,
+        account_name,
+        calendar_name,
+        uid,
+        recurrence_id,
+        summary,
+        occurrence_start,
+        trigger_at,
+        action,
+        description,
+    ) = row
+    ref = ComponentRef(
+        account_name=cast(str, account_name),
+        calendar_name=cast(str, calendar_name),
+        uid=cast(str, uid),
+        recurrence_id=_opt_str(recurrence_id),
+    )
+    occ_start = _sql_to_datetime(_opt_str(occurrence_start))
+    if occ_start is None:
+        raise AssertionError("occurrence_start must be non-null in alarms")
+    trig = _sql_to_datetime(_opt_str(trigger_at))
+    if trig is None:
+        raise AssertionError("trigger_at must be non-null in alarms")
+    return AlarmRecord(
+        db_id=cast(int, db_id),
+        ref=ref,
+        summary=_opt_str(summary),
+        occurrence_start=occ_start,
+        trigger_at=trig,
+        action=AlarmAction(cast(str, action)),
+        description=_opt_str(description),
+        fired_at=None,
     )
 
 

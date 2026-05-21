@@ -33,7 +33,7 @@ from chronos.domain import (
 )
 from chronos.ical_parser import IcalParseError, ParsedComponent, parse_vcalendar
 from chronos.protocols import CalDAVSession, IndexRepository, MirrorRepository
-from chronos.recurrence import populate_occurrences
+from chronos.recurrence import populate_alarms, populate_occurrences
 from chronos.storage_indexing import synthetic_uid
 
 logger = logging.getLogger(__name__)
@@ -349,6 +349,14 @@ def _sync_calendar(
     )
     if should_expand:
         populate_occurrences(
+            index=index,
+            calendar=calendar_ref,
+            window_start=now - _OCCURRENCE_WINDOW_PAST,
+            window_end=now + _OCCURRENCE_WINDOW_FUTURE,
+            uids=None if force_full_expand else affected_uids,
+            cancel_event=cancel_event,
+        )
+        populate_alarms(
             index=index,
             calendar=calendar_ref,
             window_start=now - _OCCURRENCE_WINDOW_PAST,

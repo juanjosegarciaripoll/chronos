@@ -11,12 +11,15 @@ from dateutil.rrule import rrule, rruleset, rrulestr
 from icalendar import Calendar
 
 from chronos.domain import (
+    AlarmRecord,
     CalendarRef,
     Occurrence,
+    ParsedAlarm,
     StoredComponent,
     VEvent,
     VTodo,
 )
+from chronos.ical_parser import extract_alarm_triggers
 from chronos.protocols import IndexRepository
 
 logger = logging.getLogger(__name__)
@@ -199,6 +202,88 @@ def populate_occurrences(
             total,
         )
     return total
+
+
+def populate_alarms(
+    *,
+    index: IndexRepository,
+    calendar: CalendarRef,
+    window_start: datetime,
+    window_end: datetime,
+    uids: frozenset[str] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> int:
+    """Compute and persist AlarmRecords for occurrences in the given window.
+
+    Must be called after ``populate_occurrences`` for the same calendar so
+    that occurrence rows already exist.  When ``uids`` is supplied only
+    masters whose UID is in that set are re-processed; pass ``None`` to
+    rebuild all.  Returns the number of alarm rows written.
+    """
+    if uids is not None and not uids:
+        return 0
+    components = index.list_calendar_components(calendar)
+    all_masters = [c for c in components if c.ref.recurrence_id is None]
+    masters = (
+        [m for m in all_masters if m.ref.uid in uids]
+        if uids is not None
+        else all_masters
+    )
+
+    total = 0
+    with index.connection():
+        for master in masters:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            parsed_alarms = extract_alarm_triggers(master.raw_ics, master.ref.uid)
+            if not parsed_alarms:
+                continue
+            occurrences = index.query_occurrences(calendar, window_start, window_end)
+            for occ in occurrences:
+                if occ.ref.uid != master.ref.uid:
+                    continue
+                records = _resolve_alarm_records(parsed_alarms, master.summary, occ)
+                if records:
+                    index.set_alarms(master.ref, occ.start, records)
+                    total += len(records)
+    return total
+
+
+def _resolve_alarm_records(
+    parsed_alarms: list[ParsedAlarm],
+    summary: str | None,
+    occurrence: Occurrence,
+) -> list[AlarmRecord]:
+    """Compute absolute UTC trigger datetimes for one occurrence."""
+    records: list[AlarmRecord] = []
+    for alarm in parsed_alarms:
+        trigger_at = _resolve_trigger(alarm, occurrence)
+        if trigger_at is None:
+            continue
+        records.append(
+            AlarmRecord(
+                db_id=None,
+                ref=occurrence.ref,
+                summary=summary,
+                occurrence_start=occurrence.start,
+                trigger_at=trigger_at,
+                action=alarm.action,
+                description=alarm.description,
+                fired_at=None,
+            )
+        )
+    return records
+
+
+def _resolve_trigger(alarm: ParsedAlarm, occurrence: Occurrence) -> datetime | None:
+    """Return the absolute UTC trigger time, or ``None`` if unresolvable."""
+    if isinstance(alarm.trigger_offset, datetime):
+        return alarm.trigger_offset
+    offset: timedelta = alarm.trigger_offset
+    anchor = occurrence.end if alarm.trigger_related == "END" else occurrence.start
+    if anchor is None:
+        return None
+    return anchor + offset
 
 
 def _anchor(component: StoredComponent) -> datetime | None:
@@ -469,5 +554,6 @@ __all__ = [
     "MAX_OCCURRENCES",
     "RecurrenceExpansionError",
     "expand",
+    "populate_alarms",
     "populate_occurrences",
 ]

@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from chronos.domain import (
+    AlarmAction,
+    AlarmRecord,
     CalendarRef,
     ComponentRef,
     LocalStatus,
@@ -419,3 +421,115 @@ class CrossThreadAccessTest(unittest.TestCase):
         # thread-local cache, so a subsequent call would just open
         # fresh connections — but we don't want that side effect.
         self.repo._connections.clear()  # type: ignore[attr-defined]
+
+
+class AlarmRepositoryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.repo = SqliteIndexRepository(tmp / "index.db")
+        self.addCleanup(self.repo.close)
+        # Insert a component to hold FK references.
+        self.cal = CalendarRef("personal", "work")
+        self.ref = _ref("alarm-uid@example.com")
+        self.repo.upsert_component(_event(self.ref, summary="Team standup"))
+
+    def _make_alarm(
+        self,
+        trigger_at: datetime,
+        action: AlarmAction = AlarmAction.DISPLAY,
+        description: str | None = "Reminder",
+    ) -> AlarmRecord:
+        return AlarmRecord(
+            db_id=None,
+            ref=self.ref,
+            summary="Team standup",
+            occurrence_start=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            trigger_at=trigger_at,
+            action=action,
+            description=description,
+            fired_at=None,
+        )
+
+    def test_set_and_query_pending_alarms(self) -> None:
+        trigger = datetime(2026, 5, 1, 8, 45, tzinfo=UTC)
+        self.repo.set_alarms(
+            self.ref,
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            [self._make_alarm(trigger)],
+        )
+        window_start = datetime(2026, 5, 1, 8, 30, tzinfo=UTC)
+        window_end = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        pending = self.repo.query_pending_alarms(window_start, window_end)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].trigger_at, trigger)
+        self.assertEqual(pending[0].summary, "Team standup")
+        self.assertIsNotNone(pending[0].db_id)
+
+    def test_query_outside_window_returns_empty(self) -> None:
+        trigger = datetime(2026, 5, 1, 8, 45, tzinfo=UTC)
+        self.repo.set_alarms(
+            self.ref,
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            [self._make_alarm(trigger)],
+        )
+        # Window entirely before trigger
+        pending = self.repo.query_pending_alarms(
+            datetime(2026, 5, 1, 7, 0, tzinfo=UTC),
+            datetime(2026, 5, 1, 8, 0, tzinfo=UTC),
+        )
+        self.assertEqual(len(pending), 0)
+
+    def test_mark_alarm_fired_excludes_from_pending(self) -> None:
+        trigger = datetime(2026, 5, 1, 8, 45, tzinfo=UTC)
+        occ_start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        self.repo.set_alarms(self.ref, occ_start, [self._make_alarm(trigger)])
+        pending = self.repo.query_pending_alarms(
+            datetime(2026, 5, 1, 8, 30, tzinfo=UTC),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        alarm_id = pending[0].db_id
+        assert alarm_id is not None
+        fired_at = datetime(2026, 5, 1, 8, 46, tzinfo=UTC)
+        self.repo.mark_alarm_fired(alarm_id, fired_at)
+        still_pending = self.repo.query_pending_alarms(
+            datetime(2026, 5, 1, 8, 30, tzinfo=UTC),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        self.assertEqual(len(still_pending), 0)
+
+    def test_set_alarms_replaces_existing(self) -> None:
+        occ_start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        trigger_a = datetime(2026, 5, 1, 8, 45, tzinfo=UTC)
+        trigger_b = datetime(2026, 5, 1, 8, 50, tzinfo=UTC)
+        self.repo.set_alarms(self.ref, occ_start, [self._make_alarm(trigger_a)])
+        # Second call for same occurrence replaces the first.
+        self.repo.set_alarms(self.ref, occ_start, [self._make_alarm(trigger_b)])
+        pending = self.repo.query_pending_alarms(
+            datetime(2026, 5, 1, 8, 30, tzinfo=UTC),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].trigger_at, trigger_b)
+
+    def test_cascade_delete_removes_alarms(self) -> None:
+        occ_start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        self.repo.set_alarms(
+            self.ref,
+            occ_start,
+            [self._make_alarm(datetime(2026, 5, 1, 8, 45, tzinfo=UTC))],
+        )
+        self.repo.delete_component(self.ref)
+        pending = self.repo.query_pending_alarms(
+            datetime(2026, 5, 1, 8, 30, tzinfo=UTC),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        self.assertEqual(len(pending), 0)
+
+    def test_set_alarms_no_component_is_noop(self) -> None:
+        missing_ref = _ref("nonexistent@example.com")
+        # Should not raise even though the component doesn't exist.
+        self.repo.set_alarms(
+            missing_ref,
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            [self._make_alarm(datetime(2026, 5, 1, 8, 45, tzinfo=UTC))],
+        )

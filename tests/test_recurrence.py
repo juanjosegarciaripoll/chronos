@@ -17,6 +17,7 @@ from chronos.recurrence import (
     MAX_OCCURRENCES,
     RecurrenceExpansionError,
     expand,
+    populate_alarms,
     populate_occurrences,
 )
 from tests import corpus
@@ -504,3 +505,169 @@ class PopulateOccurrencesTest(unittest.TestCase):
         )
         # Only one master expanded before the loop noticed the cancel.
         self.assertEqual(len(expanded), 1)
+
+
+class PopulateAlarmsTest(unittest.TestCase):
+    """Tests for ``populate_alarms``; requires a real SQLite index."""
+
+    def setUp(self) -> None:
+        from chronos.index_store import SqliteIndexRepository
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.index = SqliteIndexRepository(tmp / "index.sqlite3")
+        self.addCleanup(self.index.close)
+        self.calendar = CalendarRef(account_name=ACCOUNT, calendar_name=CALENDAR)
+        self.window_start = datetime(2026, 1, 1, tzinfo=UTC)
+        self.window_end = datetime(2027, 1, 1, tzinfo=UTC)
+
+    def _insert_and_expand(self, uid: str, raw_ics: bytes, dtstart: datetime) -> None:
+        """Insert a component, expand occurrences, ready for alarm population."""
+        ref = ComponentRef(account_name=ACCOUNT, calendar_name=CALENDAR, uid=uid)
+        ev = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=raw_ics,
+            summary=uid,
+            description=None,
+            location=None,
+            dtstart=dtstart,
+            dtend=dtstart + timedelta(hours=1),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        self.index.upsert_component(ev)
+        populate_occurrences(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+        )
+
+    def test_display_alarm_written(self) -> None:
+        uid = "alarm-display-1@example.com"
+        dtstart = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        self._insert_and_expand(uid, corpus.event_with_display_alarm(-15), dtstart)
+        count = populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+        )
+        self.assertEqual(count, 1)
+        # trigger_at = dtstart + (-15 min) = 08:45
+        expected_trigger = dtstart + timedelta(minutes=-15)
+        pending = self.index.query_pending_alarms(
+            expected_trigger - timedelta(seconds=1),
+            expected_trigger + timedelta(seconds=1),
+        )
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].trigger_at, expected_trigger)
+        self.assertEqual(pending[0].summary, uid)
+
+    def test_email_alarm_not_stored(self) -> None:
+        uid = "alarm-email-1@example.com"
+        self._insert_and_expand(
+            uid, corpus.event_with_email_alarm(), datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        )
+        count = populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+        )
+        self.assertEqual(count, 0)
+
+    def test_end_related_alarm_uses_dtend_as_anchor(self) -> None:
+        uid = "alarm-end-1@example.com"
+        dtstart = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        dtend = dtstart + timedelta(hours=1)
+        self._insert_and_expand(uid, corpus.event_with_end_related_alarm(), dtstart)
+        populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+        )
+        # trigger = DTEND + (-5 min) = 09:55
+        expected_trigger = dtend + timedelta(minutes=-5)
+        pending = self.index.query_pending_alarms(
+            expected_trigger - timedelta(seconds=1),
+            expected_trigger + timedelta(seconds=1),
+        )
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].trigger_at, expected_trigger)
+
+    def test_idempotent_on_second_call(self) -> None:
+        uid = "alarm-display-1@example.com"
+        self._insert_and_expand(
+            uid, corpus.event_with_display_alarm(), datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        )
+        populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+        )
+        count2 = populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+        )
+        # Second call replaces the existing rows — total written equals 1.
+        self.assertEqual(count2, 1)
+        pending = self.index.query_pending_alarms(self.window_start, self.window_end)
+        self.assertEqual(len(pending), 1)
+
+    def test_uids_filter_skips_other_masters(self) -> None:
+        uid_a = "alarm-display-1@example.com"
+        uid_b = "alarm-email-1@example.com"
+        dtstart = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        self._insert_and_expand(uid_a, corpus.event_with_display_alarm(), dtstart)
+        self._insert_and_expand(uid_b, corpus.event_with_email_alarm(), dtstart)
+        count = populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            uids=frozenset({uid_a}),
+        )
+        self.assertEqual(count, 1)
+
+    def test_empty_uids_set_is_noop(self) -> None:
+        self._insert_and_expand(
+            "alarm-display-1@example.com",
+            corpus.event_with_display_alarm(),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        count = populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            uids=frozenset(),
+        )
+        self.assertEqual(count, 0)
+
+    def test_cancel_event_stops_loop(self) -> None:
+        for uid in ("alarm-display-1@example.com", "alarm-audio-1@example.com"):
+            self._insert_and_expand(
+                uid,
+                corpus.event_with_display_alarm(),
+                datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            )
+        cancel = threading.Event()
+        cancel.set()
+        count = populate_alarms(
+            index=self.index,
+            calendar=self.calendar,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            cancel_event=cancel,
+        )
+        self.assertEqual(count, 0)

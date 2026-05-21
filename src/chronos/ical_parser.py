@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from icalendar import Calendar
 
-from chronos.domain import ComponentKind
+from chronos.domain import AlarmAction, ComponentKind, ParsedAlarm
 
 
 class IcalParseError(ValueError):
@@ -101,3 +101,85 @@ def _decoded(component: object, key: str) -> object:
         return decoder(key)
     except (KeyError, ValueError):
         return None
+
+
+_SUPPORTED_ALARM_ACTIONS = frozenset({"DISPLAY", "AUDIO"})
+
+
+def extract_alarm_triggers(raw_ics: bytes, uid: str) -> list[ParsedAlarm]:
+    """Return all DISPLAY/AUDIO VALARM triggers for the master component with ``uid``.
+
+    Only examines the master (no RECURRENCE-ID) — alarms are defined on the
+    master and inherited by every recurrence instance.  Returns ``[]`` on any
+    parse error or when no supported alarms exist.
+    """
+    try:
+        cal = Calendar.from_ical(raw_ics)
+    except ValueError:
+        return []
+    out: list[ParsedAlarm] = []
+    for sub in cal.walk():  # pyright: ignore[reportUnknownMemberType]
+        name = _component_name(sub)
+        if name not in ("VEVENT", "VTODO"):
+            continue
+        if _component_get_str(sub, "UID") != uid:
+            continue
+        if _component_has(sub, "RECURRENCE-ID"):
+            continue
+        for valarm in sub.walk("VALARM"):  # pyright: ignore[reportUnknownMemberType]
+            parsed = _parse_valarm(valarm)
+            if parsed is not None:
+                out.append(parsed)
+        break  # found our master; stop scanning
+    return out
+
+
+def _parse_valarm(valarm: object) -> ParsedAlarm | None:
+    action_raw = str(_call_get(valarm, "ACTION") or "DISPLAY").upper()
+    if action_raw not in _SUPPORTED_ALARM_ACTIONS:
+        return None
+    action = AlarmAction(action_raw)
+
+    trigger_val = _decoded(valarm, "TRIGGER")
+    if trigger_val is None:
+        return None
+
+    if isinstance(trigger_val, timedelta):
+        raw_prop = _call_get(valarm, "TRIGGER")
+        params = getattr(raw_prop, "params", {})
+        related = str(params.get("RELATED", "START")).upper()
+        return ParsedAlarm(
+            action=action,
+            trigger_offset=trigger_val,
+            trigger_related=related,
+            description=_get_str(valarm, "DESCRIPTION"),
+        )
+    if isinstance(trigger_val, datetime):
+        utc_trigger = (
+            trigger_val.astimezone(UTC) if trigger_val.tzinfo else trigger_val.replace(tzinfo=UTC)
+        )
+        return ParsedAlarm(
+            action=action,
+            trigger_offset=utc_trigger,
+            trigger_related="START",
+            description=_get_str(valarm, "DESCRIPTION"),
+        )
+    return None
+
+
+def _component_name(component: object) -> str:
+    return str(getattr(component, "name", ""))
+
+
+def _component_get_str(component: object, key: str) -> str | None:
+    value = _call_get(component, key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _component_has(component: object, key: str) -> bool:
+    contains = getattr(component, "__contains__", None)
+    if contains is None:
+        return False
+    return bool(contains(key))

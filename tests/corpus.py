@@ -268,6 +268,107 @@ END:VEVENT
     return (first, second)
 
 
+def event_with_display_alarm(offset_minutes: int = -15) -> bytes:
+    """VEVENT with a single DISPLAY VALARM relative to start."""
+    offset_str = f"-PT{abs(offset_minutes)}M" if offset_minutes < 0 else f"PT{offset_minutes}M"
+    return _vcalendar(
+        f"""
+BEGIN:VEVENT
+UID:alarm-display-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:Alarm event
+BEGIN:VALARM
+ACTION:DISPLAY
+TRIGGER:{offset_str}
+DESCRIPTION:Time to go
+END:VALARM
+END:VEVENT
+"""
+    )
+
+
+def event_with_audio_alarm() -> bytes:
+    """VEVENT with an AUDIO VALARM."""
+    return _vcalendar(
+        """
+BEGIN:VEVENT
+UID:alarm-audio-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:Audio alarm event
+BEGIN:VALARM
+ACTION:AUDIO
+TRIGGER:-PT10M
+END:VALARM
+END:VEVENT
+"""
+    )
+
+
+def event_with_email_alarm() -> bytes:
+    """VEVENT with an EMAIL VALARM only (should be ignored)."""
+    return _vcalendar(
+        """
+BEGIN:VEVENT
+UID:alarm-email-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:Email alarm event
+BEGIN:VALARM
+ACTION:EMAIL
+TRIGGER:-PT30M
+ATTENDEE:mailto:user@example.com
+SUMMARY:Email reminder
+END:VALARM
+END:VEVENT
+"""
+    )
+
+
+def event_with_end_related_alarm() -> bytes:
+    """VEVENT with a VALARM relative to DTEND."""
+    return _vcalendar(
+        """
+BEGIN:VEVENT
+UID:alarm-end-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:End-related alarm event
+BEGIN:VALARM
+ACTION:DISPLAY
+TRIGGER;RELATED=END:-PT5M
+DESCRIPTION:Almost done
+END:VALARM
+END:VEVENT
+"""
+    )
+
+
+def event_with_absolute_alarm() -> bytes:
+    """VEVENT with a VALARM that has an absolute UTC trigger."""
+    return _vcalendar(
+        """
+BEGIN:VEVENT
+UID:alarm-abs-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:Absolute alarm event
+BEGIN:VALARM
+ACTION:DISPLAY
+TRIGGER;VALUE=DATE-TIME:20260501T083000Z
+DESCRIPTION:Absolute reminder
+END:VALARM
+END:VEVENT
+"""
+    )
+
+
 ALL_SINGLE_FIXTURES: tuple[tuple[str, bytes], ...] = (
     ("simple_event", simple_event()),
     ("timed_event_with_tz", timed_event_with_tz()),

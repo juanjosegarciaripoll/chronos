@@ -9,6 +9,7 @@ from typing import Protocol
 from chronos.authorization import Authorization
 from chronos.domain import (
     AccountConfig,
+    AlarmRecord,
     CalendarRef,
     ComponentRef,
     Occurrence,
@@ -109,6 +110,21 @@ class IndexRepository(Protocol):
         window_start: datetime,
         window_end: datetime,
     ) -> Sequence[Occurrence]: ...
+
+    def set_alarms(
+        self,
+        ref: ComponentRef,
+        occurrence_start: datetime,
+        alarms: Sequence[AlarmRecord],
+    ) -> None: ...
+
+    def query_pending_alarms(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> Sequence[AlarmRecord]: ...
+
+    def mark_alarm_fired(self, alarm_id: int, fired_at: datetime) -> None: ...
 
     def close(self) -> None: ...
 
