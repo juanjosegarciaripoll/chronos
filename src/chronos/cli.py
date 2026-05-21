@@ -1277,7 +1277,7 @@ def cmd_tui(ctx: CliContext, *, startup_ics_path: Path | None = None) -> int:
         mirror=tui_ctx.mirror,
         index=tui_ctx.index,
         creds=tui_ctx.creds,
-        now=lambda: tui_ctx.now,
+        now=lambda: datetime.now(UTC),
         sync_runner=build_sync_runner(tui_ctx),
         startup_ics_path=startup_ics_path,
     )
