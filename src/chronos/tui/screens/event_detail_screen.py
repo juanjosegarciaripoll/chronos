@@ -5,6 +5,7 @@ from datetime import date
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.events import Click
 from textual.screen import ModalScreen
 from textual.widgets import Footer
 
@@ -39,6 +40,10 @@ class EventDetailScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         view: EventView = self.query_one(EventView)
         view.show(self._component, today=self._today)
+
+    def on_click(self, event: Click) -> None:
+        if event.widget is self:
+            self.action_close()
 
     def action_close(self) -> None:
         self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
