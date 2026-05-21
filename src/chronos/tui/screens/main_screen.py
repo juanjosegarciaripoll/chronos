@@ -22,7 +22,7 @@ from chronos.domain import (
 )
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.paths import default_tui_state_path
-from chronos.recurrence import expand
+from chronos.recurrence import expand, populate_alarms
 from chronos.tui.bindings import main_bindings
 from chronos.tui.screens.agenda_screen import (
     rows_for as agenda_rows,
@@ -465,6 +465,7 @@ class MainScreen(Screen[None]):
                 now,
                 location=draft.location,
                 description=draft.description,
+                alarms=draft.alarms,
             )
             services.mirror.write(
                 ResourceRef(draft.target.account_name, draft.target.calendar_name, uid),
@@ -489,6 +490,7 @@ class MainScreen(Screen[None]):
             )
             services.index.upsert_component(component)
             self._refresh_local_occurrences(component)
+            self._refresh_local_alarms(component)
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Created {draft.summary!r}"
             )
@@ -502,6 +504,7 @@ class MainScreen(Screen[None]):
                 now,
                 location=draft.location,
                 description=draft.description,
+                alarms=draft.alarms,
             )
             services.mirror.write(existing.ref.resource, ics)
             updated = VEvent(
@@ -523,6 +526,7 @@ class MainScreen(Screen[None]):
             )
             services.index.upsert_component(updated)
             self._refresh_local_occurrences(updated)
+            self._refresh_local_alarms(updated)
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Updated {draft.summary!r}"
             )
@@ -552,6 +556,22 @@ class MainScreen(Screen[None]):
             window_end=now + _LOCAL_OCCURRENCE_WINDOW_FUTURE,
         )
         services.index.set_occurrences(component.ref, occurrences)
+
+    def _refresh_local_alarms(self, component: StoredComponent) -> None:
+        """Recompute alarm rows for `component` after a local create/edit.
+
+        Mirrors `_refresh_local_occurrences`: must be called after it so
+        the occurrence rows exist for ``populate_alarms`` to join against.
+        """
+        services = self._services()
+        now = services.now()
+        populate_alarms(
+            index=services.index,
+            calendar=component.ref.calendar,
+            window_start=now - _LOCAL_OCCURRENCE_WINDOW_PAST,
+            window_end=now + _LOCAL_OCCURRENCE_WINDOW_FUTURE,
+            uids=frozenset({component.ref.uid}),
+        )
 
     def _trash(self, component: StoredComponent) -> None:
         services = self._services()

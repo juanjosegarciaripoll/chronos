@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
-from chronos.domain import LocalStatus, StoredComponent, VEvent, VTodo
+from chronos.domain import LocalStatus, ParsedAlarm, StoredComponent, VEvent, VTodo
 
 
 def build_event_ics(
@@ -15,6 +16,7 @@ def build_event_ics(
     *,
     location: str = "",
     description: str = "",
+    alarms: Sequence[ParsedAlarm] = (),
 ) -> bytes:
     lines = [
         "BEGIN:VCALENDAR",
@@ -32,6 +34,20 @@ def build_event_ics(
         lines.append(f"LOCATION:{_escape_text(location)}")
     if description:
         lines.append(f"DESCRIPTION:{_escape_text(description)}")
+    for alarm in alarms:
+        lines.append("BEGIN:VALARM")
+        lines.append(f"ACTION:{alarm.action.value}")
+        if isinstance(alarm.trigger_offset, timedelta):
+            trigger_str = _fmt_duration(alarm.trigger_offset)
+            if alarm.trigger_related == "END":
+                lines.append(f"TRIGGER;RELATED=END:{trigger_str}")
+            else:
+                lines.append(f"TRIGGER:{trigger_str}")
+        else:
+            lines.append(f"TRIGGER;VALUE=DATE-TIME:{_fmt_dt(alarm.trigger_offset)}")
+        if alarm.description:
+            lines.append(f"DESCRIPTION:{_escape_text(alarm.description)}")
+        lines.append("END:VALARM")
     lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
@@ -82,6 +98,26 @@ def trashed_copy(
         trashed_at=trashed_at,
         synced_at=component.synced_at,
     )
+
+
+def _fmt_duration(td: timedelta) -> str:
+    """Format a timedelta as an iCal DURATION value (e.g. ``-PT15M``)."""
+    sign = "-" if td.total_seconds() < 0 else ""
+    secs = abs(int(td.total_seconds()))
+    days, secs = divmod(secs, 86400)
+    hours, secs = divmod(secs, 3600)
+    minutes, secs = divmod(secs, 60)
+    day_part = f"{days}D" if days else ""
+    time_parts: list[str] = []
+    if hours:
+        time_parts.append(f"{hours}H")
+    if minutes:
+        time_parts.append(f"{minutes}M")
+    if secs:
+        time_parts.append(f"{secs}S")
+    time_part = ("T" + "".join(time_parts)) if time_parts else ""
+    body = day_part + time_part
+    return f"{sign}P{body}" if body else "PT0S"
 
 
 def _fmt_dt(dt: datetime) -> str:

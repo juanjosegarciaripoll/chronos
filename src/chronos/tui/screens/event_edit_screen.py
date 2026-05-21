@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import cast
 
 from textual.app import ComposeResult
@@ -10,7 +10,8 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Input, Label, Select
 
-from chronos.domain import CalendarRef, StoredComponent, VEvent
+from chronos.domain import AlarmAction, CalendarRef, ParsedAlarm, StoredComponent, VEvent
+from chronos.ical_parser import extract_alarm_triggers
 from chronos.tui.bindings import edit_bindings
 from chronos.tui.widgets.date_picker import DatePicker, InvalidDateError
 
@@ -25,6 +26,7 @@ class EditDraft:
     dtend: datetime | None
     location: str
     description: str
+    alarms: tuple[ParsedAlarm, ...]
     existing: StoredComponent | None
 
 
@@ -73,6 +75,9 @@ class EventEditScreen(Screen[None]):
         )
         location = ex.location or "" if ex is not None else ""
         description = ex.description or "" if ex is not None else ""
+        reminders = _alarms_to_input(
+            extract_alarm_triggers(ex.raw_ics, ex.ref.uid) if ex is not None else []
+        )
         with Vertical(id="event-edit"):
             yield Label("Calendar:")
             yield Select(
@@ -91,6 +96,8 @@ class EventEditScreen(Screen[None]):
             yield Input(value=location, id="edit-location")
             yield Label("Description (optional):")
             yield Input(value=description, id="edit-description")
+            yield Label("Reminders (minutes before start, comma-separated):")
+            yield Input(value=reminders, id="edit-reminders", placeholder="e.g. 15, 60")
             yield Label("", id="edit-error")
         yield Footer()
 
@@ -131,6 +138,8 @@ class EventEditScreen(Screen[None]):
             dtend = parse_date_input(end_text)
         location_input: Input = self.query_one("#edit-location", Input)
         description_input: Input = self.query_one("#edit-description", Input)
+        reminders_input: Input = self.query_one("#edit-reminders", Input)
+        alarms = _parse_reminder_input(reminders_input.value)
         return EditDraft(
             target=target,
             summary=summary,
@@ -138,6 +147,7 @@ class EventEditScreen(Screen[None]):
             dtend=dtend,
             location=location_input.value.strip(),
             description=description_input.value.strip(),
+            alarms=alarms,
             existing=self._existing,
         )
 
@@ -152,6 +162,55 @@ class EventEditScreen(Screen[None]):
     @staticmethod
     def _calendar_label(ref: CalendarRef) -> str:
         return f"{ref.account_name} / {ref.calendar_name}"
+
+
+def _alarms_to_input(alarms: list[ParsedAlarm]) -> str:
+    """Convert a list of ParsedAlarms to a comma-separated minutes string.
+
+    Only START-relative DISPLAY/AUDIO alarms with a negative timedelta offset
+    are representable in the simple input field; others are omitted.
+    """
+    parts: list[str] = []
+    for alarm in alarms:
+        if not isinstance(alarm.trigger_offset, timedelta):
+            continue
+        if alarm.trigger_related != "START":
+            continue
+        secs = alarm.trigger_offset.total_seconds()
+        if secs >= 0:
+            continue
+        mins = abs(int(secs)) // 60
+        if mins > 0:
+            parts.append(str(mins))
+    return ", ".join(parts)
+
+
+def _parse_reminder_input(raw: str) -> tuple[ParsedAlarm, ...]:
+    """Parse a comma-separated list of minute values into ParsedAlarms.
+
+    Each token must be a positive integer (minutes before start).
+    Non-numeric tokens and values ≤ 0 are silently ignored.
+    """
+    alarms: list[ParsedAlarm] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            mins = int(token)
+        except ValueError:
+            continue
+        if mins <= 0:
+            continue
+        alarms.append(
+            ParsedAlarm(
+                action=AlarmAction.DISPLAY,
+                trigger_offset=timedelta(minutes=-mins),
+                trigger_related="START",
+                description=None,
+            )
+        )
+    return tuple(alarms)
 
 
 def _format_local(dt: datetime) -> str:

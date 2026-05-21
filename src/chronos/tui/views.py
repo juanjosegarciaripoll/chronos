@@ -19,10 +19,12 @@ from chronos.domain import (
     CalendarRef,
     LocalStatus,
     Occurrence,
+    ParsedAlarm,
     StoredComponent,
     VEvent,
     VTodo,
 )
+from chronos.ical_parser import extract_alarm_triggers
 from chronos.protocols import IndexRepository, MirrorRepository
 
 DEFAULT_AGENDA_DAYS = 14
@@ -393,7 +395,7 @@ def _todo_sort_key(todo: VTodo) -> tuple[datetime, str]:
     return due, todo.ref.uid
 
 
-_DETAIL_LABEL_WIDTH = len("Location:")  # the longest label in the grid
+_DETAIL_LABEL_WIDTH = len("Reminders:")  # the longest label in the grid
 
 
 def render_event_detail(component: StoredComponent, today: date) -> str:
@@ -433,6 +435,10 @@ def render_event_detail(component: StoredComponent, today: date) -> str:
         lines.append(_detail_field("Due", _detail_when(component.due, today)))
     if component.status:
         lines.append(_detail_field("Status", component.status))
+    alarms = extract_alarm_triggers(component.raw_ics, component.ref.uid)
+    if alarms:
+        alarm_str = ", ".join(_format_alarm(a) for a in alarms)
+        lines.append(_detail_field("Reminders", alarm_str))
     lines.extend(["", "Notes:", component.description or "(no notes)"])
     return "\n".join(lines)
 
@@ -447,6 +453,24 @@ def _detail_when(value: datetime | None, today: date) -> str:
     if value is None:
         return "(not set)"
     return format_friendly_start(value, today)
+
+
+def _format_alarm(alarm: ParsedAlarm) -> str:
+    """Human-readable alarm description for the detail pane."""
+    if isinstance(alarm.trigger_offset, datetime):
+        return f"at {alarm.trigger_offset.astimezone().strftime('%d %b %H:%M')}"
+    total_secs = int(alarm.trigger_offset.total_seconds())
+    anchor = alarm.trigger_related.lower()  # "start" or "end"
+    if total_secs == 0:
+        return f"at {anchor}"
+    relation = "before" if total_secs < 0 else "after"
+    mins = abs(total_secs) // 60
+    if mins < 60:
+        return f"{mins} min {relation} {anchor}"
+    hours, rem = divmod(mins, 60)
+    if rem == 0:
+        return f"{hours} h {relation} {anchor}"
+    return f"{hours}h{rem}m {relation} {anchor}"
 
 
 __all__ = [

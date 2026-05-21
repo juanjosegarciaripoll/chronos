@@ -1729,6 +1729,7 @@ class DraftAndDetailScreenWiringTest(unittest.TestCase):
             dtend=None,
             location="",
             description="",
+            alarms=(),
             existing=event,
         )
         self.assertIs(draft.existing, event)
@@ -1741,6 +1742,279 @@ class DraftAndDetailScreenWiringTest(unittest.TestCase):
                 default_calendar=None,
                 on_save=lambda _draft: None,
             )
+
+
+class AlarmHelperTest(unittest.TestCase):
+    """Unit tests for alarm-related pure helpers in mutations, views, and edit screen."""
+
+    def test_fmt_duration_negative_minutes(self) -> None:
+        from chronos.mutations import _fmt_duration
+
+        self.assertEqual(_fmt_duration(timedelta(minutes=-15)), "-PT15M")
+
+    def test_fmt_duration_negative_hours(self) -> None:
+        from chronos.mutations import _fmt_duration
+
+        self.assertEqual(_fmt_duration(timedelta(hours=-1)), "-PT1H")
+
+    def test_fmt_duration_mixed(self) -> None:
+        from chronos.mutations import _fmt_duration
+
+        self.assertEqual(_fmt_duration(timedelta(hours=-1, minutes=-30)), "-PT1H30M")
+
+    def test_fmt_duration_positive(self) -> None:
+        from chronos.mutations import _fmt_duration
+
+        self.assertEqual(_fmt_duration(timedelta(minutes=5)), "PT5M")
+
+    def test_fmt_duration_zero(self) -> None:
+        from chronos.mutations import _fmt_duration
+
+        self.assertEqual(_fmt_duration(timedelta(0)), "PT0S")
+
+    def test_build_event_ics_with_alarm_writes_valarm(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.mutations import build_event_ics
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(minutes=-15),
+            trigger_related="START",
+            description="Reminder",
+        )
+        ics = build_event_ics(
+            "uid@test",
+            "Test",
+            datetime(2026, 5, 1, 9, tzinfo=UTC),
+            None,
+            datetime(2026, 5, 1, 8, tzinfo=UTC),
+            alarms=(alarm,),
+        )
+        text = ics.decode("utf-8")
+        self.assertIn("BEGIN:VALARM", text)
+        self.assertIn("ACTION:DISPLAY", text)
+        self.assertIn("TRIGGER:-PT15M", text)
+        self.assertIn("DESCRIPTION:Reminder", text)
+        self.assertIn("END:VALARM", text)
+
+    def test_build_event_ics_no_alarms_has_no_valarm(self) -> None:
+        from chronos.mutations import build_event_ics
+
+        ics = build_event_ics(
+            "uid@test",
+            "Test",
+            datetime(2026, 5, 1, 9, tzinfo=UTC),
+            None,
+            datetime(2026, 5, 1, 8, tzinfo=UTC),
+        )
+        self.assertNotIn(b"VALARM", ics)
+
+    def test_build_event_ics_end_related_alarm(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.mutations import build_event_ics
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(minutes=-5),
+            trigger_related="END",
+            description=None,
+        )
+        ics = build_event_ics(
+            "uid@test",
+            "Test",
+            datetime(2026, 5, 1, 9, tzinfo=UTC),
+            datetime(2026, 5, 1, 10, tzinfo=UTC),
+            datetime(2026, 5, 1, 8, tzinfo=UTC),
+            alarms=(alarm,),
+        )
+        text = ics.decode("utf-8")
+        self.assertIn("TRIGGER;RELATED=END:-PT5M", text)
+
+    def test_format_alarm_minutes_before_start(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.views import _format_alarm
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(minutes=-15),
+            trigger_related="START",
+            description=None,
+        )
+        self.assertEqual(_format_alarm(alarm), "15 min before start")
+
+    def test_format_alarm_hours(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.views import _format_alarm
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(hours=-1),
+            trigger_related="START",
+            description=None,
+        )
+        self.assertEqual(_format_alarm(alarm), "1 h before start")
+
+    def test_format_alarm_mixed_hours_minutes(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.views import _format_alarm
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(hours=-1, minutes=-30),
+            trigger_related="START",
+            description=None,
+        )
+        self.assertEqual(_format_alarm(alarm), "1h30m before start")
+
+    def test_format_alarm_end_related(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.views import _format_alarm
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(minutes=-5),
+            trigger_related="END",
+            description=None,
+        )
+        self.assertEqual(_format_alarm(alarm), "5 min before end")
+
+    def test_format_alarm_after_start(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.views import _format_alarm
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(minutes=10),
+            trigger_related="START",
+            description=None,
+        )
+        self.assertEqual(_format_alarm(alarm), "10 min after start")
+
+    def test_format_alarm_at_start(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.views import _format_alarm
+
+        alarm = ParsedAlarm(
+            action=AlarmAction.DISPLAY,
+            trigger_offset=timedelta(0),
+            trigger_related="START",
+            description=None,
+        )
+        self.assertEqual(_format_alarm(alarm), "at start")
+
+    def test_parse_reminder_input_single(self) -> None:
+        from chronos.tui.screens.event_edit_screen import _parse_reminder_input
+
+        alarms = _parse_reminder_input("15")
+        self.assertEqual(len(alarms), 1)
+        self.assertEqual(alarms[0].trigger_offset, timedelta(minutes=-15))
+
+    def test_parse_reminder_input_multiple(self) -> None:
+        from chronos.tui.screens.event_edit_screen import _parse_reminder_input
+
+        alarms = _parse_reminder_input("15, 60")
+        self.assertEqual(len(alarms), 2)
+        offsets = {a.trigger_offset for a in alarms}
+        self.assertIn(timedelta(minutes=-15), offsets)
+        self.assertIn(timedelta(minutes=-60), offsets)
+
+    def test_parse_reminder_input_empty(self) -> None:
+        from chronos.tui.screens.event_edit_screen import _parse_reminder_input
+
+        self.assertEqual(_parse_reminder_input(""), ())
+        self.assertEqual(_parse_reminder_input("  "), ())
+
+    def test_parse_reminder_input_ignores_non_numeric(self) -> None:
+        from chronos.tui.screens.event_edit_screen import _parse_reminder_input
+
+        alarms = _parse_reminder_input("15, abc, 30")
+        self.assertEqual(len(alarms), 2)
+
+    def test_parse_reminder_input_ignores_zero_and_negative(self) -> None:
+        from chronos.tui.screens.event_edit_screen import _parse_reminder_input
+
+        alarms = _parse_reminder_input("0, -5, 15")
+        self.assertEqual(len(alarms), 1)
+        self.assertEqual(alarms[0].trigger_offset, timedelta(minutes=-15))
+
+    def test_alarms_to_input_start_relative(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.screens.event_edit_screen import _alarms_to_input
+
+        alarms = [
+            ParsedAlarm(
+                action=AlarmAction.DISPLAY,
+                trigger_offset=timedelta(minutes=-15),
+                trigger_related="START",
+                description=None,
+            )
+        ]
+        self.assertEqual(_alarms_to_input(alarms), "15")
+
+    def test_alarms_to_input_skips_end_relative(self) -> None:
+        from chronos.domain import AlarmAction, ParsedAlarm
+        from chronos.tui.screens.event_edit_screen import _alarms_to_input
+
+        alarms = [
+            ParsedAlarm(
+                action=AlarmAction.DISPLAY,
+                trigger_offset=timedelta(minutes=-5),
+                trigger_related="END",
+                description=None,
+            )
+        ]
+        self.assertEqual(_alarms_to_input(alarms), "")
+
+    def test_render_event_detail_shows_reminders(self) -> None:
+        from tests import corpus
+        from chronos.tui.views import render_event_detail
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "alarm-display-1@example.com")
+        component = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=corpus.event_with_display_alarm(-15),
+            summary="Alarm event",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 10, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        detail = render_event_detail(component, date(2026, 5, 1))
+        self.assertIn("Reminders", detail)
+        self.assertIn("15 min before start", detail)
+
+    def test_render_event_detail_no_reminders_field_when_none(self) -> None:
+        from tests import corpus
+        from chronos.tui.views import render_event_detail
+
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "simple-event-1@example.com")
+        component = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=corpus.simple_event(),
+            summary="Simple event",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 10, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        detail = render_event_detail(component, date(2026, 5, 1))
+        self.assertNotIn("Reminders", detail)
 
 
 class CalendarPanelToggleTest(TuiFlowTestCase):
