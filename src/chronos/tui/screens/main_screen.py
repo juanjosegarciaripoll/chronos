@@ -635,17 +635,11 @@ class MainScreen(Screen[None]):
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
     def _import_ics(self, target: CalendarRef, path: Path, *, sync: bool) -> None:
-        from chronos.ingest import IngestError, ingest_ics_bytes
+        from chronos.ingest import ingest_ics_bytes
 
         services = self._services()
         try:
             payload = path.read_bytes()
-        except OSError as exc:
-            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-                f"Import failed: {exc}", severity="error"
-            )
-            return
-        try:
             report = ingest_ics_bytes(
                 payload,
                 target=target,
@@ -653,7 +647,7 @@ class MainScreen(Screen[None]):
                 index=services.index,
                 on_conflict="skip",
             )
-        except IngestError as exc:
+        except Exception as exc:
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Import failed: {exc}", severity="error"
             )

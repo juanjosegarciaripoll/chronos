@@ -54,12 +54,14 @@ class ImportIcsScreen(ModalScreen[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "import-ics-add-sync":
-            self._on_add_sync(self._selected_calendar())
+            cal = self._selected_calendar()
             self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
+            self._on_add_sync(cal)
             return
         if event.button.id == "import-ics-add":
-            self._on_add_only(self._selected_calendar())
+            cal = self._selected_calendar()
             self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
+            self._on_add_only(cal)
             return
         self.action_cancel()
 
