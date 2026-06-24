@@ -1,12 +1,32 @@
 from __future__ import annotations
 
+import hashlib
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from chronos.authorization import Authorization
 from chronos.credentials import CredentialResolutionError
-from chronos.domain import AccountConfig, AppConfig, CalendarRef
+from chronos.domain import (
+    AccountConfig,
+    AppConfig,
+    CalendarRef,
+    ComponentKind,
+    StoredComponent,
+    VEvent,
+    VTodo,
+)
 from chronos.ical_parser import IcalParseError, parse_vcalendar
-from chronos.protocols import CredentialsProvider, IndexRepository, MirrorRepository
+from chronos.protocols import (
+    CalDAVSession,
+    CredentialsProvider,
+    IndexRepository,
+    MirrorRepository,
+)
+
+SessionFactory = Callable[[AccountConfig, Authorization], CalDAVSession]
+_REMOTE_MULTIGET_SAMPLE_LIMIT = 20
 
 
 class DiagnosticStatus(StrEnum):
@@ -48,11 +68,14 @@ def run_doctor(
     mirror: MirrorRepository,
     index: IndexRepository,
     creds: CredentialsProvider,
+    session_factory: SessionFactory | None = None,
 ) -> DoctorReport:
     results: list[DiagnosticResult] = []
     for account in config.accounts:
         results.append(_check_credentials(account, creds))
         results.extend(_check_mirror_integrity(account, mirror, index))
+        if session_factory is not None:
+            results.extend(_check_remote_caldav(account, creds, index, session_factory))
     return DoctorReport(results=tuple(results))
 
 
@@ -150,6 +173,226 @@ def _check_mirror_integrity(
     return results
 
 
+def _check_remote_caldav(
+    account: AccountConfig,
+    creds: CredentialsProvider,
+    index: IndexRepository,
+    session_factory: SessionFactory,
+) -> list[DiagnosticResult]:
+    """Probe remote CalDAV discovery without logging secrets or event bodies."""
+    try:
+        auth = creds.build_auth(account)
+    except CredentialResolutionError as exc:
+        return [
+            DiagnosticResult(
+                check="remote-caldav",
+                scope=account.name,
+                status=DiagnosticStatus.FAIL,
+                message=f"credential unresolved: {_redact(str(exc))}",
+            )
+        ]
+
+    try:
+        session = session_factory(account, auth)
+        principal = session.discover_principal()
+        calendars = tuple(session.list_calendars(principal))
+    except Exception as exc:
+        return [
+            DiagnosticResult(
+                check="remote-caldav",
+                scope=account.name,
+                status=DiagnosticStatus.FAIL,
+                message=(
+                    f"discovery failed: {type(exc).__name__}: {_redact(str(exc))}"
+                ),
+            )
+        ]
+
+    scoped = tuple(
+        calendar
+        for calendar in calendars
+        if any(pattern.fullmatch(calendar.name) for pattern in account.include)
+        and not any(pattern.fullmatch(calendar.name) for pattern in account.exclude)
+    )
+    results: list[DiagnosticResult] = [
+        DiagnosticResult(
+            check="remote-caldav",
+            scope=account.name,
+            status=DiagnosticStatus.OK if scoped else DiagnosticStatus.WARN,
+            message=(
+                f"discovered {len(calendars)} calendar(s); "
+                f"{len(scoped)} matched include/exclude filters"
+            ),
+        )
+    ]
+
+    for calendar in scoped:
+        scope = f"{account.name}/{calendar.name}"
+        try:
+            remote_resources = tuple(session.calendar_query(calendar.url))
+        except Exception as exc:
+            results.append(
+                DiagnosticResult(
+                    check="remote-calendar-query",
+                    scope=scope,
+                    status=DiagnosticStatus.FAIL,
+                    message=(
+                        f"calendar-query failed: {type(exc).__name__}: "
+                        f"{_redact(str(exc))}"
+                    ),
+                )
+            )
+            continue
+
+        local_rows = tuple(
+            index.list_calendar_components(CalendarRef(account.name, calendar.name))
+        )
+        remote_count = len(remote_resources)
+        results.append(
+            DiagnosticResult(
+                check="remote-calendar-query",
+                scope=scope,
+                status=DiagnosticStatus.OK if remote_count else DiagnosticStatus.WARN,
+                message=(
+                    f"calendar-query returned {remote_count} resource(s); "
+                    f"local index has {_component_count_summary(local_rows)}"
+                ),
+            )
+        )
+        if remote_resources:
+            results.append(
+                _check_remote_multiget_sample(
+                    session=session,
+                    calendar_url=calendar.url,
+                    scope=scope,
+                    remote_resources=remote_resources,
+                )
+            )
+
+    if auth.on_commit is not None:
+        auth.on_commit()
+    return results
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SampleParseStats:
+    events: int = 0
+    todos: int = 0
+    parse_errors: int = 0
+    empty_or_unsupported: int = 0
+
+    @property
+    def parsed_components(self) -> int:
+        return self.events + self.todos
+
+
+def _check_remote_multiget_sample(
+    *,
+    session: CalDAVSession,
+    calendar_url: str,
+    scope: str,
+    remote_resources: tuple[tuple[str, str], ...],
+) -> DiagnosticResult:
+    sample_hrefs = tuple(
+        href for href, _etag in remote_resources[:_REMOTE_MULTIGET_SAMPLE_LIMIT]
+    )
+    try:
+        fetched = tuple(session.calendar_multiget(calendar_url, sample_hrefs))
+    except Exception as exc:
+        return DiagnosticResult(
+            check="remote-multiget-sample",
+            scope=scope,
+            status=DiagnosticStatus.FAIL,
+            message=(
+                f"calendar-multiget failed: {type(exc).__name__}: "
+                f"{_redact(str(exc))}"
+            ),
+        )
+
+    stats = _sample_parse_stats(fetched)
+    status = DiagnosticStatus.OK
+    if (
+        len(fetched) < len(sample_hrefs)
+        or stats.parse_errors
+        or stats.parsed_components == 0
+    ):
+        status = DiagnosticStatus.WARN
+
+    return DiagnosticResult(
+        check="remote-multiget-sample",
+        scope=scope,
+        status=status,
+        message=(
+            f"sampled {len(sample_hrefs)} of {len(remote_resources)} resource(s); "
+            f"multiget returned {len(fetched)} body(ies); "
+            f"parsed {stats.events} event component(s), "
+            f"{stats.todos} task component(s); "
+            f"{stats.parse_errors} parse error(s), "
+            f"{stats.empty_or_unsupported} empty/unsupported object(s)"
+        ),
+    )
+
+
+def _sample_parse_stats(
+    fetched: tuple[tuple[str, str, bytes], ...],
+) -> _SampleParseStats:
+    events = 0
+    todos = 0
+    parse_errors = 0
+    empty_or_unsupported = 0
+    for _href, _etag, raw in fetched:
+        try:
+            parsed = parse_vcalendar(raw)
+        except IcalParseError:
+            parse_errors += 1
+            continue
+        if not parsed:
+            empty_or_unsupported += 1
+            continue
+        for component in parsed:
+            if component.kind == ComponentKind.VEVENT:
+                events += 1
+            elif component.kind == ComponentKind.VTODO:
+                todos += 1
+    return _SampleParseStats(
+        events=events,
+        todos=todos,
+        parse_errors=parse_errors,
+        empty_or_unsupported=empty_or_unsupported,
+    )
+
+
+def _component_count_summary(components: tuple[StoredComponent, ...]) -> str:
+    events = sum(1 for component in components if isinstance(component, VEvent))
+    todos = sum(1 for component in components if isinstance(component, VTodo))
+    return f"{len(components)} row(s): {events} event(s), {todos} task(s)"
+
+
+_URL_RE = re.compile(r"https?://[^\s)>\"]+")
+_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_SECRET_RE = re.compile(
+    r"(?i)\b(authorization|cookie|set-cookie|access_token|refresh_token|"
+    r"client_secret|password|passwd|token)=([^\s;&]+)"
+)
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)\b(authorization):\s*(?:(?:bearer|basic)\s+)?[^\s,;]+"
+)
+_COOKIE_HEADER_RE = re.compile(r"(?i)\b(cookie|set-cookie):\s*[^\r\n]+")
+
+
+def _redact(text: str) -> str:
+    text = _AUTH_HEADER_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    text = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    text = _SECRET_RE.sub(lambda m: f"{m.group(1)}=<redacted>", text)
+    text = _URL_RE.sub(lambda m: _fingerprint("url", m.group(0)), text)
+    return _EMAIL_RE.sub(lambda m: _fingerprint("email", m.group(0)), text)
+
+
+def _fingerprint(kind: str, value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"<redacted-{kind}:{digest}>"
+
+
 def format_report(report: DoctorReport) -> str:
     lines: list[str] = []
     for result in report.results:
@@ -166,6 +409,7 @@ __all__ = [
     "DiagnosticResult",
     "DiagnosticStatus",
     "DoctorReport",
+    "SessionFactory",
     "format_report",
     "run_doctor",
 ]

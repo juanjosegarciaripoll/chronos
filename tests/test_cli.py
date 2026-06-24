@@ -939,6 +939,29 @@ class DoctorCommandTest(CliTestCase):
         self.assertIn("FAIL", self.stdout.getvalue())
         self.assertIn("unparseable", self.stdout.getvalue())
 
+    def test_doctor_remote_runs_redacted_caldav_probe(self) -> None:
+        self.session.add_calendar(url="https://cal.example.com/work/", name="work")
+        self.session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+        from chronos.authorization import Authorization
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        code = self._run(["doctor", "--remote"], context=ctx)
+
+        self.assertEqual(code, 0)
+        output = self.stdout.getvalue()
+        self.assertIn("remote-caldav", output)
+        self.assertIn("remote-calendar-query", output)
+        self.assertIn("1 resource", output)
+
 
 class ConfigLoadErrorTest(unittest.TestCase):
     def test_missing_config_in_non_interactive_exits_two(self) -> None:

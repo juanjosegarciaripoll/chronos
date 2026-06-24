@@ -32,6 +32,18 @@ On a local graphical desktop, chronos still uses the browser loopback flow and
 captures the redirect automatically. Terminal browsers such as `w3m`, `lynx`,
 and `links` are treated as headless mode, not as usable graphical browsers.
 
+## Remote diagnostics
+
+`chronos doctor` is local-only by default. To check whether an authenticated
+CalDAV server is discovering calendars and returning resources without printing
+tokens, hrefs, or event bodies, run:
+
+```sh
+chronos doctor --remote
+```
+
+The remote probe reports calendar discovery and `calendar-query` counts only.
+
 ## Installation paths
 
 1. `uv tool install .`

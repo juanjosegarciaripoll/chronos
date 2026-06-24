@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 import tempfile
 import unittest
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from chronos.authorization import Authorization
+from chronos.caldav import CalDAVError
 from chronos.credentials import DefaultCredentialsProvider
 from chronos.domain import (
     AccountConfig,
@@ -21,6 +24,7 @@ from chronos.index_store import SqliteIndexRepository
 from chronos.services import DiagnosticStatus, format_report, run_doctor
 from chronos.storage import VdirMirrorRepository
 from tests import corpus
+from tests.fake_caldav import FakeCalDAVSession
 
 
 def _account(
@@ -103,6 +107,264 @@ class CredentialsCheckTest(DoctorTestCase):
         self.assertEqual(len(report.failed), 1)
         self.assertEqual(report.failed[0].check, "credentials")
         self.assertEqual(report.exit_code, 1)
+
+
+class RemoteCalDAVCheckTest(DoctorTestCase):
+    def test_reports_remote_calendar_resource_counts(self) -> None:
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+        session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return session
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        remote = [r for r in report.results if r.check == "remote-calendar-query"]
+        self.assertEqual(len(remote), 1)
+        self.assertEqual(remote[0].status, DiagnosticStatus.OK)
+        self.assertIn("1 resource", remote[0].message)
+        self.assertIn("0 row(s): 0 event(s), 0 task(s)", remote[0].message)
+
+        sample = [r for r in report.results if r.check == "remote-multiget-sample"]
+        self.assertEqual(len(sample), 1)
+        self.assertEqual(sample[0].status, DiagnosticStatus.OK)
+        self.assertIn("multiget returned 1 body", sample[0].message)
+        self.assertIn("parsed 1 event component", sample[0].message)
+
+    def test_warns_when_authorized_calendar_query_is_empty(self) -> None:
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return session
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        remote = [r for r in report.results if r.check == "remote-calendar-query"]
+        self.assertEqual(remote[0].status, DiagnosticStatus.WARN)
+        self.assertIn("0 resource", remote[0].message)
+        self.assertFalse(
+            [r for r in report.results if r.check == "remote-multiget-sample"]
+        )
+
+    def test_warns_when_multiget_sample_returns_no_bodies(self) -> None:
+        class EmptyMultigetSession(FakeCalDAVSession):
+            def calendar_multiget(
+                self, calendar_url: str, hrefs: Sequence[str]
+            ) -> Sequence[tuple[str, str, bytes]]:
+                self.calls.append(("calendar_multiget", calendar_url, tuple(hrefs)))
+                return ()
+
+        session = EmptyMultigetSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+        session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+        def factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> EmptyMultigetSession:
+            return session
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        sample = next(r for r in report.results if r.check == "remote-multiget-sample")
+        self.assertEqual(sample.status, DiagnosticStatus.WARN)
+        self.assertIn("sampled 1 of 1 resource", sample.message)
+        self.assertIn("multiget returned 0 body", sample.message)
+
+    def test_warns_when_multiget_sample_has_malformed_ics(self) -> None:
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+        session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=b"not an ics file",
+            etag="etag-a",
+        )
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return session
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        sample = next(r for r in report.results if r.check == "remote-multiget-sample")
+        self.assertEqual(sample.status, DiagnosticStatus.WARN)
+        self.assertIn("0 event component", sample.message)
+        self.assertIn("1 parse error", sample.message)
+        self.assertNotIn("not an ics file", sample.message)
+
+    def test_reports_multiget_failure_without_leaking_url_or_token(self) -> None:
+        class BrokenMultigetSession(FakeCalDAVSession):
+            def calendar_multiget(
+                self, calendar_url: str, _hrefs: Sequence[str]
+            ) -> Sequence[tuple[str, str, bytes]]:
+                raise CalDAVError(
+                    f"REPORT {calendar_url}?token=secret-token: HTTP 500"
+                )
+
+        session = BrokenMultigetSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+        session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+        def factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> BrokenMultigetSession:
+            return session
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        sample = next(r for r in report.results if r.check == "remote-multiget-sample")
+        self.assertEqual(sample.status, DiagnosticStatus.FAIL)
+        self.assertIn("calendar-multiget failed", sample.message)
+        self.assertNotIn("secret-token", sample.message)
+        self.assertNotIn("https://cal.example.com", sample.message)
+
+    def test_redacts_url_email_and_token_like_values_from_remote_errors(self) -> None:
+        class BrokenSession(FakeCalDAVSession):
+            def discover_principal(self) -> str:
+                raise CalDAVError(
+                    "Authorization: Bearer bearer-secret "
+                    "token=secret-token "
+                    "https://cal.example.com/users/alice@example.com/"
+                )
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> BrokenSession:
+            return BrokenSession()
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        message = next(r for r in report.results if r.check == "remote-caldav").message
+        self.assertNotIn("bearer-secret", message)
+        self.assertNotIn("secret-token", message)
+        self.assertNotIn("alice@example.com", message)
+        self.assertNotIn("https://cal.example.com", message)
+        self.assertIn("<redacted-url:", message)
+
+    def test_fails_when_credential_cannot_be_resolved(self) -> None:
+        account = _account(credential=EnvCredential(variable="NOT_SET"))
+        called = False
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            nonlocal called
+            called = True
+            return FakeCalDAVSession()
+
+        report = run_doctor(
+            config=_config(account),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        remote = next(r for r in report.results if r.check == "remote-caldav")
+        self.assertEqual(remote.status, DiagnosticStatus.FAIL)
+        self.assertIn("credential unresolved", remote.message)
+        self.assertFalse(called, "factory must not run when credentials are unresolved")
+
+    def test_reports_calendar_query_failure_per_calendar(self) -> None:
+        class QueryBrokenSession(FakeCalDAVSession):
+            def calendar_query(self, calendar_url: str) -> Sequence[tuple[str, str]]:
+                raise CalDAVError(f"REPORT {calendar_url}: HTTP 500")
+
+        session = QueryBrokenSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+
+        def factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> QueryBrokenSession:
+            return session
+
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+
+        remote = next(r for r in report.results if r.check == "remote-calendar-query")
+        self.assertEqual(remote.status, DiagnosticStatus.FAIL)
+        self.assertIn("calendar-query failed", remote.message)
+        self.assertIn("CalDAVError", remote.message)
+
+    def test_invokes_auth_on_commit_after_successful_probe(self) -> None:
+        committed = False
+
+        def on_commit() -> None:
+            nonlocal committed
+            committed = True
+
+        class CommittingCreds:
+            def build_auth(self, _account: AccountConfig) -> Authorization:
+                return Authorization(basic=("user", "pw"), on_commit=on_commit)
+
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return session
+
+        run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=CommittingCreds(),
+            session_factory=factory,
+        )
+
+        self.assertTrue(committed, "on_commit must run after a successful probe")
 
 
 class MirrorIntegrityTest(DoctorTestCase):

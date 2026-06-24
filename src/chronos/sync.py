@@ -344,8 +344,10 @@ def _sync_calendar(
     # full occurrence cache even if `affected_uids` is unexpectedly empty
     # (e.g. href canonicalization mismatch while collecting new_uids).
     force_full_expand = prior_state is None
-    should_expand = force_full_expand or bool(affected_uids) or (
-        affected_uids is None and (stats.pushed or stats.deleted_remote)
+    should_expand = (
+        force_full_expand
+        or bool(affected_uids)
+        or (affected_uids is None and (stats.pushed or stats.deleted_remote))
     )
     if should_expand:
         populate_occurrences(
@@ -796,6 +798,11 @@ _FETCH_CHUNK_SIZE = 100
 # ICS in memory.
 _FETCH_PIPELINE_BUFFER = 2
 
+# Poll while waiting for the producer so cancellation can interrupt a
+# long-running fetch inside a large calendar.
+_FETCH_QUEUE_POLL_SECONDS = 0.5
+_FETCH_THREAD_JOIN_TIMEOUT = 1.0
+
 
 # Sentinel returned to the consumer when the producer finishes
 # successfully. Anything else off the queue is either an exception
@@ -888,10 +895,21 @@ def _fetch_and_ingest(
 
     count = 0
     processed = 0
+    completed = False
     try:
         while True:
-            item = chunk_queue.get()
+            try:
+                item = chunk_queue.get(timeout=_FETCH_QUEUE_POLL_SECONDS)
+            except queue.Empty as exc:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SyncCancelled from exc
+                if not producer_thread.is_alive():
+                    raise SyncError(
+                        "calendar-multiget producer stopped before completing"
+                    ) from exc
+                continue
             if item is _PRODUCER_DONE:
+                completed = True
                 break
             if isinstance(item, BaseException):
                 raise item
@@ -929,7 +947,15 @@ def _fetch_and_ingest(
                 chunk_queue.get_nowait()
             except queue.Empty:
                 break
-        producer_thread.join()
+        if completed:
+            producer_thread.join()
+        else:
+            producer_thread.join(timeout=_FETCH_THREAD_JOIN_TIMEOUT)
+            if producer_thread.is_alive():
+                logger.warning(
+                    "calendar-multiget producer still running after cancellation; "
+                    "abandoning daemon thread"
+                )
 
     if (
         total >= _INGEST_PROGRESS_INTERVAL
@@ -1091,7 +1117,9 @@ def _push_trashed(
         try:
             session.delete(component.href, etag)
         except CalDAVConflictError:
-            logger.info("delete deferred: etag mismatch for %s (will retry)", component.href)
+            logger.info(
+                "delete deferred: etag mismatch for %s (will retry)", component.href
+            )
             continue
         except Exception:  # noqa: BLE001 — any server error means retry next sync
             continue

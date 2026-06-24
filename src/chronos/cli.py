@@ -477,7 +477,15 @@ def _build_parser() -> argparse.ArgumentParser:
     rm_p = sub.add_parser("rm", help="Mark a component as trashed.")
     rm_p.add_argument("uid")
 
-    sub.add_parser("doctor", help="Run diagnostics on the local state.")
+    doctor_p = sub.add_parser("doctor", help="Run diagnostics on the local state.")
+    doctor_p.add_argument(
+        "--remote",
+        action="store_true",
+        help=(
+            "Also authenticate and run redacted CalDAV discovery/query probes. "
+            "Reports counts only; does not print tokens, hrefs, or event bodies."
+        ),
+    )
 
     tui_p = sub.add_parser("tui", help="Launch the Textual UI.")
     tui_p.add_argument(
@@ -689,7 +697,7 @@ def _dispatch(
     if command == "rm":
         return cmd_rm(ctx, uid=args.uid)
     if command == "doctor":
-        return cmd_doctor(ctx)
+        return cmd_doctor(ctx, remote=bool(getattr(args, "remote", False)))
     if command == "tui":
         return cmd_tui(ctx, startup_ics_path=getattr(args, "import_ics", None))
     if command == "mcp":
@@ -1090,12 +1098,16 @@ def cmd_rm(ctx: CliContext, *, uid: str) -> int:
     return 0
 
 
-def cmd_doctor(ctx: CliContext) -> int:
+def cmd_doctor(ctx: CliContext, *, remote: bool = False) -> int:
+    session_factory = (
+        (ctx.session_factory or _default_session_factory) if remote else None
+    )
     report = run_doctor(
         config=ctx.config,
         mirror=ctx.mirror,
         index=ctx.index,
         creds=ctx.creds,
+        session_factory=session_factory,
     )
     ctx.stdout.write(format_report(report))
     return report.exit_code

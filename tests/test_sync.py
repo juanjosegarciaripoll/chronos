@@ -499,7 +499,9 @@ class IdempotencyTest(SyncTestCase):
         self.assertEqual(len(occurrences), 1)
         self.assertEqual(occurrences[0].ref.uid, "occ-a@example.com")
 
-    def test_first_sync_rebuilds_occurrences_even_when_affected_uids_empty(self) -> None:
+    def test_first_sync_rebuilds_occurrences_even_when_affected_uids_empty(
+        self,
+    ) -> None:
         # Regression: if slow-path UID collection returns an empty set on a
         # first sync (e.g. href canonicalization mismatch), we must still do
         # a full occurrence rebuild so this-week views are not empty.
@@ -514,11 +516,15 @@ class IdempotencyTest(SyncTestCase):
 
         original = sync_mod._slow_path_reconcile
 
-        def wrapped_slow_path(*args: object, **kwargs: object) -> tuple[object, frozenset[str]]:
+        def wrapped_slow_path(
+            *args: object, **kwargs: object
+        ) -> tuple[object, frozenset[str]]:
             stats, _affected = original(*args, **kwargs)
             return stats, frozenset()
 
-        with mock.patch("chronos.sync._slow_path_reconcile", side_effect=wrapped_slow_path):
+        with mock.patch(
+            "chronos.sync._slow_path_reconcile", side_effect=wrapped_slow_path
+        ):
             self._run()
 
         occurrences = self.index.query_occurrences(
@@ -1034,6 +1040,51 @@ class FetchIngestPipelineTest(SyncTestCase):
         after = {t.name for t in threading.enumerate()}
         leaked = {n for n in after - before if n.startswith("chronos-multiget-")}
         self.assertEqual(leaked, set())
+
+    def test_cancel_while_producer_fetch_is_blocked_returns_promptly(self) -> None:
+        self._seed(150)
+        cancel_event = threading.Event()
+        fetch_started = threading.Event()
+        release_fetch = threading.Event()
+        original_multiget = self.session.calendar_multiget
+
+        def blocking_multiget(
+            calendar_url: str, hrefs: Sequence[str]
+        ) -> Sequence[tuple[str, str, bytes]]:
+            fetch_started.set()
+            release_fetch.wait(timeout=30.0)
+            return original_multiget(calendar_url, hrefs)
+
+        self.session.calendar_multiget = blocking_multiget  # type: ignore[method-assign]
+        errors: list[BaseException] = []
+
+        def run_sync() -> None:
+            try:
+                sync_account(
+                    account=_account(),
+                    session=self.session,
+                    mirror=self.mirror,
+                    index=self.index,
+                    now=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+                    cancel_event=cancel_event,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_sync)
+        thread.start()
+        try:
+            self.assertTrue(fetch_started.wait(timeout=2.0))
+            cancel_event.set()
+            thread.join(timeout=4.0)
+            self.assertFalse(
+                thread.is_alive(),
+                "sync did not return after cancellation while fetch was blocked",
+            )
+            self.assertTrue(any(isinstance(exc, SyncCancelled) for exc in errors))
+        finally:
+            release_fetch.set()
+            thread.join(timeout=5.0)
 
 
 class MediumPathTest(SyncTestCase):
