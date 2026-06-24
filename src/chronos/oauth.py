@@ -32,6 +32,7 @@ import http.server
 import json
 import os
 import secrets
+import socket
 import stat
 import tempfile
 import threading
@@ -85,6 +86,14 @@ class StoredTokens:
     scope: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class AuthorizationRequest:
+    authorization_url: str
+    redirect_uri: str
+    state: str
+    code_verifier: str
+
+
 # Default HTTP POST using stdlib urllib -----------------------------------
 
 
@@ -105,7 +114,9 @@ def _default_http_post(
         except (ValueError, UnicodeDecodeError):
             payload = None
         if isinstance(payload, dict) and payload.get("error") == "invalid_grant":
-            raise InvalidGrantError("refresh token has been revoked or expired") from exc
+            raise InvalidGrantError(
+                "refresh token has been revoked or expired"
+            ) from exc
         raise OAuthError(f"HTTP {exc.code} {payload!r}") from exc
     except OSError as exc:
         raise OAuthError(f"network error: {exc}") from exc
@@ -161,6 +172,29 @@ def build_authorization_url(
     return f"{auth_url}?{urllib.parse.urlencode(params)}"
 
 
+def _build_authorization_request(
+    *,
+    client_id: str,
+    scope: str,
+    redirect_uri: str,
+) -> AuthorizationRequest:
+    verifier, challenge = _generate_pkce_pair()
+    state = secrets.token_urlsafe(16)
+    auth_url = build_authorization_url(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+        code_challenge=challenge,
+    )
+    return AuthorizationRequest(
+        authorization_url=auth_url,
+        redirect_uri=redirect_uri,
+        state=state,
+        code_verifier=verifier,
+    )
+
+
 def exchange_code_for_tokens(
     *,
     client_id: str,
@@ -169,8 +203,7 @@ def exchange_code_for_tokens(
     code_verifier: str,
     redirect_uri: str,
     scope: str,
-    http_post: Callable[[str, dict[str, str], float], dict[str, object]]
-    | None = None,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]] | None = None,
     now: Callable[[], float] | None = None,
 ) -> StoredTokens:
     """Exchange an authorization code (loopback flow) for tokens."""
@@ -193,6 +226,93 @@ def exchange_code_for_tokens(
         refresh_token=_require_str(payload, "refresh_token"),
         expiry_unix=clock() + expires_in,
         scope=_optional_str(payload, "scope", default=scope),
+    )
+
+
+def parse_callback_url(value: str) -> dict[str, str]:
+    """Parse an OAuth callback URL or query string into scalar params."""
+    raw = value.strip()
+    if not raw:
+        raise OAuthError("missing OAuth callback URL")
+    parsed = urllib.parse.urlparse(raw)
+    query = parsed.query if parsed.query else raw
+    parsed_qs = urllib.parse.parse_qs(query, keep_blank_values=True)
+    return {key: values[0] for key, values in parsed_qs.items() if values}
+
+
+def complete_authorization_request(
+    request: AuthorizationRequest,
+    callback_params: dict[str, str],
+    *,
+    client_id: str,
+    client_secret: str,
+    scope: str,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]] | None = None,
+    now: Callable[[], float] | None = None,
+) -> StoredTokens:
+    """Validate a callback and exchange its authorization code."""
+    if callback_params.get("state") != request.state:
+        raise OAuthError(
+            "loopback flow: state token mismatch — refusing to "
+            "complete (possible CSRF attempt)"
+        )
+    if "error" in callback_params:
+        description = callback_params.get("error_description", "")
+        raise OAuthError(
+            f"loopback flow rejected: {callback_params['error']}"
+            + (f" ({description})" if description else "")
+        )
+    code = callback_params.get("code")
+    if not code:
+        raise OAuthError(
+            f"loopback flow: missing 'code' in callback: {callback_params!r}"
+        )
+    return exchange_code_for_tokens(
+        client_id=client_id,
+        client_secret=client_secret,
+        code=code,
+        code_verifier=request.code_verifier,
+        redirect_uri=request.redirect_uri,
+        scope=scope,
+        http_post=http_post,
+        now=now,
+    )
+
+
+def run_paste_redirect_flow(
+    *,
+    client_id: str,
+    client_secret: str,
+    scope: str,
+    show_authorization_url: Callable[[str, str], None],
+    read_callback_url: Callable[[], str],
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]] | None = None,
+    now: Callable[[], float] | None = None,
+) -> StoredTokens:
+    """OAuth flow for a browser running on a different machine.
+
+    The authorization request still uses a loopback redirect URI, as
+    required by Desktop OAuth clients, but chronos does not depend on
+    the browser reaching this process. The user opens the URL wherever
+    their browser lives, copies the final redirect URL from the browser
+    address bar, and pastes it back into chronos.
+    """
+    redirect_uri = _unused_loopback_redirect_uri()
+    request = _build_authorization_request(
+        client_id=client_id,
+        scope=scope,
+        redirect_uri=redirect_uri,
+    )
+    show_authorization_url(request.authorization_url, request.redirect_uri)
+    callback_url = read_callback_url()
+    return complete_authorization_request(
+        request,
+        parse_callback_url(callback_url),
+        client_id=client_id,
+        client_secret=client_secret,
+        scope=scope,
+        http_post=http_post,
+        now=now,
     )
 
 
@@ -243,8 +363,7 @@ def run_loopback_flow(
     ]
     | None = None,
     timeout_seconds: float = _LOOPBACK_TIMEOUT_SECONDS,
-    http_post: Callable[[str, dict[str, str], float], dict[str, object]]
-    | None = None,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]] | None = None,
     now: Callable[[], float] | None = None,
 ) -> StoredTokens:
     """OAuth 2.0 loopback flow with PKCE for Desktop-class clients."""
@@ -258,22 +377,18 @@ def run_loopback_flow(
     try:
         port = server.server_port  # OS-assigned ephemeral port
         redirect_uri = f"http://127.0.0.1:{port}/"
-        verifier, challenge = _generate_pkce_pair()
-        state = secrets.token_urlsafe(16)
-        auth_url = build_authorization_url(
+        request = _build_authorization_request(
             client_id=client_id,
-            redirect_uri=redirect_uri,
             scope=scope,
-            state=state,
-            code_challenge=challenge,
+            redirect_uri=redirect_uri,
         )
-        if not open_browser(auth_url):
+        if not open_browser(request.authorization_url):
             raise OAuthError(
                 "no browser available; cannot complete the loopback "
                 f"flow (listening on port {port}). Open the URL below "
                 "on a machine that can reach this one — for example "
                 f"via `ssh -L {port}:localhost:{port} <this-host>`.\n\n"
-                f"{auth_url}\n"
+                f"{request.authorization_url}\n"
             )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -291,26 +406,11 @@ def run_loopback_flow(
             thread.join(timeout=5)
         server.server_close()
 
-    if received.get("state") != state:
-        raise OAuthError(
-            "loopback flow: state token mismatch — refusing to "
-            "complete (possible CSRF attempt)"
-        )
-    if "error" in received:
-        description = received.get("error_description", "")
-        raise OAuthError(
-            f"loopback flow rejected: {received['error']}"
-            + (f" ({description})" if description else "")
-        )
-    code = received.get("code")
-    if not code:
-        raise OAuthError(f"loopback flow: missing 'code' in callback: {received!r}")
-    return exchange_code_for_tokens(
+    return complete_authorization_request(
+        request,
+        received,
         client_id=client_id,
         client_secret=client_secret,
-        code=code,
-        code_verifier=verifier,
-        redirect_uri=redirect_uri,
         scope=scope,
         http_post=http_post,
         now=now,
@@ -377,8 +477,7 @@ def refresh_access_token(
     client_id: str,
     client_secret: str,
     refresh_token: str,
-    http_post: Callable[[str, dict[str, str], float], dict[str, object]]
-    | None = None,
+    http_post: Callable[[str, dict[str, str], float], dict[str, object]] | None = None,
     now: Callable[[], float] | None = None,
 ) -> tuple[str, float]:
     """Exchange a refresh token for a new access token.
@@ -516,16 +615,28 @@ def _optional_float(data: dict[str, object], key: str, *, default: float) -> flo
     return default
 
 
+def _unused_loopback_redirect_uri() -> str:
+    """Return a free-looking loopback redirect URI for paste flows."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}/"
+
+
 __all__ = [
+    "AuthorizationRequest",
     "BearerTokenAuth",
     "InvalidGrantError",
     "OAuthError",
     "StoredTokens",
     "build_authorization_url",
     "build_bearer_auth",
+    "complete_authorization_request",
     "exchange_code_for_tokens",
     "load_tokens",
+    "parse_callback_url",
     "refresh_access_token",
     "run_loopback_flow",
+    "run_paste_redirect_flow",
     "save_tokens",
 ]

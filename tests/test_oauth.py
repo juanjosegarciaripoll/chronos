@@ -21,17 +21,17 @@ from chronos.oauth import (
     build_bearer_auth,
     exchange_code_for_tokens,
     load_tokens,
+    parse_callback_url,
     refresh_access_token,
     run_loopback_flow,
+    run_paste_redirect_flow,
     save_tokens,
 )
 
 
 class RefreshAccessTokenTest(unittest.TestCase):
     def test_returns_new_access_token_and_expiry(self) -> None:
-        post = MagicMock(
-            return_value={"access_token": "new-at", "expires_in": 3600}
-        )
+        post = MagicMock(return_value={"access_token": "new-at", "expires_in": 3600})
         token, expiry = refresh_access_token(
             client_id="c",
             client_secret="s",
@@ -316,6 +316,77 @@ class ExchangeCodeForTokensTest(unittest.TestCase):
                 http_post=post,
             )
         self.assertIn("400", str(ctx.exception))
+
+
+class CallbackParsingTest(unittest.TestCase):
+    def test_parse_full_redirect_url(self) -> None:
+        params = parse_callback_url("http://127.0.0.1:49152/?code=abc&state=csrf-state")
+        self.assertEqual(params["code"], "abc")
+        self.assertEqual(params["state"], "csrf-state")
+
+    def test_parse_query_string(self) -> None:
+        params = parse_callback_url("code=abc&state=csrf-state")
+        self.assertEqual(params["code"], "abc")
+        self.assertEqual(params["state"], "csrf-state")
+
+    def test_empty_callback_rejected(self) -> None:
+        with self.assertRaises(OAuthError):
+            parse_callback_url("  ")
+
+
+class PasteRedirectFlowTest(unittest.TestCase):
+    def test_pasted_redirect_exchanges_code(self) -> None:
+        from urllib.parse import parse_qs, urlparse
+
+        token_post = MagicMock(
+            return_value={
+                "access_token": "at",
+                "refresh_token": "rt",
+                "expires_in": 3600,
+                "scope": "https://example/scope",
+            }
+        )
+        captured: dict[str, str] = {}
+
+        def show(auth_url: str, redirect_uri: str) -> None:
+            captured["auth_url"] = auth_url
+            captured["redirect_uri"] = redirect_uri
+
+        def read_callback() -> str:
+            params = parse_qs(urlparse(captured["auth_url"]).query)
+            return (
+                f"{captured['redirect_uri']}?code=from-browser"
+                f"&state={params['state'][0]}"
+            )
+
+        tokens = run_paste_redirect_flow(
+            client_id="cid",
+            client_secret="cs",
+            scope="https://example/scope",
+            show_authorization_url=show,
+            read_callback_url=read_callback,
+            http_post=token_post,
+            now=lambda: 5000.0,
+        )
+        self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1%3A", captured["auth_url"])
+        self.assertEqual(tokens.access_token, "at")
+        (url, sent_data, timeout) = token_post.call_args.args
+        self.assertEqual(sent_data["code"], "from-browser")
+        self.assertEqual(sent_data["redirect_uri"], captured["redirect_uri"])
+
+    def test_state_mismatch_rejected(self) -> None:
+        def show(_auth_url: str, _redirect_uri: str) -> None:
+            pass
+
+        with self.assertRaises(OAuthError) as ctx:
+            run_paste_redirect_flow(
+                client_id="cid",
+                client_secret="cs",
+                scope="scope",
+                show_authorization_url=show,
+                read_callback_url=lambda: "http://127.0.0.1:1/?code=x&state=wrong",
+            )
+        self.assertIn("state", str(ctx.exception).lower())
 
 
 class LoopbackFlowTest(unittest.TestCase):

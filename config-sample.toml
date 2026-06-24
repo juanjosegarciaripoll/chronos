@@ -28,6 +28,9 @@ use_utf8 = false
 # # username for you. Only the client_id/client_secret from your
 # # Google Cloud project are required (OAuth client type must be
 # # "Desktop app", same as Thunderbird). The first `chronos sync` opens
-# # your browser, captures the redirect on a random local port, and
-# # stores the tokens under the OS-standard user data directory
+# # your browser when chronos appears to be running on a graphical
+# # desktop. On a headless VM, it prints the authorization URL and asks
+# # you to paste the final redirected URL from your browser. You can
+# # force that mode with `CHRONOS_OAUTH_FLOW=remote-browser`.
+# # Tokens are stored under the OS-standard user data directory
 # # (tokens/<account>.json), not here.

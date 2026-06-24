@@ -220,7 +220,8 @@ class SyncCommandTest(CliTestCase):
         port = srv.getsockname()[1]
         try:
             state_file = (
-                Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
+                Path(self.enterContext(tempfile.TemporaryDirectory()))
+                / "mcp_server.json"
             )
             write_state(state_file, McpServerState(port=port, token="tok"))
             index_path = self.index._path  # type: ignore[attr-defined]
@@ -293,7 +294,8 @@ class SyncCommandTest(CliTestCase):
         port = srv.getsockname()[1]
         try:
             state_file = (
-                Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
+                Path(self.enterContext(tempfile.TemporaryDirectory()))
+                / "mcp_server.json"
             )
             write_state(state_file, McpServerState(port=port, token="tok"))
             index_path = self.index._path  # type: ignore[attr-defined]
@@ -1648,10 +1650,69 @@ class OAuthAuthorizeCommandTest(ConfigEditingCliTestCase):
         self.assertEqual(cred.scope, GOOGLE_OAUTH_SCOPE)
         self.assertTrue((self.tmp / "g-tokens.json").exists())
 
+    def test_authorize_defaults_to_remote_browser_when_headless(self) -> None:
+        from chronos.oauth import StoredTokens
+
+        self._add_oauth_account()
+        flow = mock.MagicMock(
+            return_value=StoredTokens(
+                access_token="at",
+                refresh_token="rt",
+                expiry_unix=12345.0,
+                scope="scope",
+            )
+        )
+        with (
+            mock.patch("chronos.cli._has_local_graphical_browser", return_value=False),
+            mock.patch("chronos.cli._default_remote_browser_flow", flow),
+            mock.patch(
+                "chronos.cli.oauth_token_path",
+                return_value=self.tmp / "tokens.json",
+            ),
+        ):
+            code = cli.cmd_oauth_authorize(
+                self.stdout,
+                self.stderr,
+                config_path=self.config_path,
+                account_name="google",
+            )
+        self.assertEqual(code, 0)
+        flow.assert_called_once()
+        self.assertTrue((self.tmp / "tokens.json").exists())
+
+    def test_authorize_uses_loopback_when_graphical(self) -> None:
+        from chronos.oauth import StoredTokens
+
+        self._add_oauth_account()
+        flow = mock.MagicMock(
+            return_value=StoredTokens(
+                access_token="at",
+                refresh_token="rt",
+                expiry_unix=12345.0,
+                scope="scope",
+            )
+        )
+        with (
+            mock.patch("chronos.cli._has_local_graphical_browser", return_value=True),
+            mock.patch("chronos.cli._default_loopback_flow", flow),
+            mock.patch(
+                "chronos.cli.oauth_token_path",
+                return_value=self.tmp / "tokens.json",
+            ),
+        ):
+            code = cli.cmd_oauth_authorize(
+                self.stdout,
+                self.stderr,
+                config_path=self.config_path,
+                account_name="google",
+            )
+        self.assertEqual(code, 0)
+        flow.assert_called_once()
+        self.assertTrue((self.tmp / "tokens.json").exists())
+
 
 class CliAuthorizerTest(unittest.TestCase):
-    """`_default_cli_authorizer` runs the OAuth loopback flow over sys.stdout
-    when interactive, and surfaces a clean error otherwise."""
+    """`_default_cli_authorizer` picks a usable OAuth flow for the terminal."""
 
     def test_raises_when_no_tty(self) -> None:
         from chronos.domain import OAuthCredential
@@ -1670,7 +1731,7 @@ class CliAuthorizerTest(unittest.TestCase):
                 )
         self.assertIn("TTY", str(ctx.exception))
 
-    def test_delegates_to_loopback_flow_when_interactive(self) -> None:
+    def test_delegates_to_loopback_flow_when_graphical(self) -> None:
         from chronos.domain import OAuthCredential
         from chronos.oauth import StoredTokens
 
@@ -1682,6 +1743,7 @@ class CliAuthorizerTest(unittest.TestCase):
         with (
             mock.patch("chronos.cli.sys.stdin") as stdin,
             mock.patch("chronos.cli.sys.stdout") as stdout,
+            mock.patch("chronos.cli._has_local_graphical_browser", return_value=True),
             mock.patch("chronos.cli._default_loopback_flow", flow),
         ):
             stdin.isatty.return_value = True
@@ -1694,6 +1756,57 @@ class CliAuthorizerTest(unittest.TestCase):
         # And the user is told what's happening before the browser opens.
         write_calls = [c.args[0] for c in stdout.write.call_args_list]
         self.assertTrue(any("OAuth authorization required" in w for w in write_calls))
+
+    def test_delegates_to_remote_browser_flow_when_headless(self) -> None:
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import StoredTokens
+
+        spec = OAuthCredential(client_id="c", client_secret="s", scope="x")
+        tokens = StoredTokens(
+            access_token="at", refresh_token="rt", expiry_unix=1.0, scope="x"
+        )
+        flow = mock.MagicMock(return_value=tokens)
+        with (
+            mock.patch("chronos.cli.sys.stdin") as stdin,
+            mock.patch("chronos.cli.sys.stdout") as stdout,
+            mock.patch("chronos.cli._has_local_graphical_browser", return_value=False),
+            mock.patch("chronos.cli._default_remote_browser_flow", flow),
+        ):
+            stdin.isatty.return_value = True
+            stdout.isatty.return_value = True
+            result = cli._default_cli_authorizer(  # pyright: ignore[reportPrivateUsage]
+                "google", spec, Path("/unused")
+            )
+        self.assertIs(result, tokens)
+        flow.assert_called_once()
+        write_calls = [c.args[0] for c in stdout.write.call_args_list]
+        self.assertTrue(any("paste the final redirect URL" in w for w in write_calls))
+
+
+class OAuthFlowModeTest(unittest.TestCase):
+    def test_w3m_browser_env_is_not_graphical(self) -> None:
+        self.assertFalse(
+            cli._has_local_graphical_browser(  # pyright: ignore[reportPrivateUsage]
+                env={"DISPLAY": ":1", "BROWSER": "w3m"},
+                platform="linux",
+            )
+        )
+
+    def test_graphical_browser_env_is_graphical(self) -> None:
+        self.assertTrue(
+            cli._has_local_graphical_browser(  # pyright: ignore[reportPrivateUsage]
+                env={"DISPLAY": ":1", "BROWSER": "firefox"},
+                platform="linux",
+            )
+        )
+
+    def test_mixed_browser_env_allows_graphical_fallback(self) -> None:
+        self.assertTrue(
+            cli._has_local_graphical_browser(  # pyright: ignore[reportPrivateUsage]
+                env={"DISPLAY": ":1", "BROWSER": "w3m:firefox"},
+                platform="linux",
+            )
+        )
 
 
 class TuiUnsupportedAuthorizerTest(unittest.TestCase):

@@ -57,6 +57,7 @@ from chronos.oauth import (
     OAuthError,
     StoredTokens,
     run_loopback_flow,
+    run_paste_redirect_flow,
     save_tokens,
 )
 from chronos.paths import (
@@ -81,6 +82,7 @@ from chronos.sync import SyncCancelled, sync_account
 SessionFactory = Callable[[AccountConfig, Authorization], CalDAVSession]
 ContextFactory = Callable[[Path | None], "CliContext"]
 EditorFn = Callable[[Path], None]
+InputFn = Callable[[str], str]
 
 
 @dataclass
@@ -320,19 +322,20 @@ def _configure_logging(
 def _default_cli_authorizer(
     account_name: str, spec: OAuthCredential, _token_path: Path
 ) -> StoredTokens:
-    """Run the OAuth loopback flow inline when sync hits an unauthorized account.
+    """Run an OAuth flow inline when sync hits an unauthorized account.
 
     Wired into `_default_context_factory` so plain `chronos sync` "just
-    works" the first time: open the user's browser to the consent
-    screen, capture the redirect on a random local port, exchange the
-    code for tokens (the caller saves them).
+    works" the first time. Local desktop sessions open a browser and
+    capture the loopback redirect. Headless terminals use the
+    remote-browser flow: open the URL elsewhere, then paste the final
+    redirect URL back into chronos.
 
     Refuses to prompt when stdin/stdout aren't a TTY — cron / scripted
     invocations get a clean error rather than silently blocking on a
-    browser that may never open. Network and HTTP failures from the
-    OAuth provider are surfaced loudly on stdout (not just stderr) so
-    the user notices them right after the "authorization required"
-    preface.
+    browser or paste prompt that may never finish. Network and HTTP
+    failures from the OAuth provider are surfaced loudly on stdout (not
+    just stderr) so the user notices them right after the "authorization
+    required" preface.
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise OAuthError(
@@ -340,13 +343,19 @@ def _default_cli_authorizer(
             "stdin/stdout aren't a TTY. Re-run from an interactive "
             "terminal."
         )
-    sys.stdout.write(
-        f"\n[{account_name}] OAuth authorization required. "
-        "Opening your browser to the provider's consent screen...\n"
+    use_remote_browser = _use_remote_browser_flow()
+    flow = (
+        _default_remote_browser_flow if use_remote_browser else _default_loopback_flow
     )
+    action = (
+        "Use a browser on another machine and paste the final redirect URL.\n"
+        if use_remote_browser
+        else "Opening your browser to the provider's consent screen...\n"
+    )
+    sys.stdout.write(f"\n[{account_name}] OAuth authorization required. {action}")
     sys.stdout.flush()
     try:
-        return _default_loopback_flow(spec, sys.stdout)
+        return flow(spec, sys.stdout)
     except OAuthError as exc:
         sys.stdout.write(
             f"\n[{account_name}] OAuth setup failed: {exc}\n"
@@ -620,6 +629,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-run OAuth authorization for an account and save tokens.",
     )
     oauth_authorize.add_argument("--account", required=True)
+    oauth_authorize.add_argument(
+        "--remote-browser",
+        action="store_true",
+        help=(
+            "Force use when the browser runs on another machine: print the "
+            "authorization URL and prompt for the final redirected URL."
+        ),
+    )
 
     return parser
 
@@ -753,7 +770,11 @@ def _dispatch_oauth(
     sub = str(args.oauth_cmd)
     if sub == "authorize":
         return cmd_oauth_authorize(
-            stdout, stderr, config_path=config_path, account_name=args.account
+            stdout,
+            stderr,
+            config_path=config_path,
+            account_name=args.account,
+            remote_browser=bool(getattr(args, "remote_browser", False)),
         )
     stderr.write(f"unknown oauth subcommand: {sub}\n")
     return 2
@@ -903,7 +924,9 @@ def cmd_reset(
             return 1
 
     effective_lock = lock_path or sync_lock_path()
-    lock_cm = acquire_sync_lock(effective_lock) if not force else contextlib.nullcontext()
+    lock_cm = (
+        acquire_sync_lock(effective_lock) if not force else contextlib.nullcontext()
+    )
     try:
         with lock_cm:
             # Close any open connections / file handles so Windows lets us
@@ -1248,7 +1271,7 @@ def cmd_tui(ctx: CliContext, *, startup_ics_path: Path | None = None) -> int:
     app_box: list[ChronosApp] = []
 
     def tui_authorizer(
-        account_name: str, spec: OAuthCredential, token_path: Path
+        account_name: str, spec: OAuthCredential, _token_path: Path
     ) -> StoredTokens:
         import threading
 
@@ -1259,7 +1282,12 @@ def cmd_tui(ctx: CliContext, *, startup_ics_path: Path | None = None) -> int:
             result_box.append(result)
             done.set()
 
-        screen = OAuthProgressScreen(account_name, spec, on_complete=on_complete)
+        screen = OAuthProgressScreen(
+            account_name,
+            spec,
+            on_complete=on_complete,
+            remote_browser=_use_remote_browser_flow(),
+        )
         app_box[0].call_from_thread(app_box[0].push_screen, screen)  # pyright: ignore[reportUnknownMemberType]
         done.wait()
 
@@ -1599,6 +1627,7 @@ def cmd_oauth_authorize(
     config_path: Path,
     account_name: str,
     auth_flow: Callable[[OAuthCredential, TextIO], StoredTokens] | None = None,
+    remote_browser: bool = False,
 ) -> int:
     """Re-run OAuth authorization for an account.
 
@@ -1631,7 +1660,10 @@ def cmd_oauth_authorize(
             "only meaningful for the oauth and google backends.\n"
         )
         return 2
-    flow = auth_flow or _default_loopback_flow
+    use_remote_browser = remote_browser or _use_remote_browser_flow()
+    flow = auth_flow or (
+        _default_remote_browser_flow if use_remote_browser else _default_loopback_flow
+    )
     try:
         tokens = flow(oauth_credential, stdout)
     except OAuthError as exc:
@@ -1737,6 +1769,104 @@ def _default_loopback_flow(credential: OAuthCredential, stdout: TextIO) -> Store
         client_secret=credential.client_secret,
         scope=credential.scope,
     )
+
+
+def _default_remote_browser_flow(
+    credential: OAuthCredential,
+    stdout: TextIO,
+    *,
+    input_fn: InputFn | None = None,
+) -> StoredTokens:
+    """OAuth flow for SSH/headless use where the browser is elsewhere."""
+    read_input = input_fn or input
+
+    def show_authorization_url(auth_url: str, redirect_uri: str) -> None:
+        stdout.write(
+            "\nOpen this URL in the browser on your local machine:\n\n"
+            f"{auth_url}\n\n"
+            "After Google signs you in, the browser will redirect to:\n"
+            f"{redirect_uri}\n\n"
+            "Because that address is local to your browser machine, the page may "
+            "show a connection error. Copy the full URL from the browser address "
+            "bar and paste it below.\n"
+        )
+        stdout.flush()
+
+    return run_paste_redirect_flow(
+        client_id=credential.client_id,
+        client_secret=credential.client_secret,
+        scope=credential.scope,
+        show_authorization_url=show_authorization_url,
+        read_callback_url=lambda: read_input("Redirect URL: "),
+    )
+
+
+def _oauth_flow_mode(
+    env: Mapping[str, str] | None = None,
+) -> Literal["auto", "browser", "remote-browser"]:
+    value = (env if env is not None else os.environ).get("CHRONOS_OAUTH_FLOW", "")
+    normalized = value.strip().lower().replace("_", "-")
+    if normalized in {"", "auto"}:
+        return "auto"
+    if normalized in {"browser", "loopback", "local-browser"}:
+        return "browser"
+    if normalized in {"remote", "remote-browser", "paste"}:
+        return "remote-browser"
+    raise OAuthError(
+        "invalid CHRONOS_OAUTH_FLOW; expected auto, browser, or remote-browser"
+    )
+
+
+_TEXT_MODE_BROWSERS = frozenset(
+    {
+        "browsh",
+        "elinks",
+        "links",
+        "links2",
+        "lynx",
+        "w3m",
+        "www-browser",
+    }
+)
+
+
+def _use_remote_browser_flow() -> bool:
+    oauth_flow = _oauth_flow_mode()
+    return oauth_flow == "remote-browser" or (
+        oauth_flow == "auto" and not _has_local_graphical_browser()
+    )
+
+
+def _has_local_graphical_browser(
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+) -> bool:
+    real_env = env if env is not None else os.environ
+    real_platform = platform if platform is not None else sys.platform
+    if not _browser_env_allows_graphical(real_env):
+        return False
+    if real_platform.startswith(("darwin", "win")):
+        return True
+    return bool(real_env.get("DISPLAY") or real_env.get("WAYLAND_DISPLAY"))
+
+
+def _browser_env_allows_graphical(env: Mapping[str, str]) -> bool:
+    raw = env.get("BROWSER", "")
+    if not raw.strip():
+        return True
+    entries = [entry.strip() for entry in raw.split(os.pathsep) if entry.strip()]
+    if not entries:
+        return True
+    for entry in entries:
+        try:
+            parts = shlex.split(entry)
+        except ValueError:
+            parts = entry.split()
+        if not parts:
+            continue
+        if Path(parts[0]).name.lower() not in _TEXT_MODE_BROWSERS:
+            return True
+    return False
 
 
 def _default_session_factory(
