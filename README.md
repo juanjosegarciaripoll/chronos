@@ -44,6 +44,17 @@ chronos doctor --remote
 
 The remote probe reports calendar discovery and `calendar-query` counts only.
 
+If the probe appears to hang, add `--debug` to stream timestamped, per-step
+progress to stderr and raise the log level to `DEBUG`:
+
+```sh
+chronos doctor --remote --debug
+```
+
+The last printed step (e.g. `discovering principal`, `calendar-query`,
+`multiget sample`) is the one the probe is blocked on. URLs, emails, and
+token-like values in any error output are still redacted.
+
 ## Installation paths
 
 1. `uv tool install .`

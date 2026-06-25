@@ -21,6 +21,7 @@ from chronos.caldav.protocol import (
     calendar_multiget,
     calendar_query,
     delete_resource,
+    describe_collection,
     discover_principal,
     get_calendar_home_set,
     get_ctag,
@@ -383,6 +384,46 @@ class ListCalendarsTest(unittest.TestCase):
         client.request.side_effect = _err(500)
         with self.assertRaises(CalDAVError):
             list_calendars(client, "https://cal.example.com/calendars/")
+
+
+class DescribeCollectionTest(unittest.TestCase):
+    def test_returns_calendar_when_url_is_a_collection(self) -> None:
+        client = _client()
+        client.request.return_value = _resp(
+            207, _calendars_response(("/SOGo/dav/u/Calendar/personal/", "Personal"))
+        )
+        cal = describe_collection(
+            client, "https://cal.example.com/SOGo/dav/u/Calendar/personal/"
+        )
+        assert cal is not None
+        self.assertEqual(cal.name, "Personal")
+        self.assertEqual(
+            cal.url, "https://cal.example.com/SOGo/dav/u/Calendar/personal/"
+        )
+
+    def test_sends_propfind_depth_0(self) -> None:
+        client = _client()
+        client.request.return_value = _resp(
+            207, _calendars_response(("/cal/work/", "Work"))
+        )
+        describe_collection(client, "https://cal.example.com/cal/work/")
+        self.assertEqual(client.request.call_args[1]["headers"]["Depth"], "0")
+
+    def test_returns_none_when_not_a_calendar(self) -> None:
+        client = _client()
+        client.request.return_value = _resp(
+            207, b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>'
+        )
+        self.assertIsNone(
+            describe_collection(client, "https://cal.example.com/principal/")
+        )
+
+    def test_returns_none_on_http_error(self) -> None:
+        client = _client()
+        client.request.side_effect = _err(404)
+        self.assertIsNone(
+            describe_collection(client, "https://cal.example.com/nope/")
+        )
 
 
 # ---------------------------------------------------------------------------

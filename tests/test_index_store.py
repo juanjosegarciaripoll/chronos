@@ -177,6 +177,20 @@ class IndexRepositoryTest(unittest.TestCase):
         fetched = self.repo.get_sync_state(calendar)
         self.assertEqual(fetched, state)
 
+    def test_sync_state_round_trips_calendar_url(self) -> None:
+        calendar = CalendarRef("personal", "work")
+        state = SyncState(
+            calendar=calendar,
+            ctag="ctag-1",
+            sync_token="tok-1",
+            synced_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            calendar_url="https://cal.example.com/dav/work/",
+        )
+        self.repo.set_sync_state(state)
+        fetched = self.repo.get_sync_state(calendar)
+        assert fetched is not None
+        self.assertEqual(fetched.calendar_url, "https://cal.example.com/dav/work/")
+
     def test_sync_state_overwrites_on_upsert(self) -> None:
         calendar = CalendarRef("personal", "work")
         self.repo.set_sync_state(
@@ -189,6 +203,87 @@ class IndexRepositoryTest(unittest.TestCase):
         assert fetched is not None
         self.assertEqual(fetched.ctag, "b")
         self.assertEqual(fetched.sync_token, "t")
+
+    def test_clear_account_sync_state_scopes_to_one_account(self) -> None:
+        for acct in ("personal", "work"):
+            self.repo.set_sync_state(
+                SyncState(
+                    calendar=CalendarRef(acct, "cal"),
+                    ctag="c",
+                    sync_token=None,
+                    synced_at=None,
+                )
+            )
+        removed = self.repo.clear_account_sync_state("personal")
+        self.assertEqual(removed, 1)
+        self.assertIsNone(
+            self.repo.get_sync_state(CalendarRef("personal", "cal"))
+        )
+        # The sibling account's row is left intact.
+        self.assertIsNotNone(
+            self.repo.get_sync_state(CalendarRef("work", "cal"))
+        )
+
+
+class SchemaMigrationTest(unittest.TestCase):
+    def test_adds_calendar_url_column_to_legacy_database(self) -> None:
+        import sqlite3
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        db_path = tmp / "legacy.sqlite3"
+        # Create a pre-migration calendar_sync_state without calendar_url
+        # and seed a row, mimicking a database from an older release.
+        legacy = sqlite3.connect(db_path)
+        legacy.executescript(
+            """
+            CREATE TABLE calendar_sync_state(
+                account_name   TEXT NOT NULL,
+                calendar_name  TEXT NOT NULL,
+                ctag           TEXT,
+                sync_token     TEXT,
+                synced_at      TEXT,
+                PRIMARY KEY (account_name, calendar_name)
+            );
+            INSERT INTO calendar_sync_state
+                (account_name, calendar_name, ctag, sync_token, synced_at)
+                VALUES ('personal', 'work', 'ctag-1', 'tok-1', NULL);
+            """
+        )
+        legacy.commit()
+        legacy.close()
+
+        repo = SqliteIndexRepository(db_path)
+        self.addCleanup(repo.close)
+
+        # The legacy row reads back with calendar_url == None (no spurious
+        # invalidation), and new writes persist the column.
+        state = repo.get_sync_state(CalendarRef("personal", "work"))
+        assert state is not None
+        self.assertEqual(state.ctag, "ctag-1")
+        self.assertIsNone(state.calendar_url)
+
+        repo.set_sync_state(
+            SyncState(
+                calendar=CalendarRef("personal", "work"),
+                ctag="ctag-2",
+                sync_token="tok-2",
+                synced_at=None,
+                calendar_url="https://cal.example.com/dav/work/",
+            )
+        )
+        refreshed = repo.get_sync_state(CalendarRef("personal", "work"))
+        assert refreshed is not None
+        self.assertEqual(refreshed.calendar_url, "https://cal.example.com/dav/work/")
+
+    def test_migration_is_idempotent(self) -> None:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        db_path = tmp / "index.sqlite3"
+        # Opening twice must not fail on a duplicate ADD COLUMN.
+        repo1 = SqliteIndexRepository(db_path)
+        repo1.close()
+        repo2 = SqliteIndexRepository(db_path)
+        self.addCleanup(repo2.close)
+        self.assertIsNone(repo2.get_sync_state(CalendarRef("personal", "work")))
 
 
 class FtsSearchTest(unittest.TestCase):

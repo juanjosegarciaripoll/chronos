@@ -99,7 +99,14 @@ def get_calendar_home_set(client: Client, principal_url: str) -> str:
 
     home_set = _parse_calendar_home_set(resp.body, base_url=base_url)
     if home_set is None:
+        logger.warning(
+            "no calendar-home-set in PROPFIND response at %s; "
+            "falling back to principal URL (calendar discovery may miss "
+            "collections nested below the principal)",
+            path,
+        )
         return principal_url
+    logger.info("discovered calendar home-set %s", home_set)
     return home_set
 
 
@@ -128,6 +135,35 @@ def list_calendars(
     calendars = _parse_calendars_propfind(resp.body, base_url=base_url)
     logger.info("listed %d calendars", len(calendars))
     return calendars
+
+
+def describe_collection(client: Client, url: str) -> RemoteCalendar | None:
+    """PROPFIND Depth:0 on `url`; return a RemoteCalendar if it *is* one.
+
+    Used to honor a configured URL that points straight at a calendar
+    collection (e.g. SOGo's `/SOGo/dav/<user>/Calendar/personal/`), which
+    principal -> calendar-home-set discovery can miss when the server
+    doesn't advertise a home-set and the calendars are nested below the
+    principal. Returns None when the URL is not a calendar collection or
+    the probe fails, so callers can fall back to normal discovery.
+    """
+    path = urlsplit(url).path or "/"
+    base_url = _client_base_url(client, path)
+    try:
+        resp = client.request(
+            "PROPFIND",
+            path,
+            body=_CALENDARS_PROPFIND_BODY,
+            headers=_propfind_headers("0"),
+        )
+    except HttpStatusError as exc:
+        logger.info("collection probe at %s failed: HTTP %s", path, exc.status)
+        return None
+    calendars = _parse_calendars_propfind(resp.body, base_url=base_url)
+    if not calendars:
+        return None
+    logger.info("configured URL %s is a calendar collection", path)
+    return calendars[0]
 
 
 def get_ctag(client: Client, calendar_url: str) -> str | None:

@@ -230,6 +230,78 @@ class FastPathTest(SyncTestCase):
         self.assertNotIn("get_ctag", [c[0] for c in self.session.calls])
 
 
+class CalendarUrlChangeTest(SyncTestCase):
+    """C-4: a changed collection URL invalidates the stored ctag/token."""
+
+    def _seed_first_sync(self) -> None:
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=f"{CALENDAR_URL}a.ics",
+            ics=_ics_with_uid("url-a@example.com"),
+            etag="etag-a",
+        )
+        self._run()
+
+    def test_first_sync_records_calendar_url(self) -> None:
+        self._seed_first_sync()
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        self.assertEqual(state.calendar_url, CALENDAR_URL)
+
+    def test_url_change_forces_slow_path_despite_stable_ctag(self) -> None:
+        self._seed_first_sync()
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        # Simulate the account's CalDAV address having changed: the stored
+        # state points at a stale URL but keeps the ctag that would
+        # otherwise pin the next sync to the fast path (no ingest).
+        self.index.set_sync_state(
+            SyncState(
+                calendar=self.calendar_ref,
+                ctag=state.ctag,
+                sync_token=state.sync_token,
+                synced_at=state.synced_at,
+                calendar_url="https://old-host.example.com/dav/cal/",
+            )
+        )
+        self.session.calls.clear()
+        self._run()
+
+        # The URL mismatch must bypass the fast path and re-query.
+        self.assertIn("calendar_query", [c[0] for c in self.session.calls])
+        # And the freshly resolved URL is now stored.
+        refreshed = self.index.get_sync_state(self.calendar_ref)
+        assert refreshed is not None
+        self.assertEqual(refreshed.calendar_url, CALENDAR_URL)
+
+    def test_unchanged_url_still_takes_fast_path(self) -> None:
+        self._seed_first_sync()
+        self.session.calls.clear()
+        self._run()
+        # Stored URL matches the discovered URL: no invalidation, fast path.
+        self.assertNotIn("calendar_query", [c[0] for c in self.session.calls])
+
+    def test_legacy_state_without_url_is_not_invalidated(self) -> None:
+        self._seed_first_sync()
+        state = self.index.get_sync_state(self.calendar_ref)
+        assert state is not None
+        # Rows written before the calendar_url column existed read back as
+        # None; treat that as "unknown" and keep the fast path rather than
+        # forcing a needless full resync on every upgraded database.
+        self.index.set_sync_state(
+            SyncState(
+                calendar=self.calendar_ref,
+                ctag=state.ctag,
+                sync_token=state.sync_token,
+                synced_at=state.synced_at,
+                calendar_url=None,
+            )
+        )
+        self.session.calls.clear()
+        self._run()
+        self.assertNotIn("calendar_query", [c[0] for c in self.session.calls])
+
+
 class ServerDeletionTest(SyncTestCase):
     def test_server_deletion_removes_local_row(self) -> None:
         for uid in ("a", "b", "c"):

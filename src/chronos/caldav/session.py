@@ -12,6 +12,11 @@ from chronos.domain import RemoteCalendar
 from chronos.http import Client
 
 
+def _same_collection(a: str, b: str) -> bool:
+    """Compare two collection URLs by path, ignoring a trailing slash."""
+    return urlsplit(a).path.rstrip("/") == urlsplit(b).path.rstrip("/")
+
+
 class CalDAVHttpSession:
     """HTTP-backed CalDAV session using the stdlib HTTP client.
 
@@ -33,7 +38,17 @@ class CalDAVHttpSession:
 
     def list_calendars(self, principal_url: str) -> Sequence[RemoteCalendar]:
         home_set = protocol.get_calendar_home_set(self._client, principal_url)
-        return protocol.list_calendars(self._client, home_set)
+        calendars = list(protocol.list_calendars(self._client, home_set))
+        # Honor a configured URL that points straight at a calendar
+        # collection. Home-set discovery can miss it on servers (e.g.
+        # SOGo) that nest calendars below the principal and don't expose
+        # a calendar-home-set, leaving discovery stuck at the principal.
+        direct = protocol.describe_collection(self._client, self._base_url)
+        if direct is not None and not any(
+            _same_collection(c.url, direct.url) for c in calendars
+        ):
+            calendars.append(direct)
+        return calendars
 
     def get_ctag(self, calendar_url: str) -> str | None:
         path = urlsplit(calendar_url).path

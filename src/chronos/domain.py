@@ -254,6 +254,12 @@ class SyncState:
     ctag: str | None
     sync_token: str | None
     synced_at: datetime | None
+    # Resolved collection URL this ctag/sync_token belong to. A changed
+    # URL (e.g. the account's CalDAV address was edited in config) makes
+    # the stored ctag/token meaningless against the new server, so sync
+    # must full-resync rather than trust them. `None` for rows written
+    # before this field existed (treated as "unknown", no invalidation).
+    calendar_url: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

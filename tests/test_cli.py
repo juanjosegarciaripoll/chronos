@@ -414,6 +414,82 @@ class SyncCommandTest(CliTestCase):
         self.assertIn("--force", self.stdout.getvalue())
         self.assertIn("cleared sync state", self.stdout.getvalue())
 
+    def test_sync_account_filters_to_named_account(self) -> None:
+        # `chronos sync --account NAME` should sync only that account,
+        # leaving the others untouched — the isolation knob for debugging
+        # one flaky account without churning the rest.
+        self._seed_server()
+        from chronos.authorization import Authorization
+
+        synced: list[str] = []
+
+        def factory(
+            account: AccountConfig, _auth: Authorization
+        ) -> FakeCalDAVSession:
+            synced.append(account.name)
+            return self.session
+
+        ctx = self._ctx(
+            config=_config(_account(name="personal"), _account(name="work")),
+            session_factory=factory,
+        )
+        code = self._run(["sync", "--account", "work"], context=ctx)
+        self.assertEqual(code, 0)
+        self.assertEqual(synced, ["work"])
+        self.assertIn("work:", self.stdout.getvalue())
+        self.assertNotIn("personal:", self.stdout.getvalue())
+
+    def test_sync_account_unknown_name_errors(self) -> None:
+        ctx = self._ctx(
+            config=_config(_account(name="personal"), _account(name="work"))
+        )
+        code = self._run(["sync", "--account", "nope"], context=ctx)
+        self.assertEqual(code, 2)
+        err = self.stderr.getvalue()
+        self.assertIn("no account named 'nope'", err)
+        # Lists the configured names so the user can correct the typo.
+        self.assertIn("personal", err)
+        self.assertIn("work", err)
+
+    def test_sync_account_force_clears_only_that_account(self) -> None:
+        # `--account NAME --force` must scope the slow-path reset to that
+        # account; sibling accounts keep their CTags so they don't all
+        # re-download just because one was being debugged.
+        self._seed_server()
+        from chronos.authorization import Authorization
+        from chronos.domain import CalendarRef, SyncState
+
+        def factory(
+            _account: AccountConfig, _auth: Authorization
+        ) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(
+            config=_config(_account(name="personal"), _account(name="work")),
+            session_factory=factory,
+        )
+        for acct in ("personal", "work"):
+            ctx.index.set_sync_state(
+                SyncState(
+                    calendar=CalendarRef(account_name=acct, calendar_name="work"),
+                    ctag="ctag-stale",
+                    sync_token=None,
+                    synced_at=ctx.now,
+                )
+            )
+
+        code = self._run(
+            ["sync", "--account", "personal", "--force"], context=ctx
+        )
+        self.assertEqual(code, 0)
+        # The other account's stale CTag survives untouched.
+        other = ctx.index.get_sync_state(
+            CalendarRef(account_name="work", calendar_name="work")
+        )
+        assert other is not None
+        self.assertEqual(other.ctag, "ctag-stale")
+        self.assertIn("account 'personal'", self.stdout.getvalue())
+
     def test_sync_reports_credential_failure(self) -> None:
         bad_config = _config(
             _account(credential=EnvCredential(variable="UNSET_FOR_TEST"))
@@ -961,6 +1037,47 @@ class DoctorCommandTest(CliTestCase):
         self.assertIn("remote-caldav", output)
         self.assertIn("remote-calendar-query", output)
         self.assertIn("1 resource", output)
+
+    def test_doctor_remote_debug_streams_step_progress_to_stderr(self) -> None:
+        self.session.add_calendar(url="https://cal.example.com/work/", name="work")
+        self.session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+        from chronos.authorization import Authorization
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        code = self._run(["doctor", "--remote", "--debug"], context=ctx)
+
+        self.assertEqual(code, 0)
+        progress = self.stderr.getvalue()
+        # Each blocking step is announced on stderr before it runs, so a
+        # stalled probe is attributable to the last line printed.
+        self.assertIn("[doctor", progress)
+        self.assertIn("discovering principal", progress)
+        self.assertIn("listing calendars", progress)
+        self.assertIn("calendar-query", progress)
+        self.assertIn("multiget sample", progress)
+        self.assertIn("remote probe complete", progress)
+        # The report itself still goes to stdout.
+        self.assertIn("remote-calendar-query", self.stdout.getvalue())
+
+    def test_doctor_without_debug_emits_no_step_progress(self) -> None:
+        from chronos.authorization import Authorization
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self._run(["doctor", "--remote"], context=ctx)
+
+        self.assertNotIn("[doctor", self.stderr.getvalue())
 
 
 class ConfigLoadErrorTest(unittest.TestCase):

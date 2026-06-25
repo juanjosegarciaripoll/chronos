@@ -203,13 +203,16 @@ class ListCalendarsTest(unittest.TestCase):
         session = _session_with_mock_client(client)
         # discover_principal is called first to populate _principal_url
         session._principal_url = "https://caldav.example.com/principal/"
-        # list_calendars calls get_calendar_home_set then list_calendars
+        # list_calendars calls get_calendar_home_set, then list_calendars,
+        # then a Depth:0 probe of the configured base URL (here the root,
+        # which is not a calendar collection -> empty multistatus).
         client.request.side_effect = [
             _resp(207, _home_set_body("/calendars/")),
             _resp(207, _calendars_body(
                 ("/calendars/work/", "Work"),
                 ("/calendars/personal/", "Personal"),
             )),
+            _resp(207, b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>'),
         ]
         cals = session.list_calendars("https://caldav.example.com/principal/")
         self.assertEqual(len(cals), 2)
@@ -218,6 +221,66 @@ class ListCalendarsTest(unittest.TestCase):
         self.assertIn("Personal", names)
         for cal in cals:
             self.assertIn(ComponentKind.VEVENT, cal.supported_components)
+
+    def test_uses_configured_url_when_it_is_a_calendar_collection(self) -> None:
+        # SOGo-style: the configured URL points straight at a calendar,
+        # home-set discovery surfaces nothing under the principal, but the
+        # Depth:0 probe of the configured URL identifies it as a calendar.
+        client = MagicMock()
+        client._default_scheme = "https"
+        client._default_netloc = "calendario.csic.es"
+        with patch("chronos.caldav.session.Client", return_value=client):
+            session = CalDAVHttpSession(
+                url="https://calendario.csic.es/SOGo/dav/08930807E/Calendar/personal/",
+                authorization=Authorization(basic=("user", "pw")),
+            )
+        client.request.side_effect = [
+            # get_calendar_home_set: no home-set -> falls back to principal
+            _resp(207, b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>'),
+            # list_calendars on the principal: no calendar collections here
+            _resp(207, b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>'),
+            # describe_collection Depth:0 on the configured URL: it IS one
+            _resp(207, _calendars_body(
+                ("/SOGo/dav/08930807E/Calendar/personal/", "Personal"),
+            )),
+        ]
+        cals = session.list_calendars("https://calendario.csic.es/SOGo/dav/08930807E")
+        self.assertEqual(len(cals), 1)
+        self.assertEqual(cals[0].name, "Personal")
+        self.assertEqual(
+            cals[0].url,
+            "https://calendario.csic.es/SOGo/dav/08930807E/Calendar/personal/",
+        )
+
+    def test_configured_calendar_not_duplicated_when_discovery_finds_it(self) -> None:
+        # When home-set discovery already lists the configured calendar,
+        # the direct probe must not add a duplicate.
+        client = MagicMock()
+        client._default_scheme = "https"
+        client._default_netloc = "cal.example.com"
+        with patch("chronos.caldav.session.Client", return_value=client):
+            session = CalDAVHttpSession(
+                url="https://cal.example.com/calendars/work/",
+                authorization=Authorization(basic=("user", "pw")),
+            )
+        client.request.side_effect = [
+            _resp(207, _home_set_body("/calendars/")),
+            _resp(207, _calendars_body(
+                ("/calendars/work/", "Work"),
+                ("/calendars/personal/", "Personal"),
+            )),
+            # Depth:0 probe returns the same /calendars/work/ collection.
+            _resp(207, _calendars_body(("/calendars/work/", "Work"))),
+        ]
+        cals = session.list_calendars("https://cal.example.com/principal/")
+        self.assertEqual(len(cals), 2)
+        self.assertEqual(
+            sorted(c.url for c in cals),
+            [
+                "https://cal.example.com/calendars/personal/",
+                "https://cal.example.com/calendars/work/",
+            ],
+        )
 
 
 class GetCtagTest(unittest.TestCase):

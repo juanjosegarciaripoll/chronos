@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS calendar_sync_state(
     ctag           TEXT,
     sync_token     TEXT,
     synced_at      TEXT,
+    calendar_url   TEXT,
     PRIMARY KEY (account_name, calendar_name)
 );
 
@@ -149,6 +150,22 @@ _COMPONENT_COLUMNS = (
 )
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply additive migrations the idempotent `CREATE` statements miss.
+
+    `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a
+    column added to the schema after a database was first created has to
+    be back-filled here. Each step is guarded by a column-presence check
+    so re-running is a no-op.
+    """
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(calendar_sync_state)").fetchall()
+    }
+    if "calendar_url" not in cols:
+        conn.execute("ALTER TABLE calendar_sync_state ADD COLUMN calendar_url TEXT")
+
+
 class SqliteIndexRepository:
     """SQLite-backed projection of every component in the local mirror.
 
@@ -176,7 +193,9 @@ class SqliteIndexRepository:
         # Open + run the schema once on the constructing thread; the
         # `CREATE … IF NOT EXISTS` statements are idempotent, so
         # connections opened later don't need to re-run them.
-        self._open_connection().executescript(_SCHEMA)
+        conn = self._open_connection()
+        conn.executescript(_SCHEMA)
+        _migrate_schema(conn)
 
     def _open_connection(self) -> sqlite3.Connection:
         existing = cast(sqlite3.Connection | None, getattr(self._local, "conn", None))
@@ -388,7 +407,8 @@ class SqliteIndexRepository:
     def get_sync_state(self, calendar: CalendarRef) -> SyncState | None:
         with self.connection() as conn:
             cursor = conn.execute(
-                "SELECT ctag, sync_token, synced_at FROM calendar_sync_state "
+                "SELECT ctag, sync_token, synced_at, calendar_url "
+                "FROM calendar_sync_state "
                 "WHERE account_name = ? AND calendar_name = ?",
                 (calendar.account_name, calendar.calendar_name),
             )
@@ -400,24 +420,28 @@ class SqliteIndexRepository:
             ctag=_opt_str(row[0]),
             sync_token=_opt_str(row[1]),
             synced_at=_sql_to_datetime(_opt_str(row[2])),
+            calendar_url=_opt_str(row[3]),
         )
 
     def set_sync_state(self, state: SyncState) -> None:
         with self.connection() as conn:
             conn.execute(
                 "INSERT INTO calendar_sync_state "
-                "(account_name, calendar_name, ctag, sync_token, synced_at) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "(account_name, calendar_name, ctag, sync_token, synced_at, "
+                "calendar_url) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(account_name, calendar_name) DO UPDATE SET "
                 "ctag = excluded.ctag, "
                 "sync_token = excluded.sync_token, "
-                "synced_at = excluded.synced_at",
+                "synced_at = excluded.synced_at, "
+                "calendar_url = excluded.calendar_url",
                 (
                     state.calendar.account_name,
                     state.calendar.calendar_name,
                     state.ctag,
                     state.sync_token,
                     _datetime_to_sql(state.synced_at),
+                    state.calendar_url,
                 ),
             )
 
@@ -433,6 +457,21 @@ class SqliteIndexRepository:
         """
         with self.connection() as conn:
             cursor = conn.execute("DELETE FROM calendar_sync_state")
+            return cursor.rowcount or 0
+
+    def clear_account_sync_state(self, account_name: str) -> int:
+        """Drop the sync tokens for a single account's calendars.
+
+        The account-scoped counterpart to `clear_all_sync_state`, used by
+        `chronos sync --account NAME --force` so isolating one account for
+        debugging doesn't put every other account back on the slow path.
+        Returns the number of rows removed.
+        """
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM calendar_sync_state WHERE account_name = ?",
+                (account_name,),
+            )
             return cursor.rowcount or 0
 
     def set_alarms(

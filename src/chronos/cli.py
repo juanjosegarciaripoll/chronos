@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -75,7 +76,7 @@ from chronos.protocols import (
     IndexRepository,
     MirrorRepository,
 )
-from chronos.services import format_report, run_doctor
+from chronos.services import ProgressFn, format_report, run_doctor
 from chronos.storage import VdirMirrorRepository
 from chronos.sync import SyncCancelled, sync_account
 
@@ -417,6 +418,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "sync", help="Synchronise configured accounts with their servers."
     )
     sync_p.add_argument(
+        "--account",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Sync only the named account instead of every configured "
+            "account. Useful for isolating one account while debugging."
+        ),
+    )
+    sync_p.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -484,6 +494,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Also authenticate and run redacted CalDAV discovery/query probes. "
             "Reports counts only; does not print tokens, hrefs, or event bodies."
+        ),
+    )
+    doctor_p.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Stream live, timestamped step progress to stderr and raise log "
+            "level to DEBUG. Use with --remote to see which step a stalled "
+            "probe is blocked on."
         ),
     )
 
@@ -658,7 +677,11 @@ def _dispatch(
 ) -> int:
     command = str(args.command) if args.command is not None else "tui"
     if command == "sync":
-        return cmd_sync(ctx, force=bool(getattr(args, "force", False)))
+        return cmd_sync(
+            ctx,
+            force=bool(getattr(args, "force", False)),
+            account=getattr(args, "account", None),
+        )
     if command == "reset":
         return cmd_reset(
             ctx,
@@ -697,7 +720,11 @@ def _dispatch(
     if command == "rm":
         return cmd_rm(ctx, uid=args.uid)
     if command == "doctor":
-        return cmd_doctor(ctx, remote=bool(getattr(args, "remote", False)))
+        return cmd_doctor(
+            ctx,
+            remote=bool(getattr(args, "remote", False)),
+            debug=bool(getattr(args, "debug", False)),
+        )
     if command == "tui":
         return cmd_tui(ctx, startup_ics_path=getattr(args, "import_ics", None))
     if command == "mcp":
@@ -791,25 +818,44 @@ def _dispatch_oauth(
 # Commands --------------------------------------------------------------------
 
 
-def cmd_sync(ctx: CliContext, *, force: bool = False) -> int:
+def cmd_sync(
+    ctx: CliContext, *, force: bool = False, account: str | None = None
+) -> int:
+    accounts = ctx.config.accounts
+    if account is not None:
+        accounts = tuple(a for a in accounts if a.name == account)
+        if not accounts:
+            known = ", ".join(a.name for a in ctx.config.accounts) or "(none)"
+            ctx.stderr.write(
+                f"sync: no account named {account!r}; "
+                f"configured accounts: {known}\n"
+            )
+            return 2
     try:
         with acquire_sync_lock(sync_lock_path()):
             if force:
-                cleared = ctx.index.clear_all_sync_state()
+                if account is not None:
+                    cleared = ctx.index.clear_account_sync_state(account)
+                    scope = f"account {account!r}"
+                else:
+                    cleared = ctx.index.clear_all_sync_state()
+                    scope = "every calendar"
                 ctx.stdout.write(
                     f"--force: cleared sync state for {cleared} calendar(s); "
-                    "every calendar will re-enter the slow path.\n"
+                    f"{scope} will re-enter the slow path.\n"
                 )
-            return _cmd_sync_locked(ctx)
+            return _cmd_sync_locked(ctx, accounts=accounts)
     except SyncLockError as exc:
         ctx.stderr.write(f"{exc}\n")
         return 2
 
 
-def _cmd_sync_locked(ctx: CliContext) -> int:
+def _cmd_sync_locked(
+    ctx: CliContext, *, accounts: Sequence[AccountConfig]
+) -> int:
     factory = ctx.session_factory or _default_session_factory
     fails = 0
-    for account in ctx.config.accounts:
+    for account in accounts:
         try:
             auth = ctx.creds.build_auth(account)
         except CredentialResolutionError as exc:
@@ -1098,19 +1144,46 @@ def cmd_rm(ctx: CliContext, *, uid: str) -> int:
     return 0
 
 
-def cmd_doctor(ctx: CliContext, *, remote: bool = False) -> int:
+def cmd_doctor(
+    ctx: CliContext, *, remote: bool = False, debug: bool = False
+) -> int:
     session_factory = (
         (ctx.session_factory or _default_session_factory) if remote else None
     )
+    progress: ProgressFn | None = None
+    if debug:
+        # Raise the root logger to DEBUG so per-request HTTP/CalDAV logs
+        # surface, and stream live step progress to stderr so a stalled
+        # probe is attributable to the last line printed.
+        logging.getLogger().setLevel(logging.DEBUG)
+        progress = _doctor_progress(ctx.stderr)
     report = run_doctor(
         config=ctx.config,
         mirror=ctx.mirror,
         index=ctx.index,
         creds=ctx.creds,
         session_factory=session_factory,
+        progress=progress,
     )
     ctx.stdout.write(format_report(report))
     return report.exit_code
+
+
+def _doctor_progress(stderr: TextIO) -> ProgressFn:
+    """Stderr progress sink that timestamps each step and flushes eagerly.
+
+    Eager flush matters: the value of `--debug` is seeing which step a
+    hung probe is blocked on, which only works if the line is on screen
+    before the blocking call returns.
+    """
+    start = time.monotonic()
+
+    def emit(message: str) -> None:
+        elapsed = time.monotonic() - start
+        stderr.write(f"[doctor +{elapsed:6.1f}s] {message}\n")
+        stderr.flush()
+
+    return emit
 
 
 def cmd_mcp(ctx: CliContext) -> int:

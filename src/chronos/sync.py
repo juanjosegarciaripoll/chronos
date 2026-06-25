@@ -217,6 +217,26 @@ def _sync_calendar(
     """
     calendar_ref = CalendarRef(account.name, calendar.calendar_name)
     prior_state = index.get_sync_state(calendar_ref)
+    # C-4: the stored ctag/sync_token belong to a specific collection URL.
+    # If the account's CalDAV address (or the discovered calendar URL)
+    # changed, those tokens are meaningless against the new server —
+    # trusting them risks taking the fast/medium path and ingesting
+    # nothing. Drop the prior state to force a full slow-path resync,
+    # exactly as `sync --force` does. Local-pending rows (href IS NULL)
+    # are keyed by UID, not URL, so they survive and re-upload.
+    if (
+        prior_state is not None
+        and prior_state.calendar_url is not None
+        and prior_state.calendar_url != calendar.url
+    ):
+        logger.warning(
+            "[%s] %s calendar URL changed (%s -> %s); forcing full resync",
+            account.name,
+            calendar.calendar_name,
+            prior_state.calendar_url,
+            calendar.url,
+        )
+        prior_state = None
     # Use the CTag pre-fetched during list_calendars (saves one PROPFIND per
     # calendar). Falls back to a direct get_ctag call when not supplied.
     if server_ctag is None:
@@ -329,6 +349,7 @@ def _sync_calendar(
             ctag=final_ctag,
             sync_token=new_sync_token,
             synced_at=now,
+            calendar_url=calendar.url,
         )
     )
 

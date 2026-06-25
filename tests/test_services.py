@@ -143,6 +143,54 @@ class RemoteCalDAVCheckTest(DoctorTestCase):
         self.assertIn("multiget returned 1 body", sample[0].message)
         self.assertIn("parsed 1 event component", sample[0].message)
 
+    def test_progress_callback_reports_each_step_in_order(self) -> None:
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+        session.put_resource(
+            calendar_url="https://cal.example.com/work/",
+            href="https://cal.example.com/work/a.ics",
+            ics=corpus.simple_event(),
+            etag="etag-a",
+        )
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return session
+
+        steps: list[str] = []
+        run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+            progress=steps.append,
+        )
+
+        joined = "\n".join(steps)
+        self.assertIn("resolving credentials", joined)
+        self.assertIn("discovering principal", joined)
+        self.assertIn("listing calendars", joined)
+        self.assertIn("calendar-query", joined)
+        self.assertIn("multiget sample", joined)
+        self.assertEqual(steps[-1], "personal: remote probe complete")
+
+    def test_progress_defaults_to_noop_when_omitted(self) -> None:
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return session
+
+        # No progress argument: must run without raising.
+        report = run_doctor(
+            config=_config(_account()),
+            mirror=self.mirror,
+            index=self.index,
+            creds=self.creds,
+            session_factory=factory,
+        )
+        self.assertTrue(report.results)
+
     def test_warns_when_authorized_calendar_query_is_empty(self) -> None:
         session = FakeCalDAVSession()
         session.add_calendar(url="https://cal.example.com/work/", name="work")

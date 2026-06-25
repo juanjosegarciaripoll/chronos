@@ -26,6 +26,11 @@ from chronos.protocols import (
 )
 
 SessionFactory = Callable[[AccountConfig, Authorization], CalDAVSession]
+
+# Live progress sink for the remote probe. Each call is a single short
+# step description, emitted *before* a potentially-blocking network call
+# so a stall is attributable to the last line printed.
+ProgressFn = Callable[[str], None]
 _REMOTE_MULTIGET_SAMPLE_LIMIT = 20
 
 
@@ -69,14 +74,22 @@ def run_doctor(
     index: IndexRepository,
     creds: CredentialsProvider,
     session_factory: SessionFactory | None = None,
+    progress: ProgressFn | None = None,
 ) -> DoctorReport:
+    emit = progress if progress is not None else _noop_progress
     results: list[DiagnosticResult] = []
     for account in config.accounts:
         results.append(_check_credentials(account, creds))
         results.extend(_check_mirror_integrity(account, mirror, index))
         if session_factory is not None:
-            results.extend(_check_remote_caldav(account, creds, index, session_factory))
+            results.extend(
+                _check_remote_caldav(account, creds, index, session_factory, emit)
+            )
     return DoctorReport(results=tuple(results))
+
+
+def _noop_progress(_message: str) -> None:
+    return None
 
 
 def _check_credentials(
@@ -178,8 +191,10 @@ def _check_remote_caldav(
     creds: CredentialsProvider,
     index: IndexRepository,
     session_factory: SessionFactory,
+    progress: ProgressFn = _noop_progress,
 ) -> list[DiagnosticResult]:
     """Probe remote CalDAV discovery without logging secrets or event bodies."""
+    progress(f"{account.name}: resolving credentials")
     try:
         auth = creds.build_auth(account)
     except CredentialResolutionError as exc:
@@ -193,8 +208,11 @@ def _check_remote_caldav(
         ]
 
     try:
+        progress(f"{account.name}: opening session")
         session = session_factory(account, auth)
+        progress(f"{account.name}: discovering principal (PROPFIND)")
         principal = session.discover_principal()
+        progress(f"{account.name}: listing calendars (PROPFIND Depth:1)")
         calendars = tuple(session.list_calendars(principal))
     except Exception as exc:
         return [
@@ -226,9 +244,14 @@ def _check_remote_caldav(
         )
     ]
 
+    progress(
+        f"{account.name}: discovered {len(calendars)} calendar(s), "
+        f"{len(scoped)} scoped"
+    )
     for calendar in scoped:
         scope = f"{account.name}/{calendar.name}"
         try:
+            progress(f"{scope}: calendar-query (REPORT)")
             remote_resources = tuple(session.calendar_query(calendar.url))
         except Exception as exc:
             results.append(
@@ -260,6 +283,8 @@ def _check_remote_caldav(
             )
         )
         if remote_resources:
+            sample_size = min(len(remote_resources), _REMOTE_MULTIGET_SAMPLE_LIMIT)
+            progress(f"{scope}: multiget sample of {sample_size} resource(s) (REPORT)")
             results.append(
                 _check_remote_multiget_sample(
                     session=session,
@@ -268,6 +293,8 @@ def _check_remote_caldav(
                     remote_resources=remote_resources,
                 )
             )
+
+    progress(f"{account.name}: remote probe complete")
 
     if auth.on_commit is not None:
         auth.on_commit()
@@ -409,6 +436,7 @@ __all__ = [
     "DiagnosticResult",
     "DiagnosticStatus",
     "DoctorReport",
+    "ProgressFn",
     "SessionFactory",
     "format_report",
     "run_doctor",
