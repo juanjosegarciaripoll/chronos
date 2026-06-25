@@ -555,6 +555,18 @@ class CalendarQueryTest(unittest.TestCase):
         self.assertEqual(method, "REPORT")
         self.assertEqual(headers["Depth"], "1")
 
+    def test_filter_names_concrete_component_types(self) -> None:
+        # Regression: an empty `<comp-filter name="VCALENDAR"/>` is valid
+        # per RFC 4791 but makes SOGo return an empty multistatus. The
+        # VCALENDAR filter must name the concrete VEVENT/VTODO components
+        # so SOGo (calendario.csic.es) actually returns resources.
+        client = _client()
+        client.request.return_value = _resp(207, _calendar_query_response())
+        calendar_query(client, "https://cal.example.com/work/")
+        body = client.request.call_args[1]["body"].decode("utf-8")
+        self.assertIn('name="VEVENT"', body)
+        self.assertIn('name="VTODO"', body)
+
     def test_404_raises_not_found(self) -> None:
         client = _client()
         client.request.side_effect = _err(404)

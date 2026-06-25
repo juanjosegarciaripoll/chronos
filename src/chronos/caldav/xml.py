@@ -35,11 +35,23 @@ _CTAG_PROPFIND_BODY = (
 ).encode("utf-8")
 
 # calendar-query REPORT (RFC 4791 §7.8) asking only for `getetag`.
+#
+# The VCALENDAR comp-filter carries nested VEVENT and VTODO comp-filters
+# rather than being left empty. An empty `<c:comp-filter name="VCALENDAR"/>`
+# is valid per the RFC and matches every component on Google/Radicale, but
+# SOGo returns an empty multistatus for it -- it only honors the query when
+# the enclosing VCALENDAR filter names the concrete component type(s). The
+# two sibling filters are ORed by the server, so this returns resources
+# holding events or todos, which is exactly the set chronos ingests
+# (ComponentKind has only VEVENT/VTODO). Verified against calendario.csic.es.
 _CALENDAR_QUERY_BODY = (
     '<?xml version="1.0" encoding="utf-8" ?>'
     '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
     "<d:prop><d:getetag/></d:prop>"
-    '<c:filter><c:comp-filter name="VCALENDAR"/></c:filter>'
+    '<c:filter><c:comp-filter name="VCALENDAR">'
+    '<c:comp-filter name="VEVENT"/>'
+    '<c:comp-filter name="VTODO"/>'
+    "</c:comp-filter></c:filter>"
     "</c:calendar-query>"
 ).encode("utf-8")
 
