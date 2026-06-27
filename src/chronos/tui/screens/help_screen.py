@@ -21,8 +21,9 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset(
             {
                 "view_agenda",
-                "view_day",
-                "view_grid",
+                # `select_span(1)` … `select_span(7)` — the `1`–`7`
+                # timeline-width keys all share this action base name.
+                "select_span",
             }
         ),
     ),
@@ -207,8 +208,12 @@ def _binding_row(binding: BindingType) -> _Row | None:
 
 
 def _section_for(action: str) -> str:
+    # Parametrized actions arrive as `name(arg)` (e.g. `select_span(3)`);
+    # bucket them by their base name so one section entry covers the
+    # whole family.
+    base = action.split("(", 1)[0]
     for title, actions in _SECTIONS:
-        if action in actions:
+        if action in actions or base in actions:
             return title
     return "Other"
 

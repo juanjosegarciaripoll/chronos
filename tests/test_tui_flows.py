@@ -884,26 +884,27 @@ class StartupIcsModalTest(TuiFlowTestCase):
 
 
 class ViewSwitchTest(TuiFlowTestCase):
-    """`Ctrl-A`, `Ctrl-D`, `Ctrl-G` flip between the three top-level views.
-    Inside the agenda view, `d` / `w` / `m` flip the agenda window
-    (day / week / month) without leaving agenda."""
+    """`a` selects the agenda; `1`–`7` select the timeline (`1` → Day,
+    `2`–`7` → that-many-day Grid). Inside the agenda view, `d` / `w` /
+    `m` flip the agenda window (day / week / month) without leaving
+    agenda."""
 
-    async def test_ctrl_keys_switch_between_top_level_views(self) -> None:
+    async def test_number_keys_switch_between_top_level_views(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             assert isinstance(pilot.app.screen, MainScreen)
 
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.DAY)
 
-            await pilot.press("ctrl+g")
+            await pilot.press("4")
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.GRID)
 
-            await pilot.press("ctrl+a")
+            await pilot.press("a")
             await pilot.pause()
             self.assertEqual(pilot.app.screen._view, ViewKind.AGENDA)
 
@@ -914,7 +915,7 @@ class ViewSwitchTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+a")
+            await pilot.press("a")
             await pilot.pause()
 
             await pilot.press("d")
@@ -938,7 +939,7 @@ class ViewSwitchTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")  # Day view
+            await pilot.press("1")  # Day view
             await pilot.pause()
             initial_window = screen._agenda_window
             await pilot.press("m")
@@ -950,15 +951,15 @@ class ViewSwitchTest(TuiFlowTestCase):
 
 
 class QuitBindingTest(TuiFlowTestCase):
-    async def test_q_exits_the_app(self) -> None:
+    async def test_capital_q_exits_the_app(self) -> None:
         # Regression: Textual's screen-binding dispatch does not bubble
-        # missing actions to the App, so binding "q" to "quit" without
+        # missing actions to the App, so binding "Q" to "quit" without
         # MainScreen.action_quit silently dropped the press.
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("q")
+            await pilot.press("Q")
             await pilot.pause()
             self.assertTrue(app._exit)
 
@@ -987,7 +988,7 @@ class TodayKeyTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             screen._viewed_date = date(1999, 1, 1)
             screen.refresh_view()
@@ -1010,7 +1011,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("n")
@@ -1024,7 +1025,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("p")
@@ -1038,7 +1039,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+g")
+            await pilot.press("4")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("N")
@@ -1054,7 +1055,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+g")
+            await pilot.press("4")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("P")
@@ -1072,7 +1073,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             start = screen._viewed_date
             await pilot.press("N")
@@ -1086,7 +1087,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+a")  # Agenda
+            await pilot.press("a")  # Agenda
             await pilot.pause()
             await pilot.press("d")  # Day sub-window
             await pilot.pause()
@@ -1102,7 +1103,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+a")
+            await pilot.press("a")
             await pilot.pause()
             await pilot.press("w")  # Week sub-window
             await pilot.pause()
@@ -1118,7 +1119,7 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+a")
+            await pilot.press("a")
             await pilot.pause()
             await pilot.press("m")  # Month sub-window
             await pilot.pause()
@@ -1172,7 +1173,7 @@ class DetailPaneTracksCursorTest(TuiFlowTestCase):
             assert isinstance(screen, MainScreen)
             # Park the agenda anchor over the seeded May events
             # (the default WEEK around `NOW` is empty otherwise).
-            await pilot.press("ctrl+a")
+            await pilot.press("a")
             await pilot.pause()
             await pilot.press("m")  # Month window catches more rows
             await pilot.pause()
@@ -1212,9 +1213,9 @@ class NewEventFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            # `+` opens the new-event editor. (Was `n` before the
-            # keymap reshuffle freed `n` for next-day navigation.)
-            await pilot.press("plus")
+            # `c` opens the new-event editor — mirrors Pony's compose
+            # key so "create" is the same letter in both apps.
+            await pilot.press("c")
             await pilot.pause()
             assert isinstance(pilot.app.screen, EventEditScreen)
             edit = pilot.app.screen
@@ -1373,7 +1374,7 @@ class DeleteFlowTest(TuiFlowTestCase):
             assert isinstance(screen, MainScreen)
             # Agenda Month window over the seeded May events (the
             # default WEEK around `NOW` is empty).
-            await pilot.press("ctrl+a")
+            await pilot.press("a")
             await pilot.pause()
             await pilot.press("m")
             await pilot.pause()
@@ -1425,13 +1426,14 @@ class HelpScreenTest(TuiFlowTestCase):
                 "Tools",
             ):
                 self.assertIn(section, text, section)
-            # And a sample of the bindings that belong to each.
-            for fragment in ("Agenda", "Day", "Grid", "Delete", "Help", "Quit"):
+            # And a sample of the bindings that belong to each. The
+            # timeline spans render as "1 day" … "7 days" under Views.
+            for fragment in ("Agenda", "1 day", "7 days", "Delete", "Help", "Quit"):
                 self.assertIn(fragment, text, fragment)
-            # Aliases (shift+t, shift+n, shift+p, shift+d) must NOT
-            # show up; otherwise the help text is twice as long and
+            # Aliases (shift+n, shift+p, shift+d, shift+c, shift+q) must
+            # NOT show up; otherwise the help text is twice as long and
             # reads as duplicates of the same shortcut.
-            for alias in ("shift+n", "shift+p", "shift+d"):
+            for alias in ("shift+n", "shift+p", "shift+d", "shift+c", "shift+q"):
                 self.assertNotIn(alias, text, alias)
 
     async def test_escape_dismisses_help_screen(self) -> None:
@@ -1499,7 +1501,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("s")
+            await pilot.press("g")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1528,7 +1530,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("s")
+            await pilot.press("g")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1541,7 +1543,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("s")
+            await pilot.press("g")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1571,7 +1573,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("s")
+            await pilot.press("g")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1630,7 +1632,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("s")
+            await pilot.press("g")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1681,7 +1683,7 @@ class EditScreenValidationTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("plus")
+            await pilot.press("c")
             await pilot.pause()
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
@@ -1697,7 +1699,7 @@ class EditScreenValidationTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("plus")
+            await pilot.press("c")
             await pilot.pause()
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
@@ -1712,7 +1714,7 @@ class EditScreenValidationTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("plus")
+            await pilot.press("c")
             await pilot.pause()
             await pilot.press("escape")
             await pilot.pause()
@@ -2034,7 +2036,7 @@ class CalendarPanelToggleTest(TuiFlowTestCase):
             assert isinstance(screen, MainScreen)
             self.assertFalse(screen.query_one(CalendarPanel).display)
 
-    async def test_c_key_toggles_panel_visibility(self) -> None:
+    async def test_capital_c_key_toggles_panel_visibility(self) -> None:
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
@@ -2046,12 +2048,12 @@ class CalendarPanelToggleTest(TuiFlowTestCase):
             panel = screen.query_one(CalendarPanel)
             self.assertFalse(panel.display)
 
-            await pilot.press("c")
+            await pilot.press("C")
             await pilot.pause()
             self.assertTrue(panel.display)
             self.assertTrue(panel.has_focus)
 
-            await pilot.press("c")
+            await pilot.press("C")
             await pilot.pause()
             self.assertFalse(panel.display)
 
@@ -2068,7 +2070,7 @@ class CalendarPanelToggleTest(TuiFlowTestCase):
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
             panel = screen.query_one(CalendarPanel)
-            await pilot.press("c")
+            await pilot.press("C")
             await pilot.pause()
             # Move into the tree and pick the first leaf (work calendar).
             await pilot.press("down")  # account node
@@ -2593,7 +2595,7 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             timeline = screen.query_one(TimelineGrid)
             event_list = screen.query_one(EventList)
@@ -2627,7 +2629,7 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             timeline = screen.query_one(TimelineGrid)
             # Drive the widget directly with our two all-day rows so the
@@ -2674,7 +2676,7 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             timeline = screen.query_one(TimelineGrid)
             timeline.show_days([(day, rows)], today=day)
@@ -2708,7 +2710,7 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+g")
+            await pilot.press("4")
             await pilot.pause()
             timeline = screen.query_one(TimelineGrid)
             # Time column + 4 day columns = 5 columns total.
@@ -2727,7 +2729,7 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("ctrl+d")
+            await pilot.press("1")
             await pilot.pause()
             await pilot.pause()  # call_after_refresh for focus needs a tick
             screen._viewed_date = date(2026, 5, 1)  # has the simple_event seed

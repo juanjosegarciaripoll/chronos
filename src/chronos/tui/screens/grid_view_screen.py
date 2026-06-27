@@ -11,10 +11,9 @@ from chronos.tui.views import (
     gather_occurrences,
 )
 
-# Default chunk size for the multi-day grid. Phase 4 swaps this out
-# for a terminal-width-aware choice (3 when narrow, 4 when wide); for
-# now Phase 2 ships the grid view as a flat list, so the chunk size
-# only governs how many days `N`/`P` advance at once.
+# Default multi-day grid width, used the first time the grid is opened.
+# The user then picks any width from 2 to 7 days live with the `2`–`7`
+# keys (the `1` key drops to the dedicated single-day view).
 DEFAULT_GRID_DAYS = 4
 
 

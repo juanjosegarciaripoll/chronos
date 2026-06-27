@@ -95,8 +95,9 @@ class MainScreen(Screen[None]):
         # at-a-glance horizon for most users.
         self._agenda_window: AgendaWindow = AgendaWindow.WEEK
         self._viewed_date: date = date(2026, 4, 25)  # rebound in on_mount
-        # Multi-day grid chunk size. Phase 4 will swap this for a
-        # terminal-width-aware choice (3 when narrow, 4 when wide).
+        # Multi-day grid width, chosen live with the `2`–`7` keys (the
+        # `1` key drops to the single-day view instead). Seeded with
+        # `DEFAULT_GRID_DAYS` for the first time the grid is opened.
         self._grid_days: int = DEFAULT_GRID_DAYS
         self._selection = CalendarSelection(refs=frozenset())
         self._last_rows: tuple[OccurrenceRow, ...] = ()
@@ -120,7 +121,7 @@ class MainScreen(Screen[None]):
         # The calendar tree is hidden by default — the agenda already
         # shows everything, and a permanent left-hand panel chews up
         # horizontal real estate that the timeline views need. Pressing
-        # `c` reveals it.
+        # `C` reveals it.
         panel.display = False
         # Render in AGENDA first so EventList is visible when focus is set.
         # Calling focus() on a hidden widget is a silent no-op in Textual,
@@ -169,11 +170,18 @@ class MainScreen(Screen[None]):
     def action_view_agenda(self) -> None:
         self._set_view(ViewKind.AGENDA)
 
-    def action_view_day(self) -> None:
-        self._set_view(ViewKind.DAY)
+    def action_select_span(self, days: int) -> None:
+        """Show a `days`-wide timeline (bound to the `1`–`7` keys).
 
-    def action_view_grid(self) -> None:
-        self._set_view(ViewKind.GRID)
+        `1` is the dedicated single-day view; `2`–`7` size the
+        multi-day grid. The chosen width sticks, so the date-axis
+        `N`/`P` chunk navigation advances by it.
+        """
+        if days <= 1:
+            self._set_view(ViewKind.DAY)
+        else:
+            self._grid_days = days
+            self._set_view(ViewKind.GRID)
 
     # Agenda window tuners ----------------------------------------------------
 

@@ -31,15 +31,16 @@ DEFAULT_AGENDA_DAYS = 14
 
 
 class ViewKind(StrEnum):
-    """Top-level view modes the user toggles via Ctrl-A / Ctrl-D / Ctrl-G.
+    """Top-level view modes. `a` selects AGENDA; the `1`–`7` number
+    keys select the timeline (`1` → DAY, `2`–`7` → GRID of that width).
 
     Older versions had separate Day/Week/Month/Todos views. Those
     collapsed into:
 
     - `AGENDA` — flat list, window controlled by `AgendaWindow`
-    - `DAY`    — single-day timeline grid
-    - `GRID`   — multi-day timeline grid (3 or 4 days, terminal-width
-                 dependent)
+    - `DAY`    — single-day timeline grid (the `1` key)
+    - `GRID`   — multi-day timeline grid, 2–7 days wide (the `2`–`7`
+                 keys)
 
     VTodos are rendered inline as full-day items in every view; there
     is no longer a dedicated Todos screen.
