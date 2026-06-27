@@ -280,9 +280,7 @@ class RemoteCalDAVCheckTest(DoctorTestCase):
             def calendar_multiget(
                 self, calendar_url: str, _hrefs: Sequence[str]
             ) -> Sequence[tuple[str, str, bytes]]:
-                raise CalDAVError(
-                    f"REPORT {calendar_url}?token=secret-token: HTTP 500"
-                )
+                raise CalDAVError(f"REPORT {calendar_url}?token=secret-token: HTTP 500")
 
         session = BrokenMultigetSession()
         session.add_calendar(url="https://cal.example.com/work/", name="work")

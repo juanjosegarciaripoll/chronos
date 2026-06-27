@@ -144,9 +144,7 @@ def _parse_ctag(body: bytes) -> str | None:
     return value or None
 
 
-def _parse_calendar_query(
-    body: bytes, *, base_url: str
-) -> tuple[tuple[str, str], ...]:
+def _parse_calendar_query(body: bytes, *, base_url: str) -> tuple[tuple[str, str], ...]:
     """Parse a calendar-query REPORT multistatus into (href, etag) pairs.
 
     Hrefs are returned as absolute URLs using `base_url`'s scheme+host
@@ -182,9 +180,7 @@ def _parse_calendar_query(
     return tuple(out)
 
 
-def _parse_multiget(
-    body: bytes, *, base_url: str
-) -> list[tuple[str, str, bytes]]:
+def _parse_multiget(body: bytes, *, base_url: str) -> list[tuple[str, str, bytes]]:
     """Parse a calendar-multiget REPORT multistatus into (href, etag, ics).
 
     Skips responses with only non-2xx propstat.
@@ -220,9 +216,7 @@ def _parse_multiget(
             if data_elem is not None and data_elem.text:
                 # XML 1.0 §2.11 line-ending normalization strips CR
                 # from CRLF; iCalendar (RFC 5545 §3.1) requires CRLF.
-                normalized = data_elem.text.replace("\r\n", "\n").replace(
-                    "\n", "\r\n"
-                )
+                normalized = data_elem.text.replace("\r\n", "\n").replace("\n", "\r\n")
                 ics = normalized.encode("utf-8")
         if ics is None:
             continue
@@ -372,9 +366,7 @@ def _parse_sync_token_propfind(body: bytes) -> str | None:
     return value or None
 
 
-def _parse_current_user_principal(
-    body: bytes, *, base_url: str
-) -> str | None:
+def _parse_current_user_principal(body: bytes, *, base_url: str) -> str | None:
     """Extract `{DAV:}current-user-principal/{DAV:}href` from a PROPFIND response."""
     if not body:
         return None
@@ -388,17 +380,13 @@ def _parse_current_user_principal(
         status_elem = propstat.find("d:status", ns)
         if status_elem is None or " 200 " not in (status_elem.text or ""):
             continue
-        href_elem = propstat.find(
-            "d:prop/d:current-user-principal/d:href", ns
-        )
+        href_elem = propstat.find("d:prop/d:current-user-principal/d:href", ns)
         if href_elem is not None and href_elem.text:
             return _absolute_href(href_elem.text.strip(), base_url=base_url)
     return None
 
 
-def _parse_calendar_home_set(
-    body: bytes, *, base_url: str
-) -> str | None:
+def _parse_calendar_home_set(body: bytes, *, base_url: str) -> str | None:
     """Extract `{caldav}calendar-home-set/{DAV:}href` from a PROPFIND response."""
     if not body:
         return None
@@ -411,9 +399,7 @@ def _parse_calendar_home_set(
         status_elem = propstat.find("d:status", ns)
         if status_elem is None or " 200 " not in (status_elem.text or ""):
             continue
-        href_elem = propstat.find(
-            "d:prop/c:calendar-home-set/d:href", ns
-        )
+        href_elem = propstat.find("d:prop/c:calendar-home-set/d:href", ns)
         if href_elem is not None and href_elem.text:
             return _absolute_href(href_elem.text.strip(), base_url=base_url)
     return None

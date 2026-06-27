@@ -411,9 +411,7 @@ def _cancel_instances(
             if row.ref.recurrence_id in cancelled_rids:
                 index.delete_component(row.ref)
                 continue
-            flags = (
-                row.local_flags | {LOCAL_FLAG_DIRTY} if synced else row.local_flags
-            )
+            flags = row.local_flags | {LOCAL_FLAG_DIRTY} if synced else row.local_flags
             index.upsert_component(
                 dataclasses.replace(row, raw_ics=new_ics, local_flags=flags)
             )

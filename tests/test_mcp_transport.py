@@ -179,8 +179,8 @@ class StartTcpServerTest(TcpTestCase):
 
             with patch("tinymcp.transport.run_stdio_bridge", _capture_bridge):
                 await run_mcp_stdio(
-                index=self.index, mirror=self.mirror, state_file=self.state_file
-            )
+                    index=self.index, mirror=self.mirror, state_file=self.state_file
+                )
 
             self.assertEqual(bridged_port, state.port)
             self.assertEqual(bridged_token, state.token)

@@ -192,9 +192,7 @@ class TimelineGrid(DataTable[str]):
             return
         for line in range(line_count):
             row_index = self.row_count
-            label: Any = (
-                Text(_ALL_DAY_LABEL, style="italic dim") if line == 0 else ""
-            )
+            label: Any = Text(_ALL_DAY_LABEL, style="italic dim") if line == 0 else ""
             cells: list[Any] = [label]
             for col_idx, col_rows in enumerate(per_column, start=1):
                 if line < len(col_rows):

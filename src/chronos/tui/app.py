@@ -140,9 +140,7 @@ class ChronosApp(App[None]):
     }
     """
 
-    def __init__(
-        self, services: TuiServices, theme_name: str | None = None
-    ) -> None:
+    def __init__(self, services: TuiServices, theme_name: str | None = None) -> None:
         super().__init__()
         self.services = services
         # The CLI resolves a concrete built-in theme (config / --theme /

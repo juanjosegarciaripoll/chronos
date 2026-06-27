@@ -197,10 +197,13 @@ class ListCalendarsTest(unittest.TestCase):
         client.request.side_effect = [
             _resp(207, _principal_propfind_body("/principal/")),
             _resp(207, _home_set_body("/calendars/")),
-            _resp(207, _calendars_body(
-                ("/calendars/work/", "Work"),
-                ("/calendars/personal/", "Personal"),
-            )),
+            _resp(
+                207,
+                _calendars_body(
+                    ("/calendars/work/", "Work"),
+                    ("/calendars/personal/", "Personal"),
+                ),
+            ),
         ]
         session = _session_with_mock_client(client)
         # discover_principal is called first to populate _principal_url
@@ -210,10 +213,13 @@ class ListCalendarsTest(unittest.TestCase):
         # which is not a calendar collection -> empty multistatus).
         client.request.side_effect = [
             _resp(207, _home_set_body("/calendars/")),
-            _resp(207, _calendars_body(
-                ("/calendars/work/", "Work"),
-                ("/calendars/personal/", "Personal"),
-            )),
+            _resp(
+                207,
+                _calendars_body(
+                    ("/calendars/work/", "Work"),
+                    ("/calendars/personal/", "Personal"),
+                ),
+            ),
             _resp(207, b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>'),
         ]
         cals = session.list_calendars("https://caldav.example.com/principal/")
@@ -242,9 +248,12 @@ class ListCalendarsTest(unittest.TestCase):
             # list_calendars on the principal: no calendar collections here
             _resp(207, b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>'),
             # describe_collection Depth:0 on the configured URL: it IS one
-            _resp(207, _calendars_body(
-                ("/SOGo/dav/08930807E/Calendar/personal/", "Personal"),
-            )),
+            _resp(
+                207,
+                _calendars_body(
+                    ("/SOGo/dav/08930807E/Calendar/personal/", "Personal"),
+                ),
+            ),
         ]
         cals = session.list_calendars("https://calendario.csic.es/SOGo/dav/08930807E")
         self.assertEqual(len(cals), 1)
@@ -267,10 +276,13 @@ class ListCalendarsTest(unittest.TestCase):
             )
         client.request.side_effect = [
             _resp(207, _home_set_body("/calendars/")),
-            _resp(207, _calendars_body(
-                ("/calendars/work/", "Work"),
-                ("/calendars/personal/", "Personal"),
-            )),
+            _resp(
+                207,
+                _calendars_body(
+                    ("/calendars/work/", "Work"),
+                    ("/calendars/personal/", "Personal"),
+                ),
+            ),
             # Depth:0 probe returns the same /calendars/work/ collection.
             _resp(207, _calendars_body(("/calendars/work/", "Work"))),
         ]
@@ -554,9 +566,7 @@ class PutTest(unittest.TestCase):
 
     def test_412_becomes_conflict_error(self) -> None:
         client = MagicMock()
-        client.request.side_effect = HttpStatusError(
-            412, b"Precondition Failed", {}
-        )
+        client.request.side_effect = HttpStatusError(412, b"Precondition Failed", {})
         session = _session_with_mock_client(client)
         with self.assertRaises(CalDAVConflictError):
             session.put("https://x/a.ics", b"...", etag="old")

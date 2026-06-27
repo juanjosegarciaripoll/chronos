@@ -268,10 +268,10 @@ def _toml_str(v: str) -> str:
     return (
         '"'
         + v.replace("\\", "\\\\")
-         .replace('"', '\\"')
-         .replace("\n", "\\n")
-         .replace("\r", "\\r")
-         .replace("\t", "\\t")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
         + '"'
     )
 

@@ -47,9 +47,7 @@ class HttpClientTest(unittest.TestCase):
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.port = self.server.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
-        self._thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True
-        )
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self._thread.start()
 
     def tearDown(self) -> None:
@@ -139,10 +137,7 @@ class HttpClientTest(unittest.TestCase):
         auth = Authorization(basic=("user", "pass"))
         with Client(self.base_url, auth=auth) as client:
             client.request("GET", "/")
-        expected = (
-            "Basic "
-            + base64.b64encode(b"user:pass").decode()
-        )
+        expected = "Basic " + base64.b64encode(b"user:pass").decode()
         self.assertEqual(received["auth"], expected)
 
     def test_301_redirect_followed(self) -> None:

@@ -224,6 +224,7 @@ async def run_mcp_stdio(
 
     if state_file is None:
         from chronos.paths import mcp_server_state_path
+
         state_file = mcp_server_state_path()
 
     state = read_state(state_file)
@@ -255,6 +256,7 @@ async def start_tcp_server(
 
     if state_file is None:
         from chronos.paths import mcp_server_state_path
+
         state_file = mcp_server_state_path()
 
     token = secrets.token_hex(32)

@@ -130,8 +130,7 @@ class HelpScreen(Screen[None]):
                 yield Static(_render_column(left_sections), classes="help-column")
                 yield Static(_render_column(right_sections), classes="help-column")
             yield Static(
-                "Ctrl+P: command palette (change theme) · "
-                "Press F1 or Esc to close.",
+                "Ctrl+P: command palette (change theme) · Press F1 or Esc to close.",
                 id="help-hint",
             )
         yield Footer()

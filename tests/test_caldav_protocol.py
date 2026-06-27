@@ -200,9 +200,7 @@ def _sync_collection_response(
         )
     for href in deleted:
         parts.append(
-            b"<d:response>"
-            + f"<d:href>{href}</d:href>".encode()
-            + b"<d:propstat>"
+            b"<d:response>" + f"<d:href>{href}</d:href>".encode() + b"<d:propstat>"
             b"<d:prop/>"
             b"<d:status>HTTP/1.1 404 Not Found</d:status>"
             b"</d:propstat>"
@@ -422,9 +420,7 @@ class DescribeCollectionTest(unittest.TestCase):
     def test_returns_none_on_http_error(self) -> None:
         client = _client()
         client.request.side_effect = _err(404)
-        self.assertIsNone(
-            describe_collection(client, "https://cal.example.com/nope/")
-        )
+        self.assertIsNone(describe_collection(client, "https://cal.example.com/nope/"))
 
 
 # ---------------------------------------------------------------------------
@@ -696,25 +692,19 @@ class CalendarMultigetTest(unittest.TestCase):
         client = _client()
         client.request.side_effect = _err(404)
         with self.assertRaises(CalDAVNotFoundError):
-            calendar_multiget(
-                client, self._CAL, ["https://cal.example.com/cal/a.ics"]
-            )
+            calendar_multiget(client, self._CAL, ["https://cal.example.com/cal/a.ics"])
 
     def test_401_raises_auth_error(self) -> None:
         client = _client()
         client.request.side_effect = _err(401)
         with self.assertRaises(CalDAVAuthError):
-            calendar_multiget(
-                client, self._CAL, ["https://cal.example.com/cal/a.ics"]
-            )
+            calendar_multiget(client, self._CAL, ["https://cal.example.com/cal/a.ics"])
 
     def test_500_raises_caldav_error(self) -> None:
         client = _client()
         client.request.side_effect = _err(500)
         with self.assertRaises(CalDAVError) as ctx:
-            calendar_multiget(
-                client, self._CAL, ["https://cal.example.com/cal/a.ics"]
-            )
+            calendar_multiget(client, self._CAL, ["https://cal.example.com/cal/a.ics"])
         self.assertNotIsInstance(ctx.exception, (CalDAVAuthError, CalDAVNotFoundError))
 
 

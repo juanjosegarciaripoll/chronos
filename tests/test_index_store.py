@@ -216,13 +216,9 @@ class IndexRepositoryTest(unittest.TestCase):
             )
         removed = self.repo.clear_account_sync_state("personal")
         self.assertEqual(removed, 1)
-        self.assertIsNone(
-            self.repo.get_sync_state(CalendarRef("personal", "cal"))
-        )
+        self.assertIsNone(self.repo.get_sync_state(CalendarRef("personal", "cal")))
         # The sibling account's row is left intact.
-        self.assertIsNotNone(
-            self.repo.get_sync_state(CalendarRef("work", "cal"))
-        )
+        self.assertIsNotNone(self.repo.get_sync_state(CalendarRef("work", "cal")))
 
 
 class SchemaMigrationTest(unittest.TestCase):

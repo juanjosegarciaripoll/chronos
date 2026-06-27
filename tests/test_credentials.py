@@ -328,9 +328,7 @@ class InvalidGrantReauthTest(unittest.TestCase):
         fresh_bearer.get_header.return_value = "Bearer new_at"
 
         bearers = [stale_bearer, fresh_bearer]
-        with patch(
-            "chronos.credentials.build_bearer_auth", side_effect=bearers
-        ):
+        with patch("chronos.credentials.build_bearer_auth", side_effect=bearers):
             auth = provider.build_auth(account)
 
         assert auth.bearer_token_fn is not None

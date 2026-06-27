@@ -858,8 +858,7 @@ def cmd_sync(
         if not accounts:
             known = ", ".join(a.name for a in ctx.config.accounts) or "(none)"
             ctx.stderr.write(
-                f"sync: no account named {account!r}; "
-                f"configured accounts: {known}\n"
+                f"sync: no account named {account!r}; configured accounts: {known}\n"
             )
             return 2
     try:
@@ -881,9 +880,7 @@ def cmd_sync(
         return 2
 
 
-def _cmd_sync_locked(
-    ctx: CliContext, *, accounts: Sequence[AccountConfig]
-) -> int:
+def _cmd_sync_locked(ctx: CliContext, *, accounts: Sequence[AccountConfig]) -> int:
     factory = ctx.session_factory or _default_session_factory
     fails = 0
     for account in accounts:
@@ -1175,9 +1172,7 @@ def cmd_rm(ctx: CliContext, *, uid: str) -> int:
     return 0
 
 
-def cmd_doctor(
-    ctx: CliContext, *, remote: bool = False, debug: bool = False
-) -> int:
+def cmd_doctor(ctx: CliContext, *, remote: bool = False, debug: bool = False) -> int:
     session_factory = (
         (ctx.session_factory or _default_session_factory) if remote else None
     )

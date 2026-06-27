@@ -117,12 +117,12 @@ def update_version_files(version: str) -> None:
     rewrite_with_single_match(
         PYPROJECT_PATH,
         PYPROJECT_VERSION_RE,
-        lambda match: f'{match.group(1)}{version}{match.group(3)}',
+        lambda match: f"{match.group(1)}{version}{match.group(3)}",
     )
     rewrite_with_single_match(
         VERSION_PATH,
         MODULE_VERSION_RE,
-        lambda match: f'{match.group(1)}{version}{match.group(3)}',
+        lambda match: f"{match.group(1)}{version}{match.group(3)}",
     )
 
 

@@ -64,9 +64,7 @@ class ParseCalendarQueryTest(unittest.TestCase):
             parts.append(f"<d:href>{href}</d:href>".encode())
             parts.append(b"<d:propstat>")
             if etag:
-                parts.append(
-                    f"<d:prop><d:getetag>{etag}</d:getetag></d:prop>".encode()
-                )
+                parts.append(f"<d:prop><d:getetag>{etag}</d:getetag></d:prop>".encode())
             else:
                 parts.append(b"<d:prop/>")
             parts.append(f"<d:status>HTTP/1.1 {status}</d:status>".encode())
@@ -113,9 +111,7 @@ class ParseCalendarQueryTest(unittest.TestCase):
         self.assertEqual(_parse_calendar_query(b"", base_url=_BASE), ())
 
     def test_malformed_xml_returns_empty(self) -> None:
-        self.assertEqual(
-            _parse_calendar_query(b"not xml <<>>", base_url=_BASE), ()
-        )
+        self.assertEqual(_parse_calendar_query(b"not xml <<>>", base_url=_BASE), ())
 
 
 class ParseMultigetTest(unittest.TestCase):
@@ -272,9 +268,7 @@ class ParseCalendarsPropfindTest(unittest.TestCase):
         self.assertEqual(_parse_calendars_propfind(b"", base_url=_BASE), ())
 
     def test_malformed_body_returns_empty(self) -> None:
-        self.assertEqual(
-            _parse_calendars_propfind(b"not xml <<>>", base_url=_BASE), ()
-        )
+        self.assertEqual(_parse_calendars_propfind(b"not xml <<>>", base_url=_BASE), ())
 
 
 class ParseSyncCollectionTest(unittest.TestCase):
@@ -304,10 +298,7 @@ class ParseSyncCollectionTest(unittest.TestCase):
         self.assertEqual(new_token, "https://example.com/sync/tok-7")
 
     def test_returns_none_token_when_absent(self) -> None:
-        body = (
-            b'<?xml version="1.0"?>'
-            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
-        )
+        body = b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
         _, _, new_token = _parse_sync_collection(body, base_url=_BASE)
         self.assertIsNone(new_token)
 
@@ -318,9 +309,7 @@ class ParseSyncCollectionTest(unittest.TestCase):
         self.assertIsNone(token)
 
     def test_malformed_body_returns_empty(self) -> None:
-        changed, deleted, token = _parse_sync_collection(
-            b"garbage", base_url=_BASE
-        )
+        changed, deleted, token = _parse_sync_collection(b"garbage", base_url=_BASE)
         self.assertEqual(changed, [])
         self.assertIsNone(token)
 
@@ -356,10 +345,7 @@ class ParseSyncTokenPropfindTest(unittest.TestCase):
         )
 
     def test_returns_none_when_absent(self) -> None:
-        body = (
-            b'<?xml version="1.0"?>'
-            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
-        )
+        body = b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
         self.assertIsNone(_parse_sync_token_propfind(body))
 
     def test_empty_body_returns_none(self) -> None:
@@ -421,10 +407,7 @@ class ParseCurrentUserPrincipalTest(unittest.TestCase):
         self.assertTrue(result.endswith("/principal/"))
 
     def test_returns_none_when_absent(self) -> None:
-        body = (
-            b'<?xml version="1.0"?>'
-            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
-        )
+        body = b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
         self.assertIsNone(_parse_current_user_principal(body, base_url=_BASE))
 
     def test_empty_body_returns_none(self) -> None:
@@ -450,10 +433,7 @@ class ParseCalendarHomeSetTest(unittest.TestCase):
         self.assertTrue(result.endswith("/calendars/"))
 
     def test_returns_none_when_absent(self) -> None:
-        body = (
-            b'<?xml version="1.0"?>'
-            b'<d:multistatus xmlns:d="DAV:"></d:multistatus>'
-        )
+        body = b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
         self.assertIsNone(_parse_calendar_home_set(body, base_url=_BASE))
 
     def test_empty_body_returns_none(self) -> None:

@@ -245,8 +245,7 @@ def _check_remote_caldav(
     ]
 
     progress(
-        f"{account.name}: discovered {len(calendars)} calendar(s), "
-        f"{len(scoped)} scoped"
+        f"{account.name}: discovered {len(calendars)} calendar(s), {len(scoped)} scoped"
     )
     for calendar in scoped:
         scope = f"{account.name}/{calendar.name}"
@@ -331,8 +330,7 @@ def _check_remote_multiget_sample(
             scope=scope,
             status=DiagnosticStatus.FAIL,
             message=(
-                f"calendar-multiget failed: {type(exc).__name__}: "
-                f"{_redact(str(exc))}"
+                f"calendar-multiget failed: {type(exc).__name__}: {_redact(str(exc))}"
             ),
         )
 

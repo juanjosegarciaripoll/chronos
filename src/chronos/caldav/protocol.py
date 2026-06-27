@@ -60,13 +60,9 @@ def discover_principal(client: Client, base_path: str = "/") -> str:
         )
     except HttpStatusError as exc:
         if exc.status in (401, 403):
-            raise CalDAVAuthError(
-                f"authentication required at {base_path}"
-            ) from exc
+            raise CalDAVAuthError(f"authentication required at {base_path}") from exc
         if exc.status == 404:
-            raise CalDAVNotFoundError(
-                f"principal not found at {base_path}"
-            ) from exc
+            raise CalDAVNotFoundError(f"principal not found at {base_path}") from exc
         raise CalDAVError(f"PROPFIND {base_path}: HTTP {exc.status}") from exc
 
     principal = _parse_current_user_principal(
@@ -92,9 +88,7 @@ def get_calendar_home_set(client: Client, principal_url: str) -> str:
         )
     except HttpStatusError as exc:
         if exc.status in (401, 403):
-            raise CalDAVAuthError(
-                f"authentication required at {path}"
-            ) from exc
+            raise CalDAVAuthError(f"authentication required at {path}") from exc
         if exc.status == 404:
             raise CalDAVNotFoundError(f"not found: {path}") from exc
         raise CalDAVError(f"PROPFIND {path}: HTTP {exc.status}") from exc
@@ -112,9 +106,7 @@ def get_calendar_home_set(client: Client, principal_url: str) -> str:
     return home_set
 
 
-def list_calendars(
-    client: Client, home_set_url: str
-) -> tuple[RemoteCalendar, ...]:
+def list_calendars(client: Client, home_set_url: str) -> tuple[RemoteCalendar, ...]:
     """PROPFIND Depth:1 on home-set; return RemoteCalendar for each calendar."""
     path = urlsplit(home_set_url).path or "/"
     base_url = _client_base_url(client, path)
@@ -127,9 +119,7 @@ def list_calendars(
         )
     except HttpStatusError as exc:
         if exc.status in (401, 403):
-            raise CalDAVAuthError(
-                f"authentication required at {path}"
-            ) from exc
+            raise CalDAVAuthError(f"authentication required at {path}") from exc
         if exc.status == 404:
             raise CalDAVNotFoundError(f"not found: {path}") from exc
         raise CalDAVError(f"PROPFIND {path}: HTTP {exc.status}") from exc
@@ -204,9 +194,7 @@ def get_sync_token(client: Client, calendar_url: str) -> str | None:
     return _parse_sync_token_propfind(resp.body)
 
 
-def calendar_query(
-    client: Client, calendar_url: str
-) -> tuple[tuple[str, str], ...]:
+def calendar_query(client: Client, calendar_url: str) -> tuple[tuple[str, str], ...]:
     """REPORT calendar-query (etags only)."""
     path = urlsplit(calendar_url).path or "/"
     try:
@@ -262,9 +250,7 @@ def calendar_multiget(
             if exc.status == 404:
                 raise CalDAVNotFoundError(f"not found: {path}") from exc
             if exc.status in (401, 403):
-                raise CalDAVAuthError(
-                    f"authentication required at {path}"
-                ) from exc
+                raise CalDAVAuthError(f"authentication required at {path}") from exc
             raise CalDAVError(f"REPORT {path}: HTTP {exc.status}") from exc
         parsed = _parse_multiget(resp.body, base_url=calendar_url)
         out.extend(parsed)
@@ -277,9 +263,7 @@ def calendar_multiget(
                 fetched,
                 total,
             )
-    logger.debug(
-        "REPORT calendar-multiget %s -> %d body(ies)", calendar_url, len(out)
-    )
+    logger.debug("REPORT calendar-multiget %s -> %d body(ies)", calendar_url, len(out))
     return out
 
 
@@ -310,9 +294,7 @@ def sync_collection(
         if exc.status == 404:
             raise CalDAVNotFoundError(f"not found: {path}") from exc
         if exc.status in (401,):
-            raise CalDAVAuthError(
-                f"authentication required at {path}"
-            ) from exc
+            raise CalDAVAuthError(f"authentication required at {path}") from exc
         # Check if 409 might be embedded in body or status code string
         err = str(exc)
         if "409" in err:
@@ -324,9 +306,7 @@ def sync_collection(
     changed, deleted, new_token = _parse_sync_collection(
         resp.body, base_url=calendar_url
     )
-    logger.info(
-        "  sync-collection: %d changed, %d deleted", len(changed), len(deleted)
-    )
+    logger.info("  sync-collection: %d changed, %d deleted", len(changed), len(deleted))
     return changed, deleted, new_token
 
 
@@ -350,9 +330,7 @@ def put_resource(
         resp = client.request("PUT", path, body=body, headers=headers)
     except HttpStatusError as exc:
         if exc.status == 412:
-            raise CalDAVConflictError(
-                f"PUT {path}: precondition failed (412)"
-            ) from exc
+            raise CalDAVConflictError(f"PUT {path}: precondition failed (412)") from exc
         if exc.status == 404:
             raise CalDAVNotFoundError(f"PUT {path}: not found (404)") from exc
         raise CalDAVError(f"PUT {path}: HTTP {exc.status}") from exc
@@ -380,9 +358,7 @@ def delete_resource(
                 f"DELETE {path}: precondition failed (412)"
             ) from exc
         if exc.status == 404:
-            raise CalDAVNotFoundError(
-                f"DELETE {path}: not found (404)"
-            ) from exc
+            raise CalDAVNotFoundError(f"DELETE {path}: not found (404)") from exc
         raise CalDAVError(f"DELETE {path}: HTTP {exc.status}") from exc
 
 

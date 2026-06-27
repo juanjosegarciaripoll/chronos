@@ -376,9 +376,7 @@ END:VFREEBUSY
 
     def test_older_sequence_does_not_overwrite(self) -> None:
         self._seed_synced("evt@example.com", summary="Newest", sequence=5)
-        stale = _vcalendar(
-            _vevent_seq("evt@example.com", "Stale", 1), method="REQUEST"
-        )
+        stale = _vcalendar(_vevent_seq("evt@example.com", "Stale", 1), method="REQUEST")
         report = self._ingest(stale)
         self.assertEqual(report.updated, 0)
         self.assertEqual(report.skipped, 1)

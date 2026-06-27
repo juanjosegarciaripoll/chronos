@@ -462,9 +462,7 @@ class SyncCommandTest(CliTestCase):
 
         synced: list[str] = []
 
-        def factory(
-            account: AccountConfig, _auth: Authorization
-        ) -> FakeCalDAVSession:
+        def factory(account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
             synced.append(account.name)
             return self.session
 
@@ -498,9 +496,7 @@ class SyncCommandTest(CliTestCase):
         from chronos.authorization import Authorization
         from chronos.domain import CalendarRef, SyncState
 
-        def factory(
-            _account: AccountConfig, _auth: Authorization
-        ) -> FakeCalDAVSession:
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
             return self.session
 
         ctx = self._ctx(
@@ -517,9 +513,7 @@ class SyncCommandTest(CliTestCase):
                 )
             )
 
-        code = self._run(
-            ["sync", "--account", "personal", "--force"], context=ctx
-        )
+        code = self._run(["sync", "--account", "personal", "--force"], context=ctx)
         self.assertEqual(code, 0)
         # The other account's stale CTag survives untouched.
         other = ctx.index.get_sync_state(

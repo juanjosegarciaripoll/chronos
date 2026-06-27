@@ -58,9 +58,7 @@ class Client:
             self._pool[key] = conn
         return conn
 
-    def _make_conn(
-        self, scheme: str, netloc: str
-    ) -> http.client.HTTPConnection:
+    def _make_conn(self, scheme: str, netloc: str) -> http.client.HTTPConnection:
         if scheme == "https":
             return http.client.HTTPSConnection(
                 netloc, timeout=self._timeout, context=self._ssl_ctx

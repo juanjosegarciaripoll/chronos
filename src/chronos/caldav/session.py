@@ -31,9 +31,7 @@ class CalDAVHttpSession:
     def discover_principal(self) -> str:
         if self._principal_url is None:
             path = urlsplit(self._base_url).path or "/"
-            self._principal_url = protocol.discover_principal(
-                self._client, path
-            )
+            self._principal_url = protocol.discover_principal(self._client, path)
         return self._principal_url
 
     def list_calendars(self, principal_url: str) -> Sequence[RemoteCalendar]:
@@ -54,9 +52,7 @@ class CalDAVHttpSession:
         path = urlsplit(calendar_url).path
         return protocol.get_ctag(self._client, path)
 
-    def calendar_query(
-        self, calendar_url: str
-    ) -> Sequence[tuple[str, str]]:
+    def calendar_query(self, calendar_url: str) -> Sequence[tuple[str, str]]:
         # Pass calendar_url (full) so _absolute_href can resolve relative hrefs
         return protocol.calendar_query(self._client, calendar_url)
 
