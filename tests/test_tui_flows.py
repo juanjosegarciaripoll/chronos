@@ -2432,6 +2432,155 @@ class TimelineGridHelpersTest(unittest.TestCase):
         self.assertTrue(is_start)  # Standup starts here
         self.assertFalse(is_end)
 
+    @staticmethod
+    def _all_day_row(
+        uid: str,
+        summary: str,
+        start: datetime,
+        end: datetime,
+    ) -> OccurrenceRow:
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, uid)
+        return OccurrenceRow(
+            occurrence=Occurrence(
+                ref=ref,
+                start=start,
+                end=end,
+                recurrence_id=None,
+                is_override=False,
+            ),
+            component=VEvent(
+                ref=ref,
+                href=None,
+                etag=None,
+                raw_ics=b"",
+                summary=summary,
+                description=None,
+                location=None,
+                dtstart=start,
+                dtend=end,
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=None,
+            ),
+        )
+
+    def test_is_full_day_accepts_local_and_utc_midnight(self) -> None:
+        from chronos.tui.views import _is_full_day
+
+        # Standard VALUE=DATE all-day event: UTC midnight to UTC midnight.
+        utc_all_day = self._all_day_row(
+            "utc-allday",
+            "UTC all day",
+            datetime(2026, 5, 1, tzinfo=UTC),
+            datetime(2026, 5, 2, tzinfo=UTC),
+        )
+        self.assertTrue(_is_full_day(utc_all_day.occurrence))
+
+        # All-day event stored as local midnight-to-midnight (the case
+        # some clients write and the old UTC-only check missed).
+        local_all_day = self._all_day_row(
+            "local-allday",
+            "Local all day",
+            datetime(2026, 5, 1, 0, 0).astimezone(),
+            datetime(2026, 5, 2, 0, 0).astimezone(),
+        )
+        self.assertTrue(_is_full_day(local_all_day.occurrence))
+
+    def test_is_full_day_rejects_timed_events(self) -> None:
+        from chronos.tui.views import _is_full_day
+
+        # Ordinary short meeting.
+        short = self._all_day_row(
+            "short",
+            "Standup",
+            datetime(2026, 5, 1, 9, 0).astimezone(),
+            datetime(2026, 5, 1, 9, 30).astimezone(),
+        )
+        self.assertFalse(_is_full_day(short.occurrence))
+
+        # A 24h-long event that is NOT anchored at midnight is timed, not
+        # all-day — guards the midnight-anchor requirement.
+        day_long_offset = self._all_day_row(
+            "offset",
+            "On-call shift",
+            datetime(2026, 5, 1, 9, 0).astimezone(),
+            datetime(2026, 5, 2, 9, 0).astimezone(),
+        )
+        self.assertFalse(_is_full_day(day_long_offset.occurrence))
+
+    def test_cell_for_slot_skips_local_midnight_all_day_event(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _cell_for_slot
+
+        rows = (
+            self._all_day_row(
+                "local-allday",
+                "Local all day",
+                datetime(2026, 5, 1, 0, 0).astimezone(),
+                datetime(2026, 5, 2, 0, 0).astimezone(),
+            ),
+        )
+        # A local-midnight all-day event must not paint any hour slot.
+        cell, hit, is_start, is_end = _cell_for_slot(date(2026, 5, 1), 9 * 60, rows)
+        self.assertEqual(cell, "")
+        self.assertIsNone(hit)
+        self.assertFalse(is_start)
+        self.assertFalse(is_end)
+
+    def test_full_day_rows_cover_every_day_of_a_multi_day_span(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _full_day_rows
+
+        # Three-day all-day span: May 1, 2, 3 (end May 4 is exclusive).
+        rows = (
+            self._all_day_row(
+                "trip",
+                "Conference",
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 5, 4, tzinfo=UTC),
+            ),
+        )
+        for day in (date(2026, 5, 1), date(2026, 5, 2), date(2026, 5, 3)):
+            covering = _full_day_rows(day, rows)
+            self.assertEqual(len(covering), 1, msg=f"day {day}")
+            self.assertEqual(
+                covering[0].component.summary, "Conference", msg=f"day {day}"
+            )
+        # The exclusive end day shows nothing.
+        self.assertEqual(_full_day_rows(date(2026, 5, 4), rows), [])
+
+    def test_full_day_rows_returns_each_event_for_a_busy_day(self) -> None:
+        from chronos.tui.widgets.timeline_grid import _full_day_rows
+
+        # Two all-day events on the same day plus a multi-day span that
+        # also covers it → three stacked banner lines, in event order.
+        rows = (
+            self._all_day_row(
+                "vacation",
+                "Vacation",
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 5, 3, tzinfo=UTC),
+            ),
+            self._all_day_row(
+                "holiday",
+                "Public holiday",
+                datetime(2026, 5, 2, tzinfo=UTC),
+                datetime(2026, 5, 3, tzinfo=UTC),
+            ),
+            self._all_day_row(
+                "birthday",
+                "Birthday",
+                datetime(2026, 5, 2, tzinfo=UTC),
+                datetime(2026, 5, 3, tzinfo=UTC),
+            ),
+        )
+        covering = _full_day_rows(date(2026, 5, 2), rows)
+        self.assertEqual(
+            [r.component.summary for r in covering],
+            ["Vacation", "Public holiday", "Birthday"],
+        )
+
 
 class TimelineGridFlowTest(TuiFlowTestCase):
     async def test_day_view_swaps_in_timeline_and_hides_detail_pane(self) -> None:
@@ -2451,6 +2600,45 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             self.assertTrue(timeline.display)
             self.assertFalse(event_list.display)
             self.assertFalse(detail.display)
+
+    async def test_all_day_banner_stacks_one_row_per_full_day_event(self) -> None:
+        # Two all-day events on the same day must occupy two distinct,
+        # individually selectable banner cells (not collapse to "+N").
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        day = date(2026, 5, 1)
+        rows = [
+            TimelineGridHelpersTest._all_day_row(
+                "a",
+                "All day A",
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 5, 2, tzinfo=UTC),
+            ),
+            TimelineGridHelpersTest._all_day_row(
+                "b",
+                "All day B",
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 5, 2, tzinfo=UTC),
+            ),
+        ]
+        app = ChronosApp(self.services())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            # Drive the widget directly with our two all-day rows so the
+            # test doesn't depend on seeded calendar data.
+            timeline.show_days([(day, rows)], today=day)
+            await pilot.pause()
+            refs = {
+                timeline.cell_ref(r, 1)
+                for r in range(timeline.row_count)
+                if timeline.cell_ref(r, 1) is not None
+            }
+            self.assertEqual(refs, {rows[0].component.ref, rows[1].component.ref})
 
     async def test_grid_view_passes_four_day_columns(self) -> None:
         from chronos.tui.widgets.timeline_grid import TimelineGrid

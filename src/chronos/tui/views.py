@@ -321,15 +321,24 @@ def _format_event_day(start: datetime, today: date) -> str:
 
 
 def _is_full_day(occurrence: Occurrence) -> bool:
-    """A row spans midnight-to-midnight UTC."""
+    """A whole-day span: >= ~23h long and beginning at midnight in UTC
+    (VALUE=DATE all-day) or in the local timezone.
+
+    Standard all-day events parse to UTC midnight, but some clients
+    (Outlook/Apple/Thunderbird) store them as local midnight-to-midnight
+    (e.g. ``DTSTART;TZID=Europe/Madrid:...T000000``), which lands off UTC
+    midnight. Accepting either anchor keeps both kinds out of the hour
+    grid. The 23h floor stays DST-tolerant; the end is left unchecked
+    because a 23h+ span anchored at midnight is already unambiguous and an
+    end-at-midnight test breaks across DST transitions.
+    """
     if occurrence.end is None:
         return False
-    start_utc = occurrence.start.astimezone(UTC)
-    end_utc = occurrence.end.astimezone(UTC)
+    if occurrence.end - occurrence.start < timedelta(hours=23):
+        return False
     return (
-        start_utc.time() == time.min
-        and end_utc.time() == time.min
-        and (end_utc - start_utc) >= timedelta(hours=23)
+        occurrence.start.astimezone(UTC).time() == time.min
+        or occurrence.start.astimezone().time() == time.min
     )
 
 

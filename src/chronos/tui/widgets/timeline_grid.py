@@ -14,15 +14,16 @@ grid so they remain visible even in the timeline view.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, time, timedelta
+from datetime import UTC, date, time
 from typing import Any
 
 from rich.text import Text
 from textual.message import Message
 from textual.widgets import DataTable
 
-from chronos.domain import ComponentRef
+from chronos.domain import ComponentRef, Occurrence
 from chronos.tui.views import OccurrenceRow
+from chronos.tui.views import _is_full_day as _occurrence_is_full_day
 
 _SLOT_MINUTES = 30
 _DEFAULT_START_HOUR = 6
@@ -114,9 +115,10 @@ class TimelineGrid(DataTable[str]):
         for day_date, _ in days:
             self.add_column(_day_header(day_date, today), width=self._day_col_width)
 
-        # Banner row: full-day events (VTodos / midnight-to-midnight)
-        # for each day. Skipped silently when no day has any.
-        self._add_all_day_row(days)
+        # Banner rows: full-day events (VTodos / midnight-to-midnight)
+        # for each day, one stacked line per event. Skipped silently when
+        # no day has any.
+        self._add_all_day_rows(days)
 
         start_hour, end_hour = _compute_hour_range(days)
         slot_count = ((end_hour - start_hour) * 60) // _SLOT_MINUTES
@@ -137,26 +139,31 @@ class TimelineGrid(DataTable[str]):
 
     # --- internal --------------------------------------------------------
 
-    def _add_all_day_row(
+    def _add_all_day_rows(
         self, days: Sequence[tuple[date, Sequence[OccurrenceRow]]]
     ) -> None:
-        all_day_per_column: list[tuple[str, ComponentRef | None]] = []
-        any_present = False
-        for day_date, events in days:
-            cell, ref = _full_day_summary(day_date, events)
-            all_day_per_column.append((cell, ref))
-            if ref is not None:
-                any_present = True
-        if not any_present:
+        # One stacked banner line per full-day event, so each event keeps
+        # its own selectable cell. The section is as tall as the busiest
+        # day; lighter days leave their lower cells blank. The "all day"
+        # label sits on the first line only so the rows read as one group.
+        per_column = [_full_day_rows(day_date, events) for day_date, events in days]
+        line_count = max((len(col) for col in per_column), default=0)
+        if line_count == 0:
             return
-        row_index = self.row_count
-        time_label = Text(_ALL_DAY_LABEL, style="italic dim")
-        cells: list[Any] = [time_label]
-        for col_idx, (cell, ref) in enumerate(all_day_per_column, start=1):
-            cells.append(cell)
-            if ref is not None:
-                self._cells[(row_index, col_idx)] = ref
-        self.add_row(*cells)
+        for line in range(line_count):
+            row_index = self.row_count
+            label: Any = (
+                Text(_ALL_DAY_LABEL, style="italic dim") if line == 0 else ""
+            )
+            cells: list[Any] = [label]
+            for col_idx, col_rows in enumerate(per_column, start=1):
+                if line < len(col_rows):
+                    row = col_rows[line]
+                    cells.append(row.component.summary or "(no summary)")
+                    self._cells[(row_index, col_idx)] = row.component.ref
+                else:
+                    cells.append("")
+            self.add_row(*cells)
 
     def _add_time_row(
         self,
@@ -267,7 +274,7 @@ def _compute_hour_range(
     end_hour = _DEFAULT_END_HOUR
     for _, events in days:
         for row in events:
-            if _is_full_day(row):
+            if _occurrence_is_full_day(row.occurrence):
                 continue
             occ_start = row.occurrence.start.astimezone()
             occ_end = (row.occurrence.end or row.occurrence.start).astimezone()
@@ -308,7 +315,7 @@ def _cell_for_slot(
     starting: list[OccurrenceRow] = []
     continuing: list[OccurrenceRow] = []
     for row in events:
-        if _is_full_day(row):
+        if _occurrence_is_full_day(row.occurrence):
             continue
         occ_start = row.occurrence.start.astimezone()
         if occ_start.date() != day:
@@ -343,43 +350,41 @@ def _cell_for_slot(
     return summary, first.component.ref, is_start, is_end
 
 
-def _full_day_summary(
+def _full_day_rows(
     day: date,
     events: Sequence[OccurrenceRow],
-) -> tuple[str, ComponentRef | None]:
-    """Banner content for a single day's column.
+) -> list[OccurrenceRow]:
+    """Full-day rows covering `day`, in the order `events` arrives in.
 
-    Returns the first full-day summary plus a `+N` suffix when there
-    are several. Most days have at most one or two todos / VEvents
-    spanning the day; degrading gracefully when there are more keeps
-    the banner row a fixed height.
+    Each gets its own banner line, so the order is preserved rather than
+    collapsed into a `+N` count. A multi-day span is included on every
+    day from its start through the day before its end (`end` is
+    exclusive). The view sorts `events` by (start, account, calendar,
+    uid), so the banner order is stable.
     """
-    full_day: list[OccurrenceRow] = []
+    out: list[OccurrenceRow] = []
     for row in events:
-        if not _is_full_day(row):
+        if not _occurrence_is_full_day(row.occurrence):
             continue
-        if row.occurrence.start.astimezone(UTC).date() != day:
-            continue
-        full_day.append(row)
-    if not full_day:
-        return "", None
-    first = full_day[0]
-    summary = first.component.summary or "(no summary)"
-    if len(full_day) > 1:
-        summary = f"{summary} +{len(full_day) - 1}"
-    return summary, first.component.ref
+        start_d, end_d = _full_day_dates(row.occurrence)
+        if start_d <= day < end_d:
+            out.append(row)
+    return out
 
 
-def _is_full_day(row: OccurrenceRow) -> bool:
-    if row.occurrence.end is None:
-        return False
-    start_utc = row.occurrence.start.astimezone(UTC)
-    end_utc = row.occurrence.end.astimezone(UTC)
-    return (
-        start_utc.time() == time.min
-        and end_utc.time() == time.min
-        and (end_utc - start_utc) >= timedelta(hours=23)
-    )
+def _full_day_dates(occ: Occurrence) -> tuple[date, date]:
+    """Inclusive-start, exclusive-end calendar-date span for a full-day
+    occurrence, in the frame its start aligns to (UTC or local).
+
+    A VALUE=DATE all-day event is anchored at UTC midnight, so its day
+    columns come from the UTC dates; a local-midnight all-day event maps
+    to local dates. Picking the frame that matches the start's midnight
+    lands the banner on the right grid columns either way.
+    """
+    end = occ.end or occ.start
+    if occ.start.astimezone(UTC).time() == time.min:
+        return occ.start.astimezone(UTC).date(), end.astimezone(UTC).date()
+    return occ.start.astimezone().date(), end.astimezone().date()
 
 
 __all__ = ["TimelineGrid"]
