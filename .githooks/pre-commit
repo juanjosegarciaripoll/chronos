@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Pre-commit hook: enforce `ruff format` + `ruff check` before every commit.
+#
+# Tracked in the repo and wired up with:
+#     git config core.hooksPath .githooks
+# Each fresh clone must run that once (CI in .github/workflows/lint.yml is
+# the backstop if someone hasn't). Run `scripts/setup-hooks.sh` to set it.
+set -euo pipefail
+
+if command -v uv >/dev/null 2>&1; then
+    ruff() { uv run ruff "$@"; }
+elif command -v ruff >/dev/null 2>&1; then
+    : # use ruff from PATH
+else
+    echo "pre-commit: neither 'uv' nor 'ruff' found; skipping ruff checks." >&2
+    exit 0
+fi
+
+if ! ruff format --check .; then
+    echo >&2
+    echo "pre-commit: code is not ruff-formatted. Run 'ruff format .', then re-stage." >&2
+    exit 1
+fi
+
+if ! ruff check .; then
+    echo >&2
+    echo "pre-commit: ruff lint failed. Fix it (try 'ruff check --fix .'), then re-stage." >&2
+    exit 1
+fi
