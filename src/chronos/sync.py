@@ -7,7 +7,7 @@ import queue
 import threading
 import urllib.parse
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -17,6 +17,7 @@ from chronos.caldav.errors import (
     SyncTokenExpiredError,
 )
 from chronos.domain import (
+    LOCAL_FLAG_DIRTY,
     AccountConfig,
     CalendarConfig,
     CalendarRef,
@@ -430,6 +431,13 @@ def _fast_path_reconcile(
         index=index,
         now=now,
     )
+    pushed += _push_updates(
+        account=account,
+        calendar=calendar,
+        session=session,
+        index=index,
+        now=now,
+    )
     return CalendarSyncStats(
         calendar=calendar_ref,
         path="fast",
@@ -550,6 +558,13 @@ def _slow_path_reconcile(
             local_components=local_components,
         )
         pushed = _push_pending(
+            account=account,
+            calendar=calendar,
+            session=session,
+            index=index,
+            now=now,
+        )
+        pushed += _push_updates(
             account=account,
             calendar=calendar,
             session=session,
@@ -677,6 +692,13 @@ def _medium_path_reconcile(
             local_components=local_components,
         )
         pushed = _push_pending(
+            account=account,
+            calendar=calendar,
+            session=session,
+            index=index,
+            now=now,
+        )
+        pushed += _push_updates(
             account=account,
             calendar=calendar,
             session=session,
@@ -1237,6 +1259,64 @@ def _push_pending(
                 )
                 index.upsert_component(updated)
         pushed += 1
+    return pushed
+
+
+def _push_updates(
+    *,
+    account: AccountConfig,
+    calendar: CalendarConfig,
+    session: CalDAVSession,
+    index: IndexRepository,
+    now: datetime,
+) -> int:
+    """PUT locally-modified components that are already on the server.
+
+    These carry ``LOCAL_FLAG_DIRTY`` (set by `import` of an iTIP update)
+    and have an href/etag, so the body is sent with ``If-Match`` to
+    overwrite the server copy only if it hasn't changed underneath us.
+    An etag mismatch (412) is deferred: the next slow-path sync pulls the
+    remote version and surfaces the divergence rather than clobbering it.
+    On success the dirty flag is cleared and the new etag recorded.
+    """
+    calendar_ref = CalendarRef(account.name, calendar.calendar_name)
+    pending = index.list_pending_updates(calendar_ref)
+    if not pending:
+        return 0
+
+    by_uid: dict[str, list[StoredComponent]] = {}
+    for component in pending:
+        by_uid.setdefault(component.ref.uid, []).append(component)
+
+    pushed = 0
+    for uid, rows in by_uid.items():
+        master = next((r for r in rows if r.ref.recurrence_id is None), rows[0])
+        if master.href is None or master.etag is None or master.raw_ics == b"":
+            continue
+        try:
+            new_etag = session.put(master.href, master.raw_ics, etag=master.etag)
+        except CalDAVConflictError:
+            logger.info(
+                "update deferred: etag mismatch for %s (will retry on slow sync)",
+                master.href,
+            )
+            continue
+        except Exception:  # noqa: BLE001 — treat any PUT failure as retry next sync
+            continue
+        with index.connection():
+            for row in rows:
+                index.upsert_component(
+                    replace(
+                        row,
+                        etag=new_etag,
+                        synced_at=now,
+                        local_flags=row.local_flags - {LOCAL_FLAG_DIRTY},
+                    )
+                )
+        pushed += 1
+        logger.info(
+            "push update: %s/%s uid=%s", account.name, calendar.calendar_name, uid
+        )
     return pushed
 
 

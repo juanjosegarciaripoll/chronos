@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 from chronos.domain import (
+    LOCAL_FLAG_DIRTY,
     AlarmAction,
     AlarmRecord,
     CalendarRef,
@@ -353,6 +354,41 @@ class SqliteIndexRepository:
                 "AND href IS NULL AND local_status = 'active' "
                 "ORDER BY uid, COALESCE(recurrence_id, '')",
                 (calendar.account_name, calendar.calendar_name),
+            )
+            rows = cursor.fetchall()
+        return tuple(_row_to_component(r) for r in rows)
+
+    def list_pending_updates(
+        self, calendar: CalendarRef
+    ) -> tuple[StoredComponent, ...]:
+        """Components already on the server (href set) that were changed
+        locally and need an If-Match PUT.  Flagged with ``LOCAL_FLAG_DIRTY``
+        in ``local_flags`` (stored as a JSON array, so the flag token is
+        always quoted — matched with a LIKE on the serialized form)."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                f"SELECT {', '.join(_COMPONENT_COLUMNS)} FROM components "
+                "WHERE account_name = ? AND calendar_name = ? "
+                "AND href IS NOT NULL AND local_status = 'active' "
+                f"AND local_flags LIKE '%\"{LOCAL_FLAG_DIRTY}\"%' "
+                "ORDER BY uid, COALESCE(recurrence_id, '')",
+                (calendar.account_name, calendar.calendar_name),
+            )
+            rows = cursor.fetchall()
+        return tuple(_row_to_component(r) for r in rows)
+
+    def list_components_by_uid(self, uid: str) -> tuple[StoredComponent, ...]:
+        """Every component row with *uid*, across all accounts/calendars.
+
+        Used by `import` to locate the event an iTIP CANCEL/REQUEST refers
+        to (its UID is globally unique), rather than requiring the caller
+        to pre-select the exact calendar it lives in."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                f"SELECT {', '.join(_COMPONENT_COLUMNS)} FROM components "
+                "WHERE uid = ? "
+                "ORDER BY account_name, calendar_name, COALESCE(recurrence_id, '')",
+                (uid,),
             )
             rows = cursor.fetchall()
         return tuple(_row_to_component(r) for r in rows)

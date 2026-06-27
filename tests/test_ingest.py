@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from chronos.domain import (
+    LOCAL_FLAG_DIRTY,
     AccountConfig,
     AppConfig,
     CalendarRef,
@@ -31,12 +32,27 @@ from tests import corpus
 _TARGET = CalendarRef(account_name="personal", calendar_name="work")
 
 
-def _vcalendar(*blocks: str) -> bytes:
+def _vcalendar(*blocks: str, method: str | None = None) -> bytes:
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//test//EN"]
+    if method is not None:
+        lines.append(f"METHOD:{method}")
     for block in blocks:
         lines.extend(block.strip("\n").split("\n"))
     lines.append("END:VCALENDAR")
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def _vevent_seq(uid: str, summary: str, sequence: int) -> str:
+    return f"""
+BEGIN:VEVENT
+UID:{uid}
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:{summary}
+SEQUENCE:{sequence}
+END:VEVENT
+"""
 
 
 def _vevent(uid: str, summary: str = "Test event") -> str:
@@ -82,6 +98,31 @@ class IngestBytesTest(unittest.TestCase):
             mirror=self.mirror,
             index=self.index,
             on_conflict=on_conflict,  # type: ignore[arg-type]
+        )
+
+    def _seed_synced(self, uid: str, *, summary: str, sequence: int = 0) -> None:
+        """Seed an already-synced event (href/etag set) in mirror + index."""
+        ics = _vcalendar(_vevent_seq(uid, summary, sequence))
+        ref = ResourceRef("personal", "work", uid)
+        self.mirror.write(ref, ics)
+        self.index.upsert_component(
+            VEvent(
+                ref=ComponentRef("personal", "work", uid),
+                href=f"/work/{uid}.ics",
+                etag="etag-server-1",
+                raw_ics=ics,
+                summary=summary,
+                description=None,
+                location=None,
+                dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            )
         )
 
     # ------------------------------------------------------------------
@@ -293,6 +334,204 @@ END:VFREEBUSY
         pending = self.index.list_pending_pushes(_TARGET)
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0].ref.uid, "simple-event-1@example.com")
+
+    # ------------------------------------------------------------------
+    # iTIP: SEQUENCE-aware updates (METHOD:REQUEST / PUBLISH)
+    # ------------------------------------------------------------------
+
+    def test_newer_sequence_updates_synced_event_in_place(self) -> None:
+        self._seed_synced("evt@example.com", summary="Original", sequence=0)
+        update = _vcalendar(
+            _vevent_seq("evt@example.com", "Updated", 1), method="REQUEST"
+        )
+        report = self._ingest(update)  # default on_conflict="skip"
+        self.assertEqual(report.updated, 1)
+        self.assertEqual(report.skipped, 0)
+
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "evt@example.com")
+        )
+        assert stored is not None
+        self.assertEqual(stored.summary, "Updated")
+        # Server identity preserved; queued for an If-Match PUT.
+        self.assertEqual(stored.href, "/work/evt@example.com.ics")
+        self.assertEqual(stored.etag, "etag-server-1")
+        self.assertIn(LOCAL_FLAG_DIRTY, stored.local_flags)
+        pending = self.index.list_pending_updates(_TARGET)
+        self.assertEqual(len(pending), 1)
+
+    def test_same_sequence_skips_under_default(self) -> None:
+        self._seed_synced("evt@example.com", summary="Original", sequence=2)
+        same = _vcalendar(
+            _vevent_seq("evt@example.com", "Should not win", 2), method="REQUEST"
+        )
+        report = self._ingest(same)
+        self.assertEqual(report.updated, 0)
+        self.assertEqual(report.skipped, 1)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "evt@example.com")
+        )
+        assert stored is not None
+        self.assertEqual(stored.summary, "Original")
+
+    def test_older_sequence_does_not_overwrite(self) -> None:
+        self._seed_synced("evt@example.com", summary="Newest", sequence=5)
+        stale = _vcalendar(
+            _vevent_seq("evt@example.com", "Stale", 1), method="REQUEST"
+        )
+        report = self._ingest(stale)
+        self.assertEqual(report.updated, 0)
+        self.assertEqual(report.skipped, 1)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "evt@example.com")
+        )
+        assert stored is not None
+        self.assertEqual(stored.summary, "Newest")
+
+    # ------------------------------------------------------------------
+    # iTIP: cancellation (METHOD:CANCEL)
+    # ------------------------------------------------------------------
+
+    def test_cancel_trashes_synced_event(self) -> None:
+        self._seed_synced("evt@example.com", summary="Meeting")
+        cancel = _vcalendar(_vevent("evt@example.com", "Meeting"), method="CANCEL")
+        report = self._ingest(cancel)
+        self.assertEqual(report.cancelled, 1)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "evt@example.com")
+        )
+        assert stored is not None
+        # Still present but trashed → next sync DELETEs it on the server.
+        self.assertEqual(stored.local_status, LocalStatus.TRASHED)
+        self.assertEqual(stored.href, "/work/evt@example.com.ics")
+
+    def test_cancel_purges_local_only_event(self) -> None:
+        self._ingest(corpus.simple_event())  # href=NULL, never synced
+        cancel = _vcalendar(
+            _vevent("simple-event-1@example.com", "Simple event"), method="CANCEL"
+        )
+        report = self._ingest(cancel)
+        self.assertEqual(report.cancelled, 1)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "simple-event-1@example.com")
+        )
+        self.assertIsNone(stored)
+
+    def test_cancel_finds_event_in_other_calendar(self) -> None:
+        # The event lives in "work"; the cancel is imported targeting a
+        # different calendar.  It must still be located by UID and trashed
+        # where it actually lives, not silently skipped.
+        self._seed_synced("evt@example.com", summary="Meeting")
+        cancel = _vcalendar(_vevent("evt@example.com", "Meeting"), method="CANCEL")
+        report = ingest_ics_bytes(
+            cancel,
+            target=CalendarRef(account_name="personal", calendar_name="other"),
+            mirror=self.mirror,
+            index=self.index,
+        )
+        self.assertEqual(report.cancelled, 1)
+        self.assertEqual(report.skipped, 0)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "evt@example.com")
+        )
+        assert stored is not None
+        self.assertEqual(stored.local_status, LocalStatus.TRASHED)
+
+    def test_update_finds_event_in_other_calendar(self) -> None:
+        self._seed_synced("evt@example.com", summary="Original", sequence=0)
+        update = _vcalendar(
+            _vevent_seq("evt@example.com", "Updated", 1), method="REQUEST"
+        )
+        report = ingest_ics_bytes(
+            update,
+            target=CalendarRef(account_name="personal", calendar_name="other"),
+            mirror=self.mirror,
+            index=self.index,
+        )
+        self.assertEqual(report.updated, 1)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "evt@example.com")
+        )
+        assert stored is not None
+        self.assertEqual(stored.summary, "Updated")
+        self.assertIn(LOCAL_FLAG_DIRTY, stored.local_flags)
+
+    def test_cancel_unknown_event_is_skipped(self) -> None:
+        cancel = _vcalendar(_vevent("ghost@example.com", "Ghost"), method="CANCEL")
+        report = self._ingest(cancel)
+        self.assertEqual(report.cancelled, 0)
+        self.assertEqual(report.skipped, 1)
+        self.assertIn("no matching event", report.details[0])
+
+    def test_cancel_instance_adds_exdate_to_master(self) -> None:
+        master_ics = _vcalendar(
+            """
+BEGIN:VEVENT
+UID:series@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+RRULE:FREQ=WEEKLY;COUNT=5
+SUMMARY:Standup
+END:VEVENT
+"""
+        )
+        ref = ResourceRef("personal", "work", "series@example.com")
+        self.mirror.write(ref, master_ics)
+        self.index.upsert_component(
+            VEvent(
+                ref=ComponentRef("personal", "work", "series@example.com"),
+                href="/work/series.ics",
+                etag="etag-1",
+                raw_ics=master_ics,
+                summary="Standup",
+                description=None,
+                location=None,
+                dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            )
+        )
+        cancel = _vcalendar(
+            """
+BEGIN:VEVENT
+UID:series@example.com
+RECURRENCE-ID:20260508T090000Z
+DTSTAMP:20260422T120000Z
+DTSTART:20260508T090000Z
+DTEND:20260508T100000Z
+SUMMARY:Standup
+END:VEVENT
+""",
+            method="CANCEL",
+        )
+        report = self._ingest(cancel)
+        self.assertEqual(report.cancelled, 1)
+        stored = self.index.get_component(
+            ComponentRef("personal", "work", "series@example.com")
+        )
+        assert stored is not None
+        self.assertIn(b"EXDATE", stored.raw_ics)
+        self.assertIn(LOCAL_FLAG_DIRTY, stored.local_flags)
+        # Mirror file rewritten with the exclusion too.
+        self.assertIn(b"EXDATE", self.mirror.read(ref))
+
+    # ------------------------------------------------------------------
+    # iTIP: REPLY is unsupported
+    # ------------------------------------------------------------------
+
+    def test_reply_method_is_skipped(self) -> None:
+        self._seed_synced("evt@example.com", summary="Meeting")
+        reply = _vcalendar(_vevent("evt@example.com", "Meeting"), method="REPLY")
+        report = self._ingest(reply)
+        self.assertEqual(report.skipped, 1)
+        self.assertEqual(report.updated, 0)
+        self.assertIn("REPLY", report.details[0])
 
 
 class IngestCliTest(unittest.TestCase):

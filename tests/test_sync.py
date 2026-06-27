@@ -5,11 +5,13 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from chronos.domain import (
+    LOCAL_FLAG_DIRTY,
     AccountConfig,
     CalendarRef,
     ComponentRef,
@@ -431,6 +433,73 @@ class PushPendingTest(SyncTestCase):
         put_calls = [c for c in self.session.calls if c[0] == "put"]
         self.assertEqual(put_calls, [])
         pending = self.index.list_pending_pushes(self.calendar_ref)
+        self.assertEqual(len(pending), 1)
+
+
+class PushUpdatesTest(SyncTestCase):
+    def test_dirty_synced_row_is_pushed_with_if_match(self) -> None:
+        href = f"{CALENDAR_URL}up.ics"
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=href,
+            ics=_ics_with_uid("upd@example.com"),
+            etag="etag-1",
+        )
+        self._run()  # pull into index → row gets href + etag
+        ref = ComponentRef(ACCOUNT_NAME, CALENDAR_NAME, "upd@example.com")
+        row = self.index.get_component(ref)
+        assert row is not None
+        original_etag = row.etag
+
+        # Simulate `import` of an iTIP update: changed body + dirty flag.
+        new_body = _ics_with_uid("upd@example.com").replace(
+            b"SUMMARY:Event", b"SUMMARY:Updated"
+        )
+        self.index.upsert_component(
+            replace(
+                row,
+                raw_ics=new_body,
+                local_flags=row.local_flags | {LOCAL_FLAG_DIRTY},
+            )
+        )
+        self.session.calls.clear()
+        self._run()
+
+        put_calls = [c for c in self.session.calls if c[0] == "put"]
+        self.assertEqual(len(put_calls), 1)
+        self.assertEqual(put_calls[0][2], original_etag)  # If-Match with prior etag
+        refreshed = self.index.get_component(ref)
+        assert refreshed is not None
+        self.assertNotIn(LOCAL_FLAG_DIRTY, refreshed.local_flags)
+        self.assertNotEqual(refreshed.etag, original_etag)  # adopted new etag
+        self.assertEqual(self.index.list_pending_updates(self.calendar_ref), ())
+
+    def test_etag_mismatch_defers_update(self) -> None:
+        href = f"{CALENDAR_URL}up2.ics"
+        self.session.put_resource(
+            calendar_url=CALENDAR_URL,
+            href=href,
+            ics=_ics_with_uid("upd2@example.com"),
+            etag="etag-1",
+        )
+        self._run()
+        ref = ComponentRef(ACCOUNT_NAME, CALENDAR_NAME, "upd2@example.com")
+        row = self.index.get_component(ref)
+        assert row is not None
+        # Stale local etag: server has moved on, so the If-Match PUT 412s.
+        self.index.upsert_component(
+            replace(
+                row,
+                etag="stale-etag",
+                raw_ics=_ics_with_uid("upd2@example.com").replace(
+                    b"SUMMARY:Event", b"SUMMARY:Updated"
+                ),
+                local_flags=row.local_flags | {LOCAL_FLAG_DIRTY},
+            )
+        )
+        self._run()
+        # The dirty flag survives so the next sync retries.
+        pending = self.index.list_pending_updates(self.calendar_ref)
         self.assertEqual(len(pending), 1)
 
 

@@ -17,6 +17,13 @@ class LocalStatus(StrEnum):
     TRASHED = "trashed"
 
 
+# Local flag marking an already-synced component (href set) whose body was
+# changed locally — e.g. by an `import` of an iTIP update — and therefore
+# needs an If-Match PUT on the next sync.  New components (href IS NULL) are
+# detected by their null href instead and never carry this flag.
+LOCAL_FLAG_DIRTY = "dirty"
+
+
 class AlarmAction(StrEnum):
     DISPLAY = "DISPLAY"
     AUDIO = "AUDIO"

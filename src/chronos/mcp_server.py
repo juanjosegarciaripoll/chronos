@@ -11,10 +11,13 @@ Exposes six tools backed by the same `IndexRepository` and
 - `get_event(account, calendar, uid)` — full VEVENT detail by UID.
 - `get_todo(account, calendar, uid)` — full VTODO detail by UID.
 - `import_ics(account, calendar, ics, on_conflict?)` — ingest a raw
-  RFC 5545 payload into a calendar.  Additive only; no delete path.
+  RFC 5545 payload into a calendar.  iTIP-aware: `METHOD:CANCEL`
+  trashes the matching event and `METHOD:REQUEST` / a newer `SEQUENCE`
+  updates it in place (see `chronos.ingest`).
 
-No destructive tools are present (see `ai/AGENTS.md` §7.6`): an
-over-eager LLM can add data but cannot delete events or calendars.
+`import_ics` is therefore the one tool that can mutate or remove
+existing events (an LLM passing a `METHOD:CANCEL` payload deletes the
+matching event).  All other tools are read-only.
 
 Transport
 ---------
@@ -174,10 +177,14 @@ def build_mcp_server(*, index: IndexRepository, mirror: MirrorRepository) -> Mcp
         on_conflict: str = "skip",
     ) -> str:
         """Ingest a raw RFC 5545 iCalendar payload into a local calendar.
-        Components land with href=NULL so the next chronos sync pushes
+        New components land with href=NULL so the next chronos sync pushes
         them to the server. Both account and calendar must match a pair
         from list_calendars. on_conflict: skip (default), replace, or rename.
-        Additive only — cannot delete events or calendars."""
+
+        iTIP-aware and therefore destructive: METHOD:CANCEL trashes the
+        matching event (deleted on the next sync) and METHOD:REQUEST or a
+        newer SEQUENCE updates an existing event in place (pushed with an
+        If-Match PUT on the next sync)."""
         return json.dumps(
             _tool_import_ics(
                 index,
@@ -353,6 +360,8 @@ def _tool_import_ics(
     )
     return {
         "imported": report.imported,
+        "updated": report.updated,
+        "cancelled": report.cancelled,
         "skipped": report.skipped,
         "replaced": report.replaced,
         "renamed": report.renamed,

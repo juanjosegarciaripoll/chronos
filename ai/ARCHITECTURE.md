@@ -85,5 +85,5 @@ src/chronos/
 - Raw `.ics` bytes in the mirror are authoritative; SQLite is derived state and sync control-plane state.
 - `sync.py` is the inbound reconciliation engine.
 - CLI and TUI are the main local mutation surfaces.
-- MCP is non-destructive, but it is not read-only: additive `.ics` import is part of the current design.
+- MCP is not read-only: `import_ics` is iTIP-aware and can mutate or remove existing events (`METHOD:CANCEL` trashes, `METHOD:REQUEST`/newer `SEQUENCE` updates). Every other MCP tool is read-only.
 - The active TUI shape is agenda/day/grid, not the older separate week/month/todo-screen model.

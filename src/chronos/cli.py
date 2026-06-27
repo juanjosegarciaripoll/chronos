@@ -1243,7 +1243,8 @@ def cmd_import(
         ctx.stderr.write("import: no .ics files found\n")
         return 2
 
-    total_imported = total_skipped = total_replaced = total_renamed = 0
+    total_imported = total_updated = total_cancelled = 0
+    total_skipped = total_replaced = total_renamed = 0
     all_details: list[str] = []
     errors = 0
 
@@ -1267,13 +1268,16 @@ def cmd_import(
             errors += 1
             continue
         total_imported += report.imported
+        total_updated += report.updated
+        total_cancelled += report.cancelled
         total_skipped += report.skipped
         total_replaced += report.replaced
         total_renamed += report.renamed
         all_details.extend(report.details)
 
     ctx.stdout.write(
-        f"imported {total_imported}, skipped {total_skipped}, "
+        f"imported {total_imported}, updated {total_updated}, "
+        f"cancelled {total_cancelled}, skipped {total_skipped}, "
         f"replaced {total_replaced}, renamed {total_renamed}\n"
     )
     for detail in all_details:
@@ -1281,7 +1285,13 @@ def cmd_import(
 
     if errors > 0:
         return 1
-    acted = total_imported + total_replaced + total_renamed
+    acted = (
+        total_imported
+        + total_updated
+        + total_cancelled
+        + total_replaced
+        + total_renamed
+    )
     if acted == 0 and total_skipped > 0:
         return 1  # everything skipped — signal to scripts
     return 0

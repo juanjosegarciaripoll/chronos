@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Multi-account CalDAV sync with fast, medium, and slow reconciliation paths.
 - Textual TUI with agenda, day, and grid views, plus create, edit, trash, search, and sync flows.
-- MCP server with stdio mode, TCP bridge mode, query tools, and additive `.ics` import.
+- MCP server with stdio mode, TCP bridge mode, query tools, and iTIP-aware `.ics` import.
+- iTIP-aware `.ics` import: `METHOD:CANCEL` trashes the matching event and `METHOD:REQUEST`/newer `SEQUENCE` updates it in place. Changes to already-synced events propagate to the server on the next sync (DELETE for cancellations, If-Match PUT for updates).
 - OAuth loopback authorization flow for providers that require browser-based consent.
 - Tagged release automation for source builds, Windows installers, and Windows portable PyInstaller bundles.

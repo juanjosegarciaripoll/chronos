@@ -13,7 +13,7 @@ Provide an offline-authoritative, keyboard-first calendar client that keeps its 
 - VEVENT and VTODO support.
 - Textual TUI for agenda/day/grid workflows.
 - CLI for sync, inspection, mutation, import, bootstrap, and OAuth authorization.
-- MCP tools for search/query/detail plus additive `.ics` import.
+- MCP tools for search/query/detail plus iTIP-aware `.ics` import.
 - OAuth browser loopback authorization where providers require it.
 - Distribution through:
   - `uv tool install`
@@ -30,7 +30,9 @@ Provide an offline-authoritative, keyboard-first calendar client that keeps its 
 ## Deferred or dropped scope
 
 - Background sync daemon.
-- iTIP / iMIP.
+- Full iTIP / iMIP scheduling.  (Import honors `METHOD:CANCEL` and
+  `METHOD:REQUEST`/`SEQUENCE` updates; `METHOD:REPLY`/RSVP, counter
+  proposals, and e-mail transport remain out of scope.)
 - Free/busy queries.
 - VJOURNAL.
 - Full `THISANDFUTURE` editing semantics.

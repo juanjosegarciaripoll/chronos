@@ -21,7 +21,7 @@ Start here before making non-trivial changes.
 - SQLite search/index/occurrence cache
 - Textual TUI
 - CLI
-- MCP tools, including additive `.ics` import
+- MCP tools, including iTIP-aware `.ics` import
 
 ## Working rules
 
@@ -46,7 +46,7 @@ Start here before making non-trivial changes.
 
 ## Important constraints
 
-- No destructive MCP tools.
+- `import_ics` is the only MCP tool that may mutate or delete existing events (iTIP `METHOD:CANCEL`/`REQUEST`); every other MCP tool stays read-only.
 - No browser-based application UI work.
 - No speculative abstractions or compatibility shims without a real caller.
 - Coverage floor is a gate, not a suggestion.

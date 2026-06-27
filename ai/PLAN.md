@@ -24,7 +24,7 @@ Current project plan and scope summary. This replaces the milestone backlog prev
 - MCP support with:
   - stdio self-contained mode
   - stdio-to-TCP bridge when a running app instance exists
-  - read/query tools plus additive `import_ics`
+  - read/query tools plus iTIP-aware `import_ics`
 - OAuth loopback flow for providers that require browser authorization.
 
 ## Desirable next features

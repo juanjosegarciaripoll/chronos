@@ -8,7 +8,7 @@ Terminal-first calendar client with CalDAV sync, a local `.ics` mirror, a SQLite
 - Local mirror of calendar resources as plain `.ics` files plus a searchable SQLite index with recurrence cache.
 - CLI for sync, inspection, account bootstrap, OAuth authorization, local event editing, reset, and `.ics` import.
 - Textual TUI for agenda, day, and multi-day grid views, with create/edit/trash/search/sync flows.
-- MCP server with stdio mode, TCP bridge mode, read tools, and additive `import_ics`.
+- MCP server with stdio mode, TCP bridge mode, read tools, and iTIP-aware `import_ics`.
 - OAuth loopback flow for providers that require it.
 
 ## Google OAuth on a headless VM

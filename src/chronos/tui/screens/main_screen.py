@@ -654,7 +654,8 @@ class MainScreen(Screen[None]):
             return
         self.refresh_view()
         self.app.notify(  # pyright: ignore[reportUnknownMemberType]
-            f"Imported {report.imported} (skipped {report.skipped})"
+            f"Imported {report.imported}, updated {report.updated}, "
+            f"cancelled {report.cancelled} (skipped {report.skipped})"
         )
         if sync:
             self._run_sync()

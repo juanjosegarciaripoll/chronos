@@ -24,6 +24,7 @@ class ParsedComponent:
     dtend: datetime | None
     due: datetime | None
     status: str | None
+    sequence: int | None
 
 
 def parse_vcalendar(raw: bytes) -> list[ParsedComponent]:
@@ -39,6 +40,23 @@ def parse_vcalendar(raw: bytes) -> list[ParsedComponent]:
     return out
 
 
+def parse_method(raw: bytes) -> str | None:
+    """Return the upper-cased VCALENDAR ``METHOD`` (iTIP) or ``None``.
+
+    ``METHOD:REQUEST``/``CANCEL``/``REPLY``/``PUBLISH`` distinguishes an
+    iTIP scheduling message from a plain calendar export.  ``None`` means
+    no method was declared (treat as a plain ``PUBLISH``-style import).
+    """
+    try:
+        cal = Calendar.from_ical(raw)
+    except ValueError as exc:
+        raise IcalParseError(f"invalid iCalendar data: {exc}") from exc
+    method = _call_get(cal, "METHOD")
+    if method is None:
+        return None
+    return str(method).strip().upper() or None
+
+
 def _project(component: object, kind: ComponentKind) -> ParsedComponent:
     return ParsedComponent(
         kind=kind,
@@ -51,7 +69,18 @@ def _project(component: object, kind: ComponentKind) -> ParsedComponent:
         dtend=_get_datetime(component, "DTEND"),
         due=_get_datetime(component, "DUE"),
         status=_get_str(component, "STATUS"),
+        sequence=_get_int(component, "SEQUENCE"),
     )
+
+
+def _get_int(component: object, key: str) -> int | None:
+    value = _call_get(component, key)
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_str(component: object, key: str) -> str | None:
@@ -77,6 +106,16 @@ def _get_recurrence_id(component: object) -> str | None:
     if dt is None:
         return None
     return dt.isoformat()
+
+
+def parse_recurrence_id(component: object) -> str | None:
+    """Return a component's RECURRENCE-ID as a UTC ISO string, or ``None``.
+
+    Public wrapper over the internal projection so callers handling raw
+    icalendar subcomponents (e.g. ingest's instance-cancel path) compare
+    RECURRENCE-IDs in the same normalized form the index stores.
+    """
+    return _get_recurrence_id(component)
 
 
 def _to_utc(dt: datetime) -> datetime:
