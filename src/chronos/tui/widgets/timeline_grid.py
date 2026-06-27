@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, time
-from typing import Any
+from typing import Any, NamedTuple
 
 from rich.text import Text
+from textual.color import Color
 from textual.message import Message
 from textual.widgets import DataTable
 
@@ -33,6 +34,35 @@ _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
 _HOUR_MARKER_CHAR = "\u2594"  # UPPER ONE EIGHTH BLOCK
 _EVENT_END_CHAR = "\u2582"  # LOWER ONE QUARTER BLOCK
+
+
+class _Palette(NamedTuple):
+    """Concrete colours for one render, resolved from the active theme.
+
+    `fill_a`/`fill_b` are the two event-fill shades (alternated so adjacent
+    events read apart); `fg_a`/`fg_b` are their contrast-matched title
+    colours; `hour_marker` and `end_fg` are the round-hour marker and the
+    event end-cap foreground.
+    """
+
+    fill_a: str
+    fill_b: str
+    fg_a: str
+    fg_b: str
+    hour_marker: str
+    end_fg: str
+
+
+def _contrast_fg(background: str) -> str:
+    """Black or white \u2014 whichever reads better on `background`.
+
+    Mirrors what Textual's `Color.get_contrast_text` does, but returns a
+    plain 6-digit hex so the result is always safe inside a Rich style.
+    Rec. 601 luma: bright fills get black text, dark fills get white.
+    """
+    colour = Color.parse(background)
+    luma = 0.299 * colour.r + 0.587 * colour.g + 0.114 * colour.b
+    return "#000000" if luma > 140 else "#FFFFFF"
 
 
 class TimelineGrid(DataTable[str]):
@@ -70,6 +100,15 @@ class TimelineGrid(DataTable[str]):
         # Keep rendered cell width equal to declared column width.
         # Default DataTable padding inserts 1 char on each side.
         self.cell_padding = 0
+        # Cells are painted as Rich Text with concrete colours resolved from
+        # the active theme, so they don't restyle on their own when the user
+        # switches theme (CSS-styled widgets do). Re-render on theme change so
+        # the whole grid — hour markers, event bars, text — tracks the theme.
+        self.app.theme_changed_signal.subscribe(self, self._on_theme_changed)
+
+    def _on_theme_changed(self, _theme: object) -> None:
+        if self._last_days is not None and self._last_today is not None:
+            self.show_days(self._last_days, today=self._last_today)
 
     def on_resize(self) -> None:
         if self._last_days is None or self._last_today is None:
@@ -120,11 +159,12 @@ class TimelineGrid(DataTable[str]):
         # no day has any.
         self._add_all_day_rows(days)
 
+        palette = self._palette()
         start_hour, end_hour = _compute_hour_range(days)
         slot_count = ((end_hour - start_hour) * 60) // _SLOT_MINUTES
         for slot in range(slot_count):
             slot_minutes_in_day = (start_hour * 60) + slot * _SLOT_MINUTES
-            self._add_time_row(slot_minutes_in_day, days)
+            self._add_time_row(slot_minutes_in_day, days, palette)
 
     def cell_ref(self, row: int, col: int) -> ComponentRef | None:
         """Lookup the event ref at `(row, col)` if any. Used by tests."""
@@ -169,17 +209,13 @@ class TimelineGrid(DataTable[str]):
         self,
         slot_minutes_in_day: int,
         days: Sequence[tuple[date, Sequence[OccurrenceRow]]],
+        palette: _Palette,
     ) -> None:
         # Both 30-min slots of the same hour share the same stripe so the
         # grid reads as hourly bands.  Rich Text styles only colour actual
         # characters, not trailing whitespace, so every styled cell is
         # padded to the declared column width.
         row_index = self.row_count
-        grid_bg_fg = self._grid_bg_fg()
-        hour_marker_style = self._hour_marker_style()
-        event_start_style = self._event_start_style()
-        event_body_style = self._event_body_style()
-        event_end_bg = self._event_fill_bg()
         # Only label the top of each hour; the :30 row is left blank so
         # the time column stays readable without clutter.
         is_hour = slot_minutes_in_day % 60 == 0
@@ -194,52 +230,68 @@ class TimelineGrid(DataTable[str]):
                 # back-to-back events always render in different shades.
                 if is_start:
                     self._col_alt[col_idx] = not self._col_alt.get(col_idx, False)
-                if is_start:
-                    style = event_start_style
-                elif is_end:
-                    style = f"{grid_bg_fg} on {event_end_bg}"
-                else:
-                    style = event_body_style
+                alt = self._col_alt.get(col_idx, False)
+                fill = palette.fill_b if alt else palette.fill_a
+                fg = palette.fg_b if alt else palette.fg_a
                 w = self._day_col_width
                 if is_start:
+                    style = f"{fg} on {fill}"
                     text = content.ljust(w)
                 elif is_end:
+                    style = f"{palette.end_fg} on {fill}"
                     text = _EVENT_END_CHAR * w
                 else:
+                    style = f"on {fill}"
                     text = " " * w
                 cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
             elif is_hour:
                 cells.append(
-                    Text(_HOUR_MARKER_CHAR * self._day_col_width, style=hour_marker_style)
+                    Text(
+                        _HOUR_MARKER_CHAR * self._day_col_width,
+                        style=palette.hour_marker,
+                    )
                 )
             else:
                 cells.append("")
         self.add_row(*cells)
 
-    def _theme_color(self, name: str, fallback: str) -> str:
-        value = getattr(self.app.current_theme, name, None)
-        if isinstance(value, str) and value:
-            return value
-        return fallback
+    def _palette(self) -> _Palette:
+        """Resolve the grid's colours from the active theme.
 
-    def _event_fill_bg(self) -> str:
-        return self._theme_color("panel", "#303030")
+        Event fills come from the theme's `primary`/`secondary` accents
+        (the two alternation shades); each title colour is computed for
+        maximum contrast against its fill so text stays readable under any
+        theme — this is what lets a high-contrast theme actually raise the
+        grid's contrast, not just tint the event bars.
+        """
+        fill_a = self._theme_var("primary")
+        fill_b = self._theme_var("secondary", "primary-darken-2", "primary")
+        return _Palette(
+            fill_a=fill_a,
+            fill_b=fill_b,
+            fg_a=_contrast_fg(fill_a),
+            fg_b=_contrast_fg(fill_b),
+            # Subtle round-hour marker and low-profile event end-cap.
+            hour_marker=self._theme_var("panel", "surface-lighten-2", "surface"),
+            end_fg=self._theme_var("surface", "background"),
+        )
 
-    def _event_start_style(self) -> str:
-        fg = self._theme_color("foreground", "#FFFFFF")
-        return f"{fg} on {self._event_fill_bg()}"
+    def _theme_var(self, name: str, *fallbacks: str) -> str:
+        """Concrete colour for a Textual theme variable, by name.
 
-    def _event_body_style(self) -> str:
-        return f"on {self._event_fill_bg()}"
-
-    def _grid_bg_fg(self) -> str:
-        # Foreground matching the default grid background tone.
-        return self._theme_color("background", "#1E1E1E")
-
-    def _hour_marker_style(self) -> str:
-        # Subtle top marker for round-hour rows.
-        return self._theme_color("panel", "#303030")
+        Reads the resolved `app.theme_variables` (always populated for the
+        active theme), trying `name` then each fallback key. Skips Textual
+        `auto …` values (e.g. `text`), which Rich cannot render. The chain
+        ends at `surface`/`foreground`, which every built-in theme defines,
+        so no hardcoded per-colour hex is needed.
+        """
+        variables = self.app.theme_variables
+        for key in (name, *fallbacks, "surface", "foreground"):
+            value = variables.get(key)
+            if isinstance(value, str) and value and not value.startswith("auto"):
+                return value
+        return "#808080"  # unreachable: surface/foreground are always set
 
 
 # -- pure helpers (Layer-1 testable) --------------------------------------
@@ -343,7 +395,9 @@ def _cell_for_slot(
     first_end_dt = (first.occurrence.end or first.occurrence.start).astimezone()
     first_start_min = first_start.hour * 60 + first_start.minute
     first_end_min = (
-        24 * 60 if first_end_dt.date() > day else first_end_dt.hour * 60 + first_end_dt.minute
+        24 * 60
+        if first_end_dt.date() > day
+        else first_end_dt.hour * 60 + first_end_dt.minute
     )
     is_start = first_start_min >= slot_start
     is_end = (not is_start) and first_end_min <= slot_end

@@ -129,7 +129,11 @@ class HelpScreen(Screen[None]):
             with Horizontal(id="help-columns"):
                 yield Static(_render_column(left_sections), classes="help-column")
                 yield Static(_render_column(right_sections), classes="help-column")
-            yield Static("Press F1 or Esc to close.", id="help-hint")
+            yield Static(
+                "Ctrl+P: command palette (change theme) · "
+                "Press F1 or Esc to close.",
+                id="help-hint",
+            )
         yield Footer()
 
     def action_close(self) -> None:

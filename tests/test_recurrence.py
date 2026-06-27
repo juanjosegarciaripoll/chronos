@@ -605,7 +605,9 @@ class PopulateAlarmsTest(unittest.TestCase):
     def test_idempotent_on_second_call(self) -> None:
         uid = "alarm-display-1@example.com"
         self._insert_and_expand(
-            uid, corpus.event_with_display_alarm(), datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+            uid,
+            corpus.event_with_display_alarm(),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
         )
         populate_alarms(
             index=self.index,

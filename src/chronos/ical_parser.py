@@ -195,7 +195,9 @@ def _parse_valarm(valarm: object) -> ParsedAlarm | None:
         )
     if isinstance(trigger_val, datetime):
         utc_trigger = (
-            trigger_val.astimezone(UTC) if trigger_val.tzinfo else trigger_val.replace(tzinfo=UTC)
+            trigger_val.astimezone(UTC)
+            if trigger_val.tzinfo
+            else trigger_val.replace(tzinfo=UTC)
         )
         return ParsedAlarm(
             action=action,

@@ -74,7 +74,10 @@ class TcpTestCase(unittest.IsolatedAsyncioTestCase):
     def _server_and_token(self) -> tuple[object, str]:
         from chronos.mcp_server import build_mcp_server
 
-        return build_mcp_server(index=self.index, mirror=self.mirror), secrets.token_hex(16)
+        return (
+            build_mcp_server(index=self.index, mirror=self.mirror),
+            secrets.token_hex(16),
+        )
 
     async def _start_tcp(
         self, server: object, token: str
@@ -88,7 +91,9 @@ class StartTcpServerTest(TcpTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.state_file = Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
+        self.state_file = (
+            Path(self.enterContext(tempfile.TemporaryDirectory())) / "mcp_server.json"
+        )
 
     async def _wait_for_state(self) -> McpServerState:
         for _ in range(40):
@@ -102,7 +107,9 @@ class StartTcpServerTest(TcpTestCase):
         from chronos.mcp_server import start_tcp_server
 
         task = asyncio.create_task(
-            start_tcp_server(index=self.index, mirror=self.mirror, state_file=self.state_file)
+            start_tcp_server(
+                index=self.index, mirror=self.mirror, state_file=self.state_file
+            )
         )
         try:
             state = await self._wait_for_state()
@@ -143,7 +150,9 @@ class StartTcpServerTest(TcpTestCase):
 
         standalone = AsyncMock()
         with patch("tinymcp.transport.run_stdio_standalone", standalone):
-            await run_mcp_stdio(index=self.index, mirror=self.mirror, state_file=self.state_file)
+            await run_mcp_stdio(
+                index=self.index, mirror=self.mirror, state_file=self.state_file
+            )
         standalone.assert_awaited_once()
 
     async def test_run_mcp_stdio_bridges_to_running_server(self) -> None:
@@ -153,7 +162,9 @@ class StartTcpServerTest(TcpTestCase):
         from chronos.mcp_server import run_mcp_stdio, start_tcp_server
 
         task = asyncio.create_task(
-            start_tcp_server(index=self.index, mirror=self.mirror, state_file=self.state_file)
+            start_tcp_server(
+                index=self.index, mirror=self.mirror, state_file=self.state_file
+            )
         )
         try:
             state = await self._wait_for_state()
@@ -167,7 +178,9 @@ class StartTcpServerTest(TcpTestCase):
                 bridged_token = token
 
             with patch("tinymcp.transport.run_stdio_bridge", _capture_bridge):
-                await run_mcp_stdio(index=self.index, mirror=self.mirror, state_file=self.state_file)
+                await run_mcp_stdio(
+                index=self.index, mirror=self.mirror, state_file=self.state_file
+            )
 
             self.assertEqual(bridged_port, state.port)
             self.assertEqual(bridged_token, state.token)

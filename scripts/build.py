@@ -7,11 +7,11 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Callable, Final
-
+from typing import Final
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 DIST_DIR: Final[Path] = ROOT / "dist"

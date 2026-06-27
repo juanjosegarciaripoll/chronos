@@ -9,7 +9,6 @@ from typing import Any
 
 from chronos.authorization import Authorization
 from chronos.http import Client, HttpResponse, HttpStatusError
-from chronos.http.errors import HttpConnectionError
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -119,9 +118,11 @@ class HttpClientTest(unittest.TestCase):
             req.end_headers()
 
         self._set_handler(handler)
-        with Client(self.base_url) as client:
-            with self.assertRaises(HttpStatusError) as ctx:
-                client.request("GET", "/protected")
+        with (
+            Client(self.base_url) as client,
+            self.assertRaises(HttpStatusError) as ctx,
+        ):
+            client.request("GET", "/protected")
         self.assertEqual(ctx.exception.status, 401)
 
     def test_basic_auth_header_is_set(self) -> None:
@@ -211,8 +212,10 @@ class HttpClientTest(unittest.TestCase):
             req.wfile.write(b"Internal Server Error")
 
         self._set_handler(handler)
-        with Client(self.base_url) as client:
-            with self.assertRaises(HttpStatusError) as ctx:
-                client.request("GET", "/error")
+        with (
+            Client(self.base_url) as client,
+            self.assertRaises(HttpStatusError) as ctx,
+        ):
+            client.request("GET", "/error")
         self.assertEqual(ctx.exception.status, 500)
         self.assertEqual(ctx.exception.body, b"Internal Server Error")

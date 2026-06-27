@@ -270,7 +270,9 @@ END:VEVENT
 
 def event_with_display_alarm(offset_minutes: int = -15) -> bytes:
     """VEVENT with a single DISPLAY VALARM relative to start."""
-    offset_str = f"-PT{abs(offset_minutes)}M" if offset_minutes < 0 else f"PT{offset_minutes}M"
+    offset_str = (
+        f"-PT{abs(offset_minutes)}M" if offset_minutes < 0 else f"PT{offset_minutes}M"
+    )
     return _vcalendar(
         f"""
 BEGIN:VEVENT

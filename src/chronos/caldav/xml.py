@@ -28,11 +28,11 @@ ET.register_namespace("c", _CALDAV_NS)
 # ---- XML body constants ----------------------------------------------------
 
 _CTAG_PROPFIND_BODY = (
-    '<?xml version="1.0" encoding="utf-8" ?>'
-    '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
-    "<d:prop><cs:getctag/></d:prop>"
-    "</d:propfind>"
-).encode("utf-8")
+    b'<?xml version="1.0" encoding="utf-8" ?>'
+    b'<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
+    b"<d:prop><cs:getctag/></d:prop>"
+    b"</d:propfind>"
+)
 
 # calendar-query REPORT (RFC 4791 §7.8) asking only for `getetag`.
 #
@@ -45,52 +45,52 @@ _CTAG_PROPFIND_BODY = (
 # holding events or todos, which is exactly the set chronos ingests
 # (ComponentKind has only VEVENT/VTODO). Verified against calendario.csic.es.
 _CALENDAR_QUERY_BODY = (
-    '<?xml version="1.0" encoding="utf-8" ?>'
-    '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
-    "<d:prop><d:getetag/></d:prop>"
-    '<c:filter><c:comp-filter name="VCALENDAR">'
-    '<c:comp-filter name="VEVENT"/>'
-    '<c:comp-filter name="VTODO"/>'
-    "</c:comp-filter></c:filter>"
-    "</c:calendar-query>"
-).encode("utf-8")
+    b'<?xml version="1.0" encoding="utf-8" ?>'
+    b'<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+    b"<d:prop><d:getetag/></d:prop>"
+    b'<c:filter><c:comp-filter name="VCALENDAR">'
+    b'<c:comp-filter name="VEVENT"/>'
+    b'<c:comp-filter name="VTODO"/>'
+    b"</c:comp-filter></c:filter>"
+    b"</c:calendar-query>"
+)
 
 # Depth-1 PROPFIND against the calendar home-set.
 _CALENDARS_PROPFIND_BODY = (
-    '<?xml version="1.0" encoding="utf-8" ?>'
-    '<d:propfind xmlns:d="DAV:" '
-    'xmlns:c="urn:ietf:params:xml:ns:caldav" '
-    'xmlns:cs="http://calendarserver.org/ns/">'
-    "<d:prop>"
-    "<d:displayname/>"
-    "<d:resourcetype/>"
-    "<c:supported-calendar-component-set/>"
-    "<cs:getctag/>"
-    "<d:sync-token/>"
-    "</d:prop>"
-    "</d:propfind>"
-).encode("utf-8")
+    b'<?xml version="1.0" encoding="utf-8" ?>'
+    b'<d:propfind xmlns:d="DAV:" '
+    b'xmlns:c="urn:ietf:params:xml:ns:caldav" '
+    b'xmlns:cs="http://calendarserver.org/ns/">'
+    b"<d:prop>"
+    b"<d:displayname/>"
+    b"<d:resourcetype/>"
+    b"<c:supported-calendar-component-set/>"
+    b"<cs:getctag/>"
+    b"<d:sync-token/>"
+    b"</d:prop>"
+    b"</d:propfind>"
+)
 
 _SYNC_TOKEN_PROPFIND_BODY = (
-    '<?xml version="1.0" encoding="utf-8" ?>'
-    '<d:propfind xmlns:d="DAV:">'
-    "<d:prop><d:sync-token/></d:prop>"
-    "</d:propfind>"
-).encode("utf-8")
+    b'<?xml version="1.0" encoding="utf-8" ?>'
+    b'<d:propfind xmlns:d="DAV:">'
+    b"<d:prop><d:sync-token/></d:prop>"
+    b"</d:propfind>"
+)
 
 _CURRENT_USER_PRINCIPAL_BODY = (
-    '<?xml version="1.0" encoding="utf-8" ?>'
-    '<d:propfind xmlns:d="DAV:">'
-    "<d:prop><d:current-user-principal/></d:prop>"
-    "</d:propfind>"
-).encode("utf-8")
+    b'<?xml version="1.0" encoding="utf-8" ?>'
+    b'<d:propfind xmlns:d="DAV:">'
+    b"<d:prop><d:current-user-principal/></d:prop>"
+    b"</d:propfind>"
+)
 
 _CALENDAR_HOME_SET_BODY = (
-    '<?xml version="1.0" encoding="utf-8" ?>'
-    '<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
-    "<d:prop><c:calendar-home-set/></d:prop>"
-    "</d:propfind>"
-).encode("utf-8")
+    b'<?xml version="1.0" encoding="utf-8" ?>'
+    b'<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+    b"<d:prop><c:calendar-home-set/></d:prop>"
+    b"</d:propfind>"
+)
 
 
 # ---- Body builders ---------------------------------------------------------

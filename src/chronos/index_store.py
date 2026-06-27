@@ -529,7 +529,8 @@ class SqliteIndexRepository:
             for alarm in alarms:
                 conn.execute(
                     "INSERT INTO alarms "
-                    "(component_id, occurrence_start, trigger_at, action, description, fired_at) "
+                    "(component_id, occurrence_start, trigger_at, action, "
+                    "description, fired_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         component_id,

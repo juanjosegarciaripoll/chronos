@@ -10,7 +10,13 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Input, Label, Select
 
-from chronos.domain import AlarmAction, CalendarRef, ParsedAlarm, StoredComponent, VEvent
+from chronos.domain import (
+    AlarmAction,
+    CalendarRef,
+    ParsedAlarm,
+    StoredComponent,
+    VEvent,
+)
 from chronos.ical_parser import extract_alarm_triggers
 from chronos.tui.bindings import edit_bindings
 from chronos.tui.widgets.date_picker import DatePicker, InvalidDateError

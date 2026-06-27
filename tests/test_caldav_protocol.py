@@ -8,7 +8,7 @@ exception translation for 401/403/404/409/412/500.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 from chronos.caldav.errors import (
     CalDAVAuthError,
@@ -32,7 +32,6 @@ from chronos.caldav.protocol import (
 )
 from chronos.domain import ComponentKind
 from chronos.http import HttpResponse, HttpStatusError
-
 
 # ---------------------------------------------------------------------------
 # Stub helpers
@@ -166,7 +165,9 @@ def _multiget_response(*entries: tuple[str, str, str]) -> bytes:
         if etag:
             prop_inner += f"<d:getetag>{etag}</d:getetag>".encode()
         if ics:
-            prop_inner += f"<c:calendar-data><![CDATA[{ics}]]></c:calendar-data>".encode()
+            prop_inner += (
+                f"<c:calendar-data><![CDATA[{ics}]]></c:calendar-data>".encode()
+            )
         parts.append(
             b"<d:response>"
             + f"<d:href>{href}</d:href>".encode()

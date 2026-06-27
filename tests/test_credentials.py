@@ -292,7 +292,7 @@ class InvalidGrantReauthTest(unittest.TestCase):
     interactive authorizer and continues transparently."""
 
     def test_invalid_grant_triggers_reauth_when_authorizer_available(self) -> None:
-        from unittest.mock import MagicMock, call, patch
+        from unittest.mock import MagicMock, patch
 
         from chronos.domain import OAuthCredential
         from chronos.oauth import InvalidGrantError, StoredTokens

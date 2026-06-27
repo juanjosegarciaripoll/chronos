@@ -136,6 +136,9 @@ class AppConfig:
     use_utf8: bool
     editor: str | None
     accounts: tuple[AccountConfig, ...]
+    # Textual theme name for the TUI colour scheme. None means use the
+    # built-in default chosen at launch (see chronos.tui.app.DEFAULT_THEME).
+    theme: str | None = None
 
 
 @dataclass(frozen=True)

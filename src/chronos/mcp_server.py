@@ -95,8 +95,10 @@ def remove_state(state_file: Path) -> None:
         state_file.unlink()
 
 
-def is_server_reachable(state_file: Path, *, timeout: float = 0.1) -> McpServerState | None:
-    """Return the live state if its TCP port answers, else clean up stale file and return None."""
+def is_server_reachable(
+    state_file: Path, *, timeout: float = 0.1
+) -> McpServerState | None:
+    """Return live state if its TCP port answers, else clear stale file."""
     import socket
 
     state = read_state(state_file)

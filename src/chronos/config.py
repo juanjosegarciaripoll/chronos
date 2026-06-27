@@ -50,6 +50,7 @@ def parse(data: dict[str, object]) -> AppConfig:
     config_version = _require_int(data, "config_version", "")
     use_utf8 = _optional_bool(data, "use_utf8", "", default=False)
     editor = _optional_str(data, "editor", "", default=None)
+    theme = _optional_str(data, "theme", "", default=None)
     accounts_raw = data.get("accounts", [])
     if not isinstance(accounts_raw, list):
         raise ConfigError("'accounts' must be an array of tables", "accounts")
@@ -62,6 +63,7 @@ def parse(data: dict[str, object]) -> AppConfig:
         use_utf8=use_utf8,
         editor=editor,
         accounts=accounts,
+        theme=theme,
     )
 
 
@@ -287,10 +289,12 @@ def _toml_array(items: list[str]) -> str:
 
 
 def _toml_inline_table(d: dict[str, object]) -> str:
-    pairs = [
-        f"{k} = {_toml_array(cast(list[str], v)) if isinstance(v, list) else _toml_scalar(cast(str | int | bool, v))}"
-        for k, v in d.items()
-    ]
+    def _render(v: object) -> str:
+        if isinstance(v, list):
+            return _toml_array(cast(list[str], v))
+        return _toml_scalar(cast(str | int | bool, v))
+
+    pairs = [f"{k} = {_render(v)}" for k, v in d.items()]
     return "{ " + ", ".join(pairs) + " }"
 
 
@@ -326,6 +330,8 @@ def dump(config: AppConfig) -> dict[str, object]:
     }
     if config.editor is not None:
         data["editor"] = config.editor
+    if config.theme is not None:
+        data["theme"] = config.theme
     data["accounts"] = [_dump_account(a) for a in config.accounts]
     return data
 

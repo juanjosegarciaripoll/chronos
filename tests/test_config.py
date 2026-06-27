@@ -82,6 +82,18 @@ class ParseTopLevelTest(unittest.TestCase):
             parse({"config_version": 1, "accounts": "not a list"})
         self.assertIn("accounts", ctx.exception.key)
 
+    def test_theme_defaults_to_none_and_round_trips(self) -> None:
+        without = parse({"config_version": 1})
+        self.assertIsNone(without.theme)
+        # Absent theme stays out of the serialised form.
+        self.assertNotIn("theme", dump(without))
+
+        with_theme = parse({"config_version": 1, "theme": "nord"})
+        self.assertEqual(with_theme.theme, "nord")
+        # parse(dump(c)) == c round-trip invariant holds for theme.
+        self.assertEqual(parse(dump(with_theme)), with_theme)
+        self.assertEqual(dump(with_theme)["theme"], "nord")
+
 
 class ParseAccountTest(unittest.TestCase):
     BASE_ACCOUNT: dict[str, object] = {

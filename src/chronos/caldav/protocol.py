@@ -69,7 +69,9 @@ def discover_principal(client: Client, base_path: str = "/") -> str:
             ) from exc
         raise CalDAVError(f"PROPFIND {base_path}: HTTP {exc.status}") from exc
 
-    principal = _parse_current_user_principal(resp.body, base_url=_client_base_url(client, base_path))
+    principal = _parse_current_user_principal(
+        resp.body, base_url=_client_base_url(client, base_path)
+    )
     if principal is None:
         # Server doesn't support current-user-principal; return path as-is
         return base_path

@@ -110,6 +110,45 @@ class ParserTest(CliTestCase):
             cli.main(["nope"])
 
 
+class ResolveThemeTest(unittest.TestCase):
+    def test_cli_overrides_config(self) -> None:
+        theme, err = cli._resolve_theme("nord", "gruvbox")
+        self.assertIsNone(err)
+        self.assertEqual(theme, "nord")
+
+    def test_config_used_when_no_cli(self) -> None:
+        theme, err = cli._resolve_theme(None, "gruvbox")
+        self.assertIsNone(err)
+        self.assertEqual(theme, "gruvbox")
+
+    def test_falls_back_to_default_theme(self) -> None:
+        from chronos.tui.app import DEFAULT_THEME
+
+        theme, err = cli._resolve_theme(None, None)
+        self.assertIsNone(err)
+        self.assertEqual(theme, DEFAULT_THEME)
+        # The default must itself be a real, known theme.
+        self.assertIn(DEFAULT_THEME, cli._available_theme_names())
+
+    def test_unknown_theme_returns_error(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            theme, err = cli._resolve_theme("not-a-real-theme", None)
+        self.assertIsNone(theme)
+        self.assertEqual(err, 1)
+        self.assertIn("unknown theme", stderr.getvalue())
+
+    def test_list_themes_prints_and_exits_zero(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = cli.main(["tui", "--list-themes"], is_interactive=lambda: False)
+        self.assertEqual(code, 0)
+        printed = stdout.getvalue().split()
+        # Every printed name is a real theme; flexoki (the default) is present.
+        self.assertIn("flexoki", printed)
+        self.assertEqual(printed, cli._available_theme_names())
+
+
 class IcsShortcutParseTest(unittest.TestCase):
     def test_rewrites_bare_ics_to_tui_import(self) -> None:
         argv = cli._rewrite_ics_shortcut(["meeting.ics"])  # pyright: ignore[reportPrivateUsage]

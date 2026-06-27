@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import ssl
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from chronos.authorization import Authorization
@@ -70,10 +71,8 @@ class Client:
         key = (scheme, netloc)
         old = self._pool.pop(key, None)
         if old is not None:
-            try:
+            with contextlib.suppress(Exception):
                 old.close()
-            except Exception:
-                pass
         conn = self._make_conn(scheme, netloc)
         self._pool[key] = conn
         return conn
@@ -130,12 +129,10 @@ class Client:
                 else:
                     current_path = location
                 # Preserve method on 307/308; on 301/302 for non-GET, preserve too
-                if resp.status in (307, 308):
-                    pass  # keep method and body
-                elif resp.status in (301, 302):
-                    if current_method == "GET":
-                        current_body = b""  # standard: GET stays GET, no body
-                    # else: preserve method and body
+                # 307/308 keep method and body. 301/302 also preserve method
+                # and body, except GET stays GET with no body.
+                if resp.status in (301, 302) and current_method == "GET":
+                    current_body = b""
                 continue
 
             # Non-2xx raises
@@ -195,10 +192,8 @@ class Client:
 
     def close(self) -> None:
         for conn in self._pool.values():
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
         self._pool.clear()
 
     def __enter__(self) -> Client:

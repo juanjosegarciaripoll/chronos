@@ -137,6 +137,14 @@ def main(
     if args.command == "oauth":
         return _dispatch_oauth(args, out, err, config_path=config_path)
 
+    # `tui --list-themes` just enumerates Textual's bundled themes; it
+    # needs no config, mirror, or index, so handle it before the data-path
+    # plumbing below.
+    if args.command == "tui" and getattr(args, "list_themes", False):
+        for name in _available_theme_names():
+            out.write(f"{name}\n")
+        return 0
+
     # Data commands need a config. If none exists, offer to bootstrap one
     # interactively; otherwise print a helpful message and exit. Tests
     # that inject a `context_factory` bring their own config and bypass
@@ -514,6 +522,18 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="import_ics",
         help=argparse.SUPPRESS,
     )
+    tui_p.add_argument(
+        "--theme",
+        metavar="THEME",
+        default=None,
+        help="Textual theme name (overrides config). See --list-themes.",
+    )
+    tui_p.add_argument(
+        "--list-themes",
+        action="store_true",
+        dest="list_themes",
+        help="Print available Textual theme names and exit.",
+    )
 
     sub.add_parser(
         "mcp",
@@ -726,7 +746,18 @@ def _dispatch(
             debug=bool(getattr(args, "debug", False)),
         )
     if command == "tui":
-        return cmd_tui(ctx, startup_ics_path=getattr(args, "import_ics", None))
+        # `--list-themes` is handled early in main(); here we resolve the
+        # theme to apply (cli > config > default) and validate it.
+        theme, theme_err = _resolve_theme(
+            getattr(args, "theme", None), ctx.config.theme
+        )
+        if theme_err is not None:
+            return theme_err
+        return cmd_tui(
+            ctx,
+            startup_ics_path=getattr(args, "import_ics", None),
+            theme=theme,
+        )
     if command == "mcp":
         return cmd_mcp(ctx)
     if command == "import":
@@ -1354,7 +1385,42 @@ def _resolve_import_calendar(
     return calendars[choice - 1]
 
 
-def cmd_tui(ctx: CliContext, *, startup_ics_path: Path | None = None) -> int:
+def _available_theme_names() -> list[str]:
+    """Names of every Textual theme bundled in this install, sorted."""
+    from textual.app import App
+
+    return sorted(App().available_themes)
+
+
+def _resolve_theme(
+    cli_theme: str | None, config_theme: str | None
+) -> tuple[str | None, int | None]:
+    """Pick the effective theme and validate it against Textual's themes.
+
+    Precedence: `--theme` flag > config `theme` > `DEFAULT_THEME`. Returns
+    `(name, None)` on success, or `(None, error_code)` when the requested
+    name is not a known theme (so the caller can exit non-zero).
+    """
+    from chronos.tui.app import DEFAULT_THEME
+
+    effective = cli_theme or config_theme or DEFAULT_THEME
+    available = _available_theme_names()
+    if effective not in available:
+        names = ", ".join(available)
+        print(
+            f"error: unknown theme {effective!r}. Available: {names}",
+            file=sys.stderr,
+        )
+        return None, 1
+    return effective, None
+
+
+def cmd_tui(
+    ctx: CliContext,
+    *,
+    startup_ics_path: Path | None = None,
+    theme: str | None = None,
+) -> int:
     # Imported lazily so `chronos --help` and other commands don't pull
     # Textual into the import graph.
     from chronos.tui import ChronosApp, TuiServices
@@ -1404,7 +1470,7 @@ def cmd_tui(ctx: CliContext, *, startup_ics_path: Path | None = None) -> int:
         sync_runner=build_sync_runner(tui_ctx),
         startup_ics_path=startup_ics_path,
     )
-    app = ChronosApp(services)
+    app = ChronosApp(services, theme_name=theme)
     app_box.append(app)
     with _redirect_logs_to_file():
         app.run()

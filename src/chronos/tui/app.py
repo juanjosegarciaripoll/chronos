@@ -16,10 +16,19 @@ from chronos.protocols import (
     MirrorRepository,
 )
 from chronos.tui.screens.main_screen import MainScreen
-from chronos.tui.terminal import pop_terminal_title, push_terminal_title, set_terminal_title
+from chronos.tui.terminal import (
+    pop_terminal_title,
+    push_terminal_title,
+    set_terminal_title,
+)
 
 _ALARM_POLL_SECS = 30.0
 _ALARM_LOOKBACK = timedelta(minutes=15)
+
+# Built-in Textual theme chosen when the user has not set one (config /
+# --theme). flexoki is near-black-on-near-white, the highest-contrast of
+# the bundled themes; override per-user via config or the --theme flag.
+DEFAULT_THEME = "flexoki"
 
 SyncRunner = Callable[..., Sequence[SyncResult]]
 """Runs every configured account's sync.
@@ -59,10 +68,11 @@ class ChronosApp(App[None]):
     constructor runs synchronously without touching any I/O.
     """
 
-    # Textual binds Ctrl-P to its built-in command palette by default;
-    # chronos's keyboard surface is small and visible from the F1 help
-    # screen, so the palette is more confusing than useful here.
-    ENABLE_COMMAND_PALETTE = False
+    # Ctrl-P opens Textual's built-in command palette, which includes the
+    # "Change theme" picker — the live in-app theme switcher. Kept enabled
+    # so users can raise contrast on the fly; the F1 help screen documents
+    # it alongside chronos's own keybindings.
+    ENABLE_COMMAND_PALETTE = True
 
     CSS = """
     #main-body { height: 1fr; }
@@ -130,9 +140,16 @@ class ChronosApp(App[None]):
     }
     """
 
-    def __init__(self, services: TuiServices) -> None:
+    def __init__(
+        self, services: TuiServices, theme_name: str | None = None
+    ) -> None:
         super().__init__()
         self.services = services
+        # The CLI resolves a concrete built-in theme (config / --theme /
+        # DEFAULT_THEME), so a running app always has an explicit theme.
+        # Tests that construct ChronosApp(services) keep Textual's default.
+        if theme_name is not None:
+            self.theme = theme_name
 
     def on_mount(self) -> None:
         push_terminal_title()

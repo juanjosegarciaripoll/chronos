@@ -29,7 +29,9 @@ def _session_with_mock_client(mock_client: MagicMock) -> CalDAVHttpSession:
         )
 
 
-def _resp(status: int = 207, body: bytes = b"", headers: dict[str, str] | None = None) -> HttpResponse:
+def _resp(
+    status: int = 207, body: bytes = b"", headers: dict[str, str] | None = None
+) -> HttpResponse:
     return HttpResponse(status=status, headers=headers or {}, body=body)
 
 

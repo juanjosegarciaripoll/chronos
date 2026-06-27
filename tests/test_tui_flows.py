@@ -1462,19 +1462,20 @@ class HelpScreenTest(TuiFlowTestCase):
             self.assertIn("Tools", text)
 
 
-class CommandPaletteDisabledTest(TuiFlowTestCase):
-    async def test_ctrl_p_does_not_open_command_palette(self) -> None:
-        # Textual binds Ctrl-P to its command palette by default.
-        # `ENABLE_COMMAND_PALETTE = False` on ChronosApp turns that
-        # off; a stray Ctrl-P should leave the user on MainScreen.
+class CommandPaletteEnabledTest(TuiFlowTestCase):
+    async def test_ctrl_p_opens_command_palette(self) -> None:
+        # The command palette is enabled so users can switch themes live
+        # (Ctrl-P → "Change theme"). A stray Ctrl-P opens that palette.
+        from textual.command import CommandPalette
+
         services = self.services()
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("ctrl+p")
             await pilot.pause()
-            self.assertIsInstance(pilot.app.screen, MainScreen)
-            self.assertFalse(app.ENABLE_COMMAND_PALETTE)
+            self.assertTrue(app.ENABLE_COMMAND_PALETTE)
+            self.assertIsInstance(pilot.app.screen, CommandPalette)
 
 
 class SyncFlowTest(TuiFlowTestCase):
@@ -1745,7 +1746,7 @@ class DraftAndDetailScreenWiringTest(unittest.TestCase):
 
 
 class AlarmHelperTest(unittest.TestCase):
-    """Unit tests for alarm-related pure helpers in mutations, views, and edit screen."""
+    """Unit tests for alarm-related pure helpers in mutations/views/edit."""
 
     def test_fmt_duration_negative_minutes(self) -> None:
         from chronos.mutations import _fmt_duration
@@ -1966,8 +1967,8 @@ class AlarmHelperTest(unittest.TestCase):
         self.assertEqual(_alarms_to_input(alarms), "")
 
     def test_render_event_detail_shows_reminders(self) -> None:
-        from tests import corpus
         from chronos.tui.views import render_event_detail
+        from tests import corpus
 
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "alarm-display-1@example.com")
         component = VEvent(
@@ -1992,8 +1993,8 @@ class AlarmHelperTest(unittest.TestCase):
         self.assertIn("15 min before start", detail)
 
     def test_render_event_detail_no_reminders_field_when_none(self) -> None:
-        from tests import corpus
         from chronos.tui.views import render_event_detail
+        from tests import corpus
 
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "simple-event-1@example.com")
         component = VEvent(
@@ -2639,6 +2640,64 @@ class TimelineGridFlowTest(TuiFlowTestCase):
                 if timeline.cell_ref(r, 1) is not None
             }
             self.assertEqual(refs, {rows[0].component.ref, rows[1].component.ref})
+
+    @staticmethod
+    def _event_cell_style(timeline: object) -> str:
+        """Rich style string of the timeline's first event cell."""
+        from textual.coordinate import Coordinate
+
+        for r in range(timeline.row_count):  # type: ignore[attr-defined]
+            for c in range(1, len(timeline.columns)):  # type: ignore[attr-defined]
+                if timeline.cell_ref(r, c) is not None:  # type: ignore[attr-defined]
+                    cell = timeline.get_cell_at(Coordinate(r, c))  # type: ignore[attr-defined]
+                    return str(getattr(cell, "style", "") or "")
+        return ""
+
+    async def test_grid_repaints_on_theme_change_with_themed_colours(self) -> None:
+        # The grid paints cells as Rich Text with concrete theme colours,
+        # so it must re-render when the theme changes (subscribed to
+        # theme_changed_signal) — otherwise only CSS-styled widgets would
+        # pick up a higher-contrast theme.
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        day = date(2026, 5, 1)
+        rows = [
+            TimelineGridHelpersTest._all_day_row(  # reuse the row builder
+                "ev",
+                "Meeting",
+                datetime(2026, 5, 1, 9, 0).astimezone(),
+                datetime(2026, 5, 1, 9, 30).astimezone(),
+            )
+        ]
+        app = ChronosApp(self.services())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            timeline.show_days([(day, rows)], today=day)
+            await pilot.pause()
+
+            app.theme = "flexoki"
+            await pilot.pause()
+            style_flexoki = self._event_cell_style(timeline)
+            app.theme = "nord"
+            await pilot.pause()
+            style_nord = self._event_cell_style(timeline)
+
+            # Concrete hex colours (not Textual `auto …`) on a real fill.
+            self.assertRegex(style_flexoki, r"on #[0-9A-Fa-f]{6}")
+            self.assertRegex(style_nord, r"on #[0-9A-Fa-f]{6}")
+            # Title colour is a computed black/white contrast colour.
+            self.assertTrue(
+                style_flexoki.startswith("#000000")
+                or style_flexoki.startswith("#FFFFFF")
+            )
+            # The repaint actually tracks the theme: different themes →
+            # different fills.
+            self.assertNotEqual(style_flexoki, style_nord)
 
     async def test_grid_view_passes_four_day_columns(self) -> None:
         from chronos.tui.widgets.timeline_grid import TimelineGrid
