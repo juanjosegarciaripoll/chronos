@@ -105,21 +105,32 @@ class ChronosApp(App[None]):
     .dialog-box {
         padding: 1 2;
         height: auto;
+        border: solid $primary;
     }
     .dialog-box .dialog-title {
+        text-style: bold;
         margin-bottom: 1;
     }
     .dialog-box .dialog-actions {
         margin-top: 1;
         align-horizontal: right;
-        /* `height: 3` reserves room for the standard Textual button
-           row even when the dialog body is tall — `height: auto` on
-           the parent + a tall RichLog above could otherwise squash
-           the action row to zero. */
-        height: 3;
+        /* `height: 1` matches the compact single-row buttons below;
+           an explicit height keeps the action row from being squashed
+           to zero when the dialog body is tall (e.g. a RichLog above)
+           under the parent's `height: auto`. */
+        height: 1;
     }
+    /* Compact, borderless buttons in the Pony style: a single text row
+       with the variant colour as background, no chunky Textual border. */
     .dialog-box .dialog-actions Button {
-        margin-left: 1;
+        margin: 0 1;
+        height: 1;
+        min-width: 0;
+        border: none;
+        padding: 0 1;
+    }
+    .dialog-box .dialog-actions Button:focus {
+        text-style: reverse bold;
     }
     /* Per-dialog width and height overrides. */
     #event-detail    { width: 80; max-height: 80%; }
