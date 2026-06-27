@@ -598,6 +598,7 @@ class MainScreen(Screen[None]):
             existing=component,
             default_calendar=component.ref.calendar,
             on_save=self._save_event,
+            on_delete=self.delete_with_confirm,
         )
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 

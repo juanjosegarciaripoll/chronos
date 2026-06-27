@@ -113,8 +113,14 @@ def main_bindings() -> list[BindingType]:
 
 
 def edit_bindings() -> list[BindingType]:
+    # `ctrl+d` deletes the event being edited. It only resolves to an
+    # action when editing an existing event (see
+    # `EventEditScreen.check_action`), so the footer hides it in
+    # "new event" mode. A Ctrl chord is used — like Save — because a
+    # bare letter would be swallowed as text by the focused Input.
     return [
         Binding("ctrl+s", "save", "Save"),
+        Binding("ctrl+d", "delete", "Delete"),
         Binding(KEY_BACK, "cancel", "Cancel"),
     ]
 

@@ -53,6 +53,7 @@ class EventEditScreen(Screen[None]):
         existing: StoredComponent | None,
         default_calendar: CalendarRef | None,
         on_save: Callable[[EditDraft], None],
+        on_delete: Callable[[StoredComponent], None] | None = None,
     ) -> None:
         super().__init__()
         if not calendars:
@@ -61,6 +62,7 @@ class EventEditScreen(Screen[None]):
         self._existing = existing
         self._default_calendar = default_calendar or calendars[0]
         self._on_save = on_save
+        self._on_delete = on_delete
         self._error: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -121,6 +123,25 @@ class EventEditScreen(Screen[None]):
 
     def action_cancel(self) -> None:
         self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
+
+    def action_delete(self) -> None:
+        # Only meaningful when editing — a not-yet-saved event has
+        # nothing to delete. Pop the form first so the delete
+        # confirmation (pushed by the caller) lands on top of the
+        # calendar view rather than over the edit screen.
+        if self._existing is None or self._on_delete is None:
+            return
+        existing = self._existing
+        self.app.pop_screen()  # pyright: ignore[reportUnknownMemberType]
+        self._on_delete(existing)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Hide the Delete binding from the footer (and disable the key)
+        # in "new event" mode, where there is nothing to delete yet.
+        del parameters
+        if action == "delete":
+            return self._existing is not None and self._on_delete is not None
+        return True
 
     def _collect(self) -> EditDraft:
         select = self.query_one(  # pyright: ignore[reportUnknownVariableType]

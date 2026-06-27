@@ -1342,6 +1342,55 @@ class DeleteFlowTest(TuiFlowTestCase):
         # flow so `_push_trashed` issues the server DELETE on next sync.
         self.assertEqual(trashed.local_status, LocalStatus.TRASHED)
 
+    async def test_delete_from_edit_screen_marks_trashed(self) -> None:
+        # The edit form exposes a Delete action (ctrl+d) so a user who
+        # opened an event to edit it can delete it without backing out
+        # to the main view first. It pops the form and routes through
+        # the same confirm flow as the main-screen delete.
+        services = self.services()
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "simple-event-1@example.com")
+        component = services.index.get_component(ref)
+        assert isinstance(component, VEvent)
+
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._edit_specific(component)
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            edit.action_delete()
+            await pilot.pause()
+            confirm = pilot.app.screen
+            assert isinstance(confirm, ConfirmScreen)
+            await pilot.press("y")
+            await pilot.pause()
+
+        trashed = services.index.get_component(ref)
+        assert trashed is not None
+        self.assertEqual(trashed.local_status, LocalStatus.TRASHED)
+
+    async def test_delete_action_is_noop_for_new_event(self) -> None:
+        # In "new event" mode there is nothing to delete: the binding is
+        # hidden (check_action) and the action is inert.
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen.action_new_event()
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            self.assertFalse(edit.check_action("delete", ()))
+            edit.action_delete()
+            await pilot.pause()
+            # Still on the edit form — nothing was popped or confirmed.
+            self.assertIsInstance(pilot.app.screen, EventEditScreen)
+
     async def test_cancel_keeps_event_active(self) -> None:
         services = self.services()
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "simple-event-1@example.com")
