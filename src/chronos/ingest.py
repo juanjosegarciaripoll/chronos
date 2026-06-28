@@ -54,6 +54,7 @@ from chronos.ical_parser import (
 )
 from chronos.mutations import trashed_copy
 from chronos.protocols import IndexRepository, MirrorRepository
+from chronos.recurrence import rebuild_caches
 from chronos.storage_indexing import build_stored_component
 
 # icalendar ships without type stubs; interactions with its API use
@@ -120,6 +121,11 @@ def ingest_ics_bytes(
         "renamed": 0,
     }
     details: list[str] = []
+    # Calendars+UIDs whose `occurrences`/`alarms` caches were invalidated
+    # by an upsert and must be re-expanded before the row is visible. A
+    # whole-event deletion is intentionally absent: its occurrence rows
+    # cascade away with the component, so nothing needs rebuilding.
+    touched: dict[CalendarRef, set[str]] = {}
 
     for uid, ics_bytes in uid_to_ics.items():
         # A CANCEL/REQUEST references an existing event by its (globally
@@ -148,6 +154,7 @@ def ingest_ics_bytes(
                 now=now,
                 counts=counts,
                 details=details,
+                touched=touched,
             )
             continue
 
@@ -168,7 +175,10 @@ def ingest_ics_bytes(
             on_conflict=on_conflict,
             counts=counts,
             details=details,
+            touched=touched,
         )
+
+    _rebuild_caches(index=index, touched=touched, now=now, details=details)
 
     return IngestReport(
         imported=counts["imported"],
@@ -179,6 +189,41 @@ def ingest_ics_bytes(
         renamed=counts["renamed"],
         details=tuple(details),
     )
+
+
+def _rebuild_caches(
+    *,
+    index: IndexRepository,
+    touched: dict[CalendarRef, set[str]],
+    now: datetime,
+    details: list[str],
+) -> None:
+    """Re-expand the occurrence + alarm caches for the imported UIDs.
+
+    `upsert_component` only *invalidates* a component's occurrence rows;
+    the agenda/day/grid views render VEVENTs from the `occurrences`
+    cache, so without this an imported event sits in `components` yet
+    stays invisible until the next `chronos sync`. Delegating to
+    `recurrence.rebuild_caches` (the same path sync uses) lets a plain
+    TUI refresh surface the import.
+
+    Safe against a running instance: the component rows are already
+    committed before we get here, the rebuild is pure local computation
+    in its own short transactions (SQLite WAL + `busy_timeout` serialize
+    it against the TUI), and any failure is reported without aborting the
+    import — the rows persist and the next sync rebuilds the cache.
+    """
+    for calendar, uids in touched.items():
+        frozen = frozenset(uids)
+        if not frozen:
+            continue
+        try:
+            rebuild_caches(index=index, calendar=calendar, now=now, uids=frozen)
+        except Exception as exc:  # noqa: BLE001 — never lose a committed import
+            details.append(
+                f"{calendar.calendar_name}: occurrence cache rebuild failed "
+                f"({exc}); imported events appear after the next sync"
+            )
 
 
 # Add / update -----------------------------------------------------------------
@@ -197,6 +242,7 @@ def _apply_add_or_update(
     on_conflict: OnConflict,
     counts: dict[str, int],
     details: list[str],
+    touched: dict[CalendarRef, set[str]],
 ) -> None:
     existing_master = _master_of(existing_rows)
 
@@ -210,6 +256,7 @@ def _apply_add_or_update(
             mirror=mirror,
             index=index,
             now=now,
+            touched=touched,
         )
         counts["imported"] += 1
         return
@@ -238,6 +285,7 @@ def _apply_add_or_update(
                 mirror=mirror,
                 index=index,
                 now=now,
+                touched=touched,
             )
             details.append(f"{uid}: renamed to {new_uid}")
             counts["renamed"] += 1
@@ -252,6 +300,7 @@ def _apply_add_or_update(
             mirror=mirror,
             index=index,
             now=now,
+            touched=touched,
         )
         counts["replaced"] += 1
         return
@@ -266,6 +315,7 @@ def _apply_add_or_update(
         mirror=mirror,
         index=index,
         now=now,
+        touched=touched,
     )
     counts["updated"] += 1
 
@@ -280,6 +330,7 @@ def _store_resource(
     mirror: MirrorRepository,
     index: IndexRepository,
     now: datetime,
+    touched: dict[CalendarRef, set[str]],
 ) -> None:
     """Write *ics* to the mirror and (re)build the index rows for *uid*.
 
@@ -314,6 +365,7 @@ def _store_resource(
                     local_flags=stored.local_flags | {LOCAL_FLAG_DIRTY},
                 )
             index.upsert_component(stored)
+    touched.setdefault(target, set()).add(uid)
 
 
 # Cancellation -----------------------------------------------------------------
@@ -330,6 +382,7 @@ def _apply_cancellation(
     now: datetime,
     counts: dict[str, int],
     details: list[str],
+    touched: dict[CalendarRef, set[str]],
 ) -> None:
     cancelled_rids = {pc.recurrence_id for pc in parsed if pc.recurrence_id}
 
@@ -348,6 +401,7 @@ def _apply_cancellation(
             index=index,
             counts=counts,
             details=details,
+            touched=touched,
         )
         return
 
@@ -381,6 +435,7 @@ def _cancel_instances(
     index: IndexRepository,
     counts: dict[str, int],
     details: list[str],
+    touched: dict[CalendarRef, set[str]],
 ) -> None:
     master = _master_of(existing_rows)
     if master is None or master.ref.recurrence_id is not None:
@@ -393,6 +448,10 @@ def _cancel_instances(
         with index.connection():
             for row in removed:
                 index.delete_component(row.ref)
+        # A surviving master (if any) must re-expand so the dropped
+        # instance reverts to its default occurrence rather than a hole.
+        if master is not None:
+            touched.setdefault(target, set()).add(uid)
         counts["cancelled"] += 1
         details.append(f"{uid}: cancelled {len(removed)} instance(s)")
         return
@@ -415,6 +474,7 @@ def _cancel_instances(
             index.upsert_component(
                 dataclasses.replace(row, raw_ics=new_ics, local_flags=flags)
             )
+    touched.setdefault(target, set()).add(uid)
     counts["cancelled"] += 1
     details.append(f"{uid}: cancelled {len(cancelled_rids)} instance(s)")
 

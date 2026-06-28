@@ -22,7 +22,7 @@ from chronos.domain import (
 )
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.paths import default_tui_state_path
-from chronos.recurrence import expand, populate_alarms
+from chronos.recurrence import rebuild_caches
 from chronos.tui.bindings import main_bindings
 from chronos.tui.screens.agenda_screen import (
     rows_for as agenda_rows,
@@ -67,14 +67,6 @@ from chronos.tui.widgets.timeline_grid import TimelineGrid
 
 if TYPE_CHECKING:
     from chronos.tui.app import ChronosApp, TuiServices
-
-
-# Mirrors `sync._OCCURRENCE_WINDOW_PAST` / `_OCCURRENCE_WINDOW_FUTURE`.
-# Kept local instead of importing because the local-edit path doesn't
-# otherwise depend on the sync engine and we don't want to pull
-# `chronos.sync` into the TUI's import graph.
-_LOCAL_OCCURRENCE_WINDOW_PAST = timedelta(days=365 * 30)
-_LOCAL_OCCURRENCE_WINDOW_FUTURE = timedelta(days=365 * 5)
 
 
 class MainScreen(Screen[None]):
@@ -497,8 +489,7 @@ class MainScreen(Screen[None]):
                 synced_at=None,
             )
             services.index.upsert_component(component)
-            self._refresh_local_occurrences(component)
-            self._refresh_local_alarms(component)
+            self._refresh_local_caches(component)
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Created {draft.summary!r}"
             )
@@ -533,51 +524,29 @@ class MainScreen(Screen[None]):
                 synced_at=existing.synced_at,
             )
             services.index.upsert_component(updated)
-            self._refresh_local_occurrences(updated)
-            self._refresh_local_alarms(updated)
+            self._refresh_local_caches(updated)
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Updated {draft.summary!r}"
             )
         self.refresh_view()
 
-    def _refresh_local_occurrences(self, component: StoredComponent) -> None:
-        """Re-expand `component` and rewrite its `occurrences` rows.
+    def _refresh_local_caches(self, component: StoredComponent) -> None:
+        """Rebuild the occurrence + alarm caches after a local create/edit.
 
         `IndexRepository.upsert_component` invalidates (deletes) the
-        occurrence rows for the master so a stale cache doesn't
-        outlive a content change. The sync engine repopulates the
-        cache by calling `populate_occurrences`, but local create /
-        edit flows have no such backstop — without a refresh here,
-        the saved event vanishes from every view that joins
-        `components` against `occurrences` (agenda, day, week,
-        month) until the next sync. Single-component expansion is
-        cheap and matches the window the sync engine uses, so the
-        cache stays consistent with what `populate_occurrences`
-        would have produced.
+        occurrence rows for the master so a stale cache doesn't outlive a
+        content change. The sync engine repopulates them, but local
+        create/edit flows have no such backstop — without this the saved
+        event vanishes from every view that joins `components` against
+        `occurrences` (agenda, day, grid) until the next sync. Delegates
+        to `recurrence.rebuild_caches`, the same path sync and ingest
+        use, so the window and override handling stay consistent.
         """
         services = self._services()
-        now = services.now()
-        occurrences = expand(
-            master=component,
-            overrides=(),
-            window_start=now - _LOCAL_OCCURRENCE_WINDOW_PAST,
-            window_end=now + _LOCAL_OCCURRENCE_WINDOW_FUTURE,
-        )
-        services.index.set_occurrences(component.ref, occurrences)
-
-    def _refresh_local_alarms(self, component: StoredComponent) -> None:
-        """Recompute alarm rows for `component` after a local create/edit.
-
-        Mirrors `_refresh_local_occurrences`: must be called after it so
-        the occurrence rows exist for ``populate_alarms`` to join against.
-        """
-        services = self._services()
-        now = services.now()
-        populate_alarms(
+        rebuild_caches(
             index=services.index,
             calendar=component.ref.calendar,
-            window_start=now - _LOCAL_OCCURRENCE_WINDOW_PAST,
-            window_end=now + _LOCAL_OCCURRENCE_WINDOW_FUTURE,
+            now=services.now(),
             uids=frozenset({component.ref.uid}),
         )
 

@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 MAX_OCCURRENCES = 10_000
 
+# Window the `occurrences` cache covers around "now". Any code that
+# repopulates occurrences (sync, ingest) uses these so the rows land in
+# the same range the TUI queries; keeping a single source of truth here
+# prevents the two callers from drifting apart.
+OCCURRENCE_WINDOW_PAST = timedelta(days=365 * 30)
+OCCURRENCE_WINDOW_FUTURE = timedelta(days=365 * 5)
+
 _POPULATE_PROGRESS_INTERVAL = 50
 
 
@@ -247,6 +254,50 @@ def populate_alarms(
                     index.set_alarms(master.ref, occ.start, records)
                     total += len(records)
     return total
+
+
+def rebuild_caches(
+    *,
+    index: IndexRepository,
+    calendar: CalendarRef,
+    now: datetime,
+    uids: frozenset[str] | None,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """Re-expand the occurrence + alarm caches for one calendar.
+
+    `upsert_component` only *invalidates* a component's occurrence rows;
+    something has to rebuild them or the cache-backed views (agenda, day,
+    grid) and alarms silently miss the change until the next sync. This
+    is the single place that pins the window and the
+    occurrences-before-alarms ordering — sync, ingest, and the TUI's
+    local create/edit all funnel through here instead of repeating the
+    dance with their own window constants.
+
+    `uids=None` rebuilds every master in the calendar (full resync); a
+    frozenset restricts the rebuild to those UIDs (and the empty set is a
+    no-op, handled by the populate functions). `cancel_event`, when set,
+    stops `populate_occurrences` after the current master and commits
+    what was written; callers decide whether to raise afterwards.
+    """
+    window_start = now - OCCURRENCE_WINDOW_PAST
+    window_end = now + OCCURRENCE_WINDOW_FUTURE
+    populate_occurrences(
+        index=index,
+        calendar=calendar,
+        window_start=window_start,
+        window_end=window_end,
+        uids=uids,
+        cancel_event=cancel_event,
+    )
+    populate_alarms(
+        index=index,
+        calendar=calendar,
+        window_start=window_start,
+        window_end=window_end,
+        uids=uids,
+        cancel_event=cancel_event,
+    )
 
 
 def _resolve_alarm_records(
@@ -552,8 +603,11 @@ def _component_has(component: object, key: str) -> bool:
 
 __all__ = [
     "MAX_OCCURRENCES",
+    "OCCURRENCE_WINDOW_FUTURE",
+    "OCCURRENCE_WINDOW_PAST",
     "RecurrenceExpansionError",
     "expand",
     "populate_alarms",
     "populate_occurrences",
+    "rebuild_caches",
 ]

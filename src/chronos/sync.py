@@ -8,7 +8,7 @@ import threading
 import urllib.parse
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Literal, cast
 
 from chronos.caldav.errors import (
@@ -34,19 +34,13 @@ from chronos.domain import (
 )
 from chronos.ical_parser import IcalParseError, ParsedComponent, parse_vcalendar
 from chronos.protocols import CalDAVSession, IndexRepository, MirrorRepository
-from chronos.recurrence import populate_alarms, populate_occurrences
+from chronos.recurrence import rebuild_caches
 from chronos.storage_indexing import synthetic_uid
 
 logger = logging.getLogger(__name__)
 
 _MASS_DELETION_RATIO = 0.2
 _MASS_DELETION_MIN_BASELINE = 5
-
-# Window the `occurrences` cache covers after each sync. Wide enough to
-# include historical events the user might want to browse, narrow enough
-# that infinite-RRULE masters stay bounded by `recurrence.MAX_OCCURRENCES`.
-_OCCURRENCE_WINDOW_PAST = timedelta(days=365 * 30)
-_OCCURRENCE_WINDOW_FUTURE = timedelta(days=365 * 5)
 
 
 class SyncError(Exception):
@@ -372,19 +366,10 @@ def _sync_calendar(
         or (affected_uids is None and (stats.pushed or stats.deleted_remote))
     )
     if should_expand:
-        populate_occurrences(
+        rebuild_caches(
             index=index,
             calendar=calendar_ref,
-            window_start=now - _OCCURRENCE_WINDOW_PAST,
-            window_end=now + _OCCURRENCE_WINDOW_FUTURE,
-            uids=None if force_full_expand else affected_uids,
-            cancel_event=cancel_event,
-        )
-        populate_alarms(
-            index=index,
-            calendar=calendar_ref,
-            window_start=now - _OCCURRENCE_WINDOW_PAST,
-            window_end=now + _OCCURRENCE_WINDOW_FUTURE,
+            now=now,
             uids=None if force_full_expand else affected_uids,
             cancel_event=cancel_event,
         )

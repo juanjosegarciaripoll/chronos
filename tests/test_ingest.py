@@ -146,6 +146,44 @@ class IngestBytesTest(unittest.TestCase):
         self.assertIsNone(stored.href)  # href=NULL → will be pushed on sync
         self.assertEqual(stored.summary, "Simple event")
 
+    def test_ingest_populates_occurrence_cache(self) -> None:
+        # An imported VEVENT must land in the `occurrences` cache, not
+        # just `components`: the agenda/day/grid views render from that
+        # cache, so without it a plain TUI refresh would never surface
+        # the import (only a later sync would). Regression guard.
+        self._ingest(_vcalendar(_vevent("occ-1@example.com", "Imported")))
+        window = (
+            datetime(2026, 4, 1, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        occ = self.index.query_occurrences(_TARGET, *window)
+        starts = [o.start for o in occ if o.ref.uid == "occ-1@example.com"]
+        self.assertEqual(starts, [datetime(2026, 5, 1, 9, 0, tzinfo=UTC)])
+
+    def test_update_refreshes_occurrence_cache(self) -> None:
+        # A newer-SEQUENCE update moves the start; the cache must reflect
+        # the new time, not the stale one upsert_component invalidated.
+        self._ingest(_vcalendar(_vevent_seq("occ-2@example.com", "v0", 0)))
+        moved = """
+BEGIN:VEVENT
+UID:occ-2@example.com
+DTSTAMP:20260422T130000Z
+DTSTART:20260502T140000Z
+DTEND:20260502T150000Z
+SUMMARY:v1
+SEQUENCE:1
+END:VEVENT
+"""
+        report = self._ingest(_vcalendar(moved))
+        self.assertEqual(report.updated, 1)
+        occ = self.index.query_occurrences(
+            _TARGET,
+            datetime(2026, 4, 1, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        starts = [o.start for o in occ if o.ref.uid == "occ-2@example.com"]
+        self.assertEqual(starts, [datetime(2026, 5, 2, 14, 0, tzinfo=UTC)])
+
     def test_vtodo_ingested(self) -> None:
         report = self._ingest(corpus.simple_todo())
         self.assertEqual(report.imported, 1)
