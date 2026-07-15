@@ -929,6 +929,38 @@ class AddCommandTest(CliTestCase):
         self.assertIsNone(component.href)
         self.assertEqual(component.summary, "Lunch")
 
+    def test_add_with_attendees_writes_invites(self) -> None:
+        from chronos.ical_parser import extract_attendees
+
+        code = self._run(
+            [
+                "add",
+                "--account",
+                "personal",
+                "--calendar",
+                "work",
+                "--summary",
+                "Planning",
+                "--start",
+                "2026-05-01T12:00:00+00:00",
+                "--uid",
+                "planning@example.com",
+                "--attendee",
+                "alice@example.com",
+                "--attendee",
+                "Bob <bob@example.com>",
+            ]
+        )
+        self.assertEqual(code, 0)
+        component = self.index.get_component(
+            ComponentRef("personal", "work", "planning@example.com")
+        )
+        assert isinstance(component, VEvent)
+        self.assertEqual(
+            extract_attendees(component.raw_ics, component.ref.uid),
+            ("alice@example.com", "bob@example.com"),
+        )
+
     def test_add_rejects_unknown_account(self) -> None:
         code = self._run(
             [

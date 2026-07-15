@@ -51,6 +51,7 @@ from chronos.domain import (
     VEvent,
     VTodo,
 )
+from chronos.ical_parser import extract_attendees, extract_organizer
 from chronos.index_store import SqliteIndexRepository
 from chronos.locking import SyncLockError, acquire_sync_lock
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
@@ -485,12 +486,26 @@ def _build_parser() -> argparse.ArgumentParser:
     add_p.add_argument("--start", type=_parse_dt, required=True)
     add_p.add_argument("--end", type=_parse_dt, default=None)
     add_p.add_argument("--uid", default=None)
+    add_p.add_argument(
+        "--attendee",
+        action="append",
+        default=None,
+        metavar="EMAIL",
+        help="Invite an attendee. May be passed multiple times.",
+    )
 
     edit_p = sub.add_parser("edit", help="Edit an existing VEVENT (local-only in v1).")
     edit_p.add_argument("uid")
     edit_p.add_argument("--summary", default=None)
     edit_p.add_argument("--start", type=_parse_dt, default=None)
     edit_p.add_argument("--end", type=_parse_dt, default=None)
+    edit_p.add_argument(
+        "--attendee",
+        action="append",
+        default=None,
+        metavar="EMAIL",
+        help="Replace attendees. May be passed multiple times.",
+    )
 
     rm_p = sub.add_parser("rm", help="Mark a component as trashed.")
     rm_p.add_argument("uid")
@@ -728,6 +743,7 @@ def _dispatch(
             start=args.start,
             end=args.end,
             uid=args.uid,
+            attendees=tuple(args.attendee or ()),
         )
     if command == "edit":
         return cmd_edit(
@@ -736,6 +752,7 @@ def _dispatch(
             summary=args.summary,
             start=args.start,
             end=args.end,
+            attendees=args.attendee,
         )
     if command == "rm":
         return cmd_rm(ctx, uid=args.uid)
@@ -1075,6 +1092,7 @@ def cmd_add(
     start: datetime,
     end: datetime | None,
     uid: str | None,
+    attendees: Sequence[str] = (),
 ) -> int:
     if not any(a.name == account_name for a in ctx.config.accounts):
         ctx.stderr.write(f"unknown account: {account_name}\n")
@@ -1082,7 +1100,19 @@ def cmd_add(
     resolved_uid = uid or generate_uid(
         account_name, calendar_name, summary, start, ctx.now
     )
-    ics = build_event_ics(resolved_uid, summary, start, end, ctx.now)
+    try:
+        ics = build_event_ics(
+            resolved_uid,
+            summary,
+            start,
+            end,
+            ctx.now,
+            attendees=attendees,
+            organizer=_organizer_for(account_name, ctx.config),
+        )
+    except ValueError as exc:
+        ctx.stderr.write(f"add: {exc}\n")
+        return 2
     ctx.mirror.write(ResourceRef(account_name, calendar_name, resolved_uid), ics)
     ref = ComponentRef(account_name, calendar_name, resolved_uid)
     component = VEvent(
@@ -1114,6 +1144,7 @@ def cmd_edit(
     summary: str | None,
     start: datetime | None,
     end: datetime | None,
+    attendees: Sequence[str] | None = None,
 ) -> int:
     matches = _find_by_uid(ctx, uid)
     if not matches:
@@ -1132,7 +1163,23 @@ def cmd_edit(
     if new_start is None:
         ctx.stderr.write("edit: missing DTSTART\n")
         return 2
-    new_ics = build_event_ics(current.ref.uid, new_summary, new_start, new_end, ctx.now)
+    existing_attendees = extract_attendees(current.raw_ics, current.ref.uid)
+    organizer = extract_organizer(current.raw_ics, current.ref.uid)
+    if organizer is None:
+        organizer = _organizer_for(current.ref.account_name, ctx.config)
+    try:
+        new_ics = build_event_ics(
+            current.ref.uid,
+            new_summary,
+            new_start,
+            new_end,
+            ctx.now,
+            attendees=existing_attendees if attendees is None else attendees,
+            organizer=organizer,
+        )
+    except ValueError as exc:
+        ctx.stderr.write(f"edit: {exc}\n")
+        return 2
     ctx.mirror.write(current.ref.resource, new_ics)
     updated = VEvent(
         ref=current.ref,
@@ -2065,6 +2112,15 @@ def _parse_dt(raw: str) -> datetime:
     return dt
 
 
+def _organizer_for(account_name: str, config: AppConfig) -> str | None:
+    for account in config.accounts:
+        if account.name != account_name:
+            continue
+        username = account.username.strip()
+        return username if "@" in username else None
+    return None
+
+
 def _sort_key(component: StoredComponent) -> datetime:
     return component.dtstart or datetime.max.replace(tzinfo=UTC)
 
@@ -2090,6 +2146,10 @@ def _render_detail(component: StoredComponent, stdout: TextIO) -> None:
         stdout.write(f"Start: {component.dtstart.isoformat()}\n")
     if isinstance(component, VEvent) and component.dtend:
         stdout.write(f"End: {component.dtend.isoformat()}\n")
+    if isinstance(component, VEvent):
+        attendees = extract_attendees(component.raw_ics, component.ref.uid)
+        if attendees:
+            stdout.write(f"Attendees: {', '.join(attendees)}\n")
     if isinstance(component, VTodo) and component.due:
         stdout.write(f"Due: {component.due.isoformat()}\n")
     if component.status:

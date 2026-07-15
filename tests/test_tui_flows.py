@@ -748,6 +748,28 @@ class SearchAndDetailTest(unittest.TestCase):
         # Internal UID is suppressed.
         self.assertNotIn("UID:", text)
 
+    def test_render_event_detail_shows_attendees(self) -> None:
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "attendees-1@example.com")
+        event = VEvent(
+            ref=ref,
+            href=None,
+            etag=None,
+            raw_ics=corpus.event_with_attendees(),
+            summary="Invited event",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 10, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        text = render_event_detail(event, date(2026, 4, 25))
+        self.assertIn("Attendees: alice@example.com, bob@example.com", text)
+
     def test_render_event_detail_todo(self) -> None:
         ref = ComponentRef(ACCOUNT_NAME, PERSONAL_CAL, "uid-2")
         todo = VTodo(
@@ -1237,6 +1259,40 @@ class NewEventFlowTest(TuiFlowTestCase):
         uids = {r.uid for r in on_disk}
         self.assertIn(new[0].ref.uid, uids)
 
+    async def test_new_event_can_invite_attendees(self) -> None:
+        from chronos.ical_parser import extract_attendees, extract_organizer
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, EventEditScreen)
+            edit = pilot.app.screen
+            edit.query_one("#edit-summary").value = "Planning"  # type: ignore[attr-defined]
+            edit.query_one(DatePicker).value = "2026-05-15T10:00"
+            edit.query_one("#edit-attendees").value = (  # type: ignore[attr-defined]
+                "Alice <alice@example.com>, bob@example.com"
+            )
+            edit.action_save()
+            await pilot.pause()
+
+        all_components: list[StoredComponent] = []
+        for ref in all_calendar_refs(services.config, services.mirror):
+            all_components.extend(services.index.list_calendar_components(ref))
+        created = [c for c in all_components if c.summary == "Planning"]
+        self.assertEqual(len(created), 1)
+        event = created[0]
+        assert isinstance(event, VEvent)
+        self.assertEqual(
+            extract_attendees(event.raw_ics, event.ref.uid),
+            ("alice@example.com", "bob@example.com"),
+        )
+        self.assertEqual(
+            extract_organizer(event.raw_ics, event.ref.uid), "user@example.com"
+        )
+
 
 class EditExistingEventTest(TuiFlowTestCase):
     async def test_edit_replaces_summary(self) -> None:
@@ -1266,6 +1322,57 @@ class EditExistingEventTest(TuiFlowTestCase):
         # The mirror was rewritten too.
         raw = services.mirror.read(ref.resource)
         self.assertIn(b"Edited summary", raw)
+
+    async def test_edit_prefills_and_preserves_attendees(self) -> None:
+        from chronos.ical_parser import extract_attendees
+
+        services = self.services()
+        raw = corpus.event_with_attendees()
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "attendees-1@example.com")
+        component = VEvent(
+            ref=ref,
+            href="/dav/attendees-1.ics",
+            etag="etag-1",
+            raw_ics=raw,
+            summary="Invited event",
+            description=None,
+            location=None,
+            dtstart=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            dtend=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+            status=None,
+            local_flags=frozenset(),
+            server_flags=frozenset(),
+            local_status=LocalStatus.ACTIVE,
+            trashed_at=None,
+            synced_at=None,
+        )
+        services.mirror.write(ref.resource, raw)
+        services.index.upsert_component(component)
+
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._edit_specific(component)
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            self.assertEqual(
+                edit.query_one("#edit-attendees").value,  # type: ignore[attr-defined]
+                "alice@example.com, bob@example.com",
+            )
+            edit.query_one("#edit-summary").value = "Still invited"  # type: ignore[attr-defined]
+            edit.action_save()
+            await pilot.pause()
+
+        updated = services.index.get_component(ref)
+        assert isinstance(updated, VEvent)
+        self.assertEqual(updated.summary, "Still invited")
+        self.assertEqual(
+            extract_attendees(updated.raw_ics, updated.ref.uid),
+            ("alice@example.com", "bob@example.com"),
+        )
 
     async def test_edited_event_still_appears_in_agenda(self) -> None:
         # Regression: `IndexRepository.upsert_component` invalidates
@@ -1781,6 +1888,7 @@ class DraftAndDetailScreenWiringTest(unittest.TestCase):
             dtend=None,
             location="",
             description="",
+            attendees=(),
             alarms=(),
             existing=event,
         )
@@ -1860,6 +1968,38 @@ class AlarmHelperTest(unittest.TestCase):
             datetime(2026, 5, 1, 8, tzinfo=UTC),
         )
         self.assertNotIn(b"VALARM", ics)
+
+    def test_build_event_ics_with_attendees_writes_invites(self) -> None:
+        from chronos.mutations import build_event_ics
+
+        ics = build_event_ics(
+            "uid@test",
+            "Test",
+            datetime(2026, 5, 1, 9, tzinfo=UTC),
+            None,
+            datetime(2026, 5, 1, 8, tzinfo=UTC),
+            attendees=("Alice <alice@example.com>", "bob@example.com"),
+            organizer="host@example.com",
+        )
+        text = ics.decode("utf-8")
+        self.assertIn("ORGANIZER:mailto:host@example.com", text)
+        self.assertIn("ATTENDEE", text)
+        self.assertIn("mailto:alice@example.com", text)
+        self.assertIn("mailto:bob@example.com", text)
+        self.assertIn("RSVP=TRUE", text)
+
+    def test_build_event_ics_rejects_invalid_attendee(self) -> None:
+        from chronos.mutations import build_event_ics
+
+        with self.assertRaises(ValueError):
+            build_event_ics(
+                "uid@test",
+                "Test",
+                datetime(2026, 5, 1, 9, tzinfo=UTC),
+                None,
+                datetime(2026, 5, 1, 8, tzinfo=UTC),
+                attendees=("not an email",),
+            )
 
     def test_build_event_ics_end_related_alarm(self) -> None:
         from chronos.domain import AlarmAction, ParsedAlarm

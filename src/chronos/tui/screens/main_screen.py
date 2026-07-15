@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label
 
 from chronos.domain import (
+    AppConfig,
     CalendarRef,
     ComponentRef,
     LocalStatus,
@@ -20,6 +21,7 @@ from chronos.domain import (
     SyncResult,
     VEvent,
 )
+from chronos.ical_parser import extract_organizer
 from chronos.mutations import build_event_ics, generate_uid, trashed_copy
 from chronos.paths import default_tui_state_path
 from chronos.recurrence import rebuild_caches
@@ -465,6 +467,8 @@ class MainScreen(Screen[None]):
                 now,
                 location=draft.location,
                 description=draft.description,
+                attendees=draft.attendees,
+                organizer=_organizer_for(draft.target, services.config),
                 alarms=draft.alarms,
             )
             services.mirror.write(
@@ -495,6 +499,9 @@ class MainScreen(Screen[None]):
             )
         else:
             existing = draft.existing
+            organizer = extract_organizer(existing.raw_ics, existing.ref.uid)
+            if organizer is None:
+                organizer = _organizer_for(existing.ref.calendar, services.config)
             ics = build_event_ics(
                 existing.ref.uid,
                 draft.summary,
@@ -503,6 +510,8 @@ class MainScreen(Screen[None]):
                 now,
                 location=draft.location,
                 description=draft.description,
+                attendees=draft.attendees,
+                organizer=organizer,
                 alarms=draft.alarms,
             )
             services.mirror.write(existing.ref.resource, ics)
@@ -658,6 +667,15 @@ def _save_last_view(view: ViewKind) -> None:
 
     with contextlib.suppress(OSError):
         default_tui_state_path().write_text(view.value, encoding="utf-8")
+
+
+def _organizer_for(calendar: CalendarRef, config: AppConfig) -> str | None:
+    for account in config.accounts:
+        if account.name != calendar.account_name:
+            continue
+        username = account.username.strip()
+        return username if "@" in username else None
+    return None
 
 
 def _load_last_view() -> ViewKind:

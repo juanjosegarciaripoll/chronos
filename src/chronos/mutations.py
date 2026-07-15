@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from email.utils import parseaddr
 
 from chronos.domain import LocalStatus, ParsedAlarm, StoredComponent, VEvent, VTodo
+
+_ATTENDEE_EMAIL_RE = re.compile(r"^[^@\s,;:\x00-\x1f\x7f]+@[^@\s,;:\x00-\x1f\x7f]+$")
 
 
 def build_event_ics(
@@ -17,7 +21,13 @@ def build_event_ics(
     location: str = "",
     description: str = "",
     alarms: Sequence[ParsedAlarm] = (),
+    attendees: Sequence[str] = (),
+    organizer: str | None = None,
 ) -> bytes:
+    normalized_attendees = normalize_attendee_emails(attendees)
+    normalized_organizer = (
+        normalize_attendee_email(organizer) if organizer and organizer.strip() else None
+    )
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -34,6 +44,13 @@ def build_event_ics(
         lines.append(f"LOCATION:{_escape_text(location)}")
     if description:
         lines.append(f"DESCRIPTION:{_escape_text(description)}")
+    if normalized_attendees and normalized_organizer is not None:
+        lines.append(f"ORGANIZER:mailto:{normalized_organizer}")
+    for attendee in normalized_attendees:
+        lines.append(
+            "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:"
+            f"mailto:{attendee}"
+        )
     for alarm in alarms:
         lines.append("BEGIN:VALARM")
         lines.append(f"ACTION:{alarm.action.value}")
@@ -50,6 +67,39 @@ def build_event_ics(
         lines.append("END:VALARM")
     lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def normalize_attendee_emails(values: Sequence[str]) -> tuple[str, ...]:
+    """Return de-duplicated attendee email addresses safe for iCalendar output."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        email = normalize_attendee_email(value)
+        key = email.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(email)
+    return tuple(out)
+
+
+def normalize_attendee_email(value: str) -> str:
+    """Normalize a user-entered attendee value to a bare email address.
+
+    Accepts plain emails, ``mailto:`` values, and simple ``Name <email>`` input.
+    The validation intentionally rejects separators and control characters
+    because attendee values are serialized directly into an iCalendar property.
+    """
+    raw = value.strip()
+    if not raw:
+        raise ValueError("attendee email cannot be blank")
+    _display_name, parsed = parseaddr(raw)
+    email = (parsed or raw).strip()
+    if email.lower().startswith("mailto:"):
+        email = email[7:].strip()
+    if not _ATTENDEE_EMAIL_RE.fullmatch(email):
+        raise ValueError(f"invalid attendee email: {value!r}")
+    return email
 
 
 def generate_uid(
@@ -134,4 +184,10 @@ def _escape_text(value: str) -> str:
     )
 
 
-__all__ = ["build_event_ics", "generate_uid", "trashed_copy"]
+__all__ = [
+    "build_event_ics",
+    "generate_uid",
+    "normalize_attendee_email",
+    "normalize_attendee_emails",
+    "trashed_copy",
+]

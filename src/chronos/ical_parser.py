@@ -173,6 +173,36 @@ def extract_alarm_triggers(raw_ics: bytes, uid: str) -> list[ParsedAlarm]:
     return out
 
 
+def extract_attendees(raw_ics: bytes, uid: str) -> tuple[str, ...]:
+    """Return attendee email addresses from the master component with ``uid``."""
+    component = _find_master_component(raw_ics, uid)
+    if component is None:
+        return ()
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in _component_values(component, "ATTENDEE"):
+        email = _mailto_value(value)
+        if email is None:
+            continue
+        key = email.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(email)
+    return tuple(out)
+
+
+def extract_organizer(raw_ics: bytes, uid: str) -> str | None:
+    """Return the organizer email address from the master component with ``uid``."""
+    component = _find_master_component(raw_ics, uid)
+    if component is None:
+        return None
+    value = _call_get(component, "ORGANIZER")
+    if value is None:
+        return None
+    return _mailto_value(value)
+
+
 def _parse_valarm(valarm: object) -> ParsedAlarm | None:
     action_raw = str(_call_get(valarm, "ACTION") or "DISPLAY").upper()
     if action_raw not in _SUPPORTED_ALARM_ACTIONS:
@@ -224,3 +254,38 @@ def _component_has(component: object, key: str) -> bool:
     if contains is None:
         return False
     return bool(contains(key))
+
+
+def _find_master_component(raw_ics: bytes, uid: str) -> object | None:
+    try:
+        cal = Calendar.from_ical(raw_ics)
+    except ValueError:
+        return None
+    for sub in cal.walk():  # pyright: ignore[reportUnknownMemberType]
+        name = _component_name(sub)
+        if name not in ("VEVENT", "VTODO"):
+            continue
+        if _component_get_str(sub, "UID") != uid:
+            continue
+        if _component_has(sub, "RECURRENCE-ID"):
+            continue
+        return sub
+    return None
+
+
+def _component_values(component: object, key: str) -> tuple[object, ...]:
+    value = _call_get(component, key)
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        return tuple(value)
+    return (value,)
+
+
+def _mailto_value(value: object) -> str | None:
+    text = str(value).strip()
+    if text.lower().startswith("mailto:"):
+        text = text[7:].strip()
+    if "@" not in text:
+        return None
+    return text

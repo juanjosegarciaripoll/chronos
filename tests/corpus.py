@@ -26,6 +26,23 @@ END:VEVENT
     )
 
 
+def event_with_attendees() -> bytes:
+    return _vcalendar(
+        """
+BEGIN:VEVENT
+UID:attendees-1@example.com
+DTSTAMP:20260422T120000Z
+DTSTART:20260501T090000Z
+DTEND:20260501T100000Z
+SUMMARY:Invited event
+ORGANIZER:mailto:host@example.com
+ATTENDEE:mailto:alice@example.com
+ATTENDEE;CN=Bob:MAILTO:bob@example.com
+END:VEVENT
+"""
+    )
+
+
 def timed_event_with_tz() -> bytes:
     return _vcalendar(
         """
@@ -373,6 +390,7 @@ END:VEVENT
 
 ALL_SINGLE_FIXTURES: tuple[tuple[str, bytes], ...] = (
     ("simple_event", simple_event()),
+    ("event_with_attendees", event_with_attendees()),
     ("timed_event_with_tz", timed_event_with_tz()),
     ("all_day_event", all_day_event()),
     ("recurring_weekly", recurring_weekly()),

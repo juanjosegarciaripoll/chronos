@@ -24,7 +24,7 @@ from chronos.domain import (
     VEvent,
     VTodo,
 )
-from chronos.ical_parser import extract_alarm_triggers
+from chronos.ical_parser import extract_alarm_triggers, extract_attendees
 from chronos.protocols import IndexRepository, MirrorRepository
 
 DEFAULT_AGENDA_DAYS = 14
@@ -445,6 +445,10 @@ def render_event_detail(component: StoredComponent, today: date) -> str:
         lines.append(_detail_field("Due", _detail_when(component.due, today)))
     if component.status:
         lines.append(_detail_field("Status", component.status))
+    if isinstance(component, VEvent):
+        attendees = extract_attendees(component.raw_ics, component.ref.uid)
+        if attendees:
+            lines.append(_detail_field("Attendees", ", ".join(attendees)))
     alarms = extract_alarm_triggers(component.raw_ics, component.ref.uid)
     if alarms:
         alarm_str = ", ".join(_format_alarm(a) for a in alarms)

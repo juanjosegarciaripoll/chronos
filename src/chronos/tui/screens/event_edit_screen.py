@@ -17,7 +17,8 @@ from chronos.domain import (
     StoredComponent,
     VEvent,
 )
-from chronos.ical_parser import extract_alarm_triggers
+from chronos.ical_parser import extract_alarm_triggers, extract_attendees
+from chronos.mutations import normalize_attendee_emails
 from chronos.tui.bindings import edit_bindings
 from chronos.tui.widgets.date_picker import DatePicker, InvalidDateError
 
@@ -32,6 +33,7 @@ class EditDraft:
     dtend: datetime | None
     location: str
     description: str
+    attendees: tuple[str, ...]
     alarms: tuple[ParsedAlarm, ...]
     existing: StoredComponent | None
 
@@ -83,6 +85,9 @@ class EventEditScreen(Screen[None]):
         )
         location = ex.location or "" if ex is not None else ""
         description = ex.description or "" if ex is not None else ""
+        attendees = ", ".join(
+            extract_attendees(ex.raw_ics, ex.ref.uid) if ex is not None else ()
+        )
         reminders = _alarms_to_input(
             extract_alarm_triggers(ex.raw_ics, ex.ref.uid) if ex is not None else []
         )
@@ -104,6 +109,12 @@ class EventEditScreen(Screen[None]):
             yield Input(value=location, id="edit-location")
             yield Label("Description (optional):")
             yield Input(value=description, id="edit-description")
+            yield Label("Invitees (optional, emails comma-separated):")
+            yield Input(
+                value=attendees,
+                id="edit-attendees",
+                placeholder="alice@example.com, bob@example.com",
+            )
             yield Label("Reminders (minutes before start, comma-separated):")
             yield Input(value=reminders, id="edit-reminders", placeholder="e.g. 15, 60")
             yield Label("", id="edit-error")
@@ -165,7 +176,9 @@ class EventEditScreen(Screen[None]):
             dtend = parse_date_input(end_text)
         location_input: Input = self.query_one("#edit-location", Input)
         description_input: Input = self.query_one("#edit-description", Input)
+        attendees_input: Input = self.query_one("#edit-attendees", Input)
         reminders_input: Input = self.query_one("#edit-reminders", Input)
+        attendees = _parse_attendees_input(attendees_input.value)
         alarms = _parse_reminder_input(reminders_input.value)
         return EditDraft(
             target=target,
@@ -174,6 +187,7 @@ class EventEditScreen(Screen[None]):
             dtend=dtend,
             location=location_input.value.strip(),
             description=description_input.value.strip(),
+            attendees=attendees,
             alarms=alarms,
             existing=self._existing,
         )
@@ -238,6 +252,13 @@ def _parse_reminder_input(raw: str) -> tuple[ParsedAlarm, ...]:
             )
         )
     return tuple(alarms)
+
+
+def _parse_attendees_input(raw: str) -> tuple[str, ...]:
+    values = tuple(token.strip() for token in raw.split(",") if token.strip())
+    if not values:
+        return ()
+    return normalize_attendee_emails(values)
 
 
 def _format_local(dt: datetime) -> str:

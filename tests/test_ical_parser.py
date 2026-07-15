@@ -4,7 +4,13 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from chronos.domain import AlarmAction, ComponentKind
-from chronos.ical_parser import IcalParseError, extract_alarm_triggers, parse_vcalendar
+from chronos.ical_parser import (
+    IcalParseError,
+    extract_alarm_triggers,
+    extract_attendees,
+    extract_organizer,
+    parse_vcalendar,
+)
 from tests import corpus
 
 
@@ -138,3 +144,20 @@ class ExtractAlarmTriggersTest(unittest.TestCase):
     def test_invalid_ics_returns_empty(self) -> None:
         alarms = extract_alarm_triggers(b"NOT ICS", "any-uid@example.com")
         self.assertEqual(alarms, [])
+
+
+class ExtractAttendeesTest(unittest.TestCase):
+    def test_attendee_emails_extracted_from_event(self) -> None:
+        raw = corpus.event_with_attendees()
+        attendees = extract_attendees(raw, "attendees-1@example.com")
+        self.assertEqual(attendees, ("alice@example.com", "bob@example.com"))
+
+    def test_organizer_email_extracted_from_event(self) -> None:
+        raw = corpus.event_with_attendees()
+        self.assertEqual(
+            extract_organizer(raw, "attendees-1@example.com"), "host@example.com"
+        )
+
+    def test_valarm_attendee_is_not_treated_as_event_attendee(self) -> None:
+        raw = corpus.event_with_email_alarm()
+        self.assertEqual(extract_attendees(raw, "alarm-email-1@example.com"), ())
