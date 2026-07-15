@@ -2799,3 +2799,80 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             # Modal `EventDetailScreen` is now on top of MainScreen.
             self.assertIsInstance(pilot.app.screen, EventDetailScreen)
+
+
+class OAuthCopyUrlTest(TuiFlowTestCase):
+    """The remote-browser OAuth dialog exposes a 'Copy URL' button so the
+    authorization URL can be grabbed via the terminal clipboard (OSC 52)
+    even when it is too long to fit inside the modal."""
+
+    async def test_copy_button_copies_authorization_url(self) -> None:
+        import threading
+        from unittest import mock
+
+        from textual.widgets import Button, Label
+
+        from chronos.domain import OAuthCredential
+        from chronos.oauth import OAuthError
+        from chronos.tui.screens.oauth_progress_screen import OAuthProgressScreen
+
+        auth_url = "https://accounts.google.com/o/oauth2/auth?scope=" + "x" * 300
+        spec = OAuthCredential(client_id="cid", client_secret="secret")
+
+        # `release` lets the test drain the worker thread deterministically:
+        # the fake flow surfaces the URL, then parks until released so the
+        # dialog stays up while we exercise the copy button. `addCleanup`
+        # guarantees the worker unblocks even if an assertion fails, so the
+        # `run_test` teardown never deadlocks joining the thread.
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def fake_flow(*, show_authorization_url: object, **_kwargs: object) -> object:
+            show_authorization_url(auth_url, "http://127.0.0.1")  # type: ignore[operator]
+            release.wait(timeout=10)
+            raise OAuthError("cancelled")
+
+        services = self.services()
+        app = ChronosApp(services)
+        with mock.patch(
+            "chronos.tui.screens.oauth_progress_screen.run_paste_redirect_flow",
+            fake_flow,
+        ):
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                copied: list[str] = []
+                pilot.app.copy_to_clipboard = lambda text: copied.append(text)  # type: ignore[method-assign]
+
+                screen = OAuthProgressScreen(
+                    "work",
+                    spec,
+                    on_complete=lambda _result: None,
+                    remote_browser=True,
+                )
+                await pilot.app.push_screen(screen)
+                await pilot.pause()
+
+                try:
+                    copy_button = screen.query_one("#oauth-copy-url", Button)
+
+                    # The worker thread reports the auth URL, which enables the
+                    # copy button (it composes disabled — see the screen).
+                    for _ in range(50):
+                        await pilot.pause()
+                        if screen._auth_url is not None:
+                            break
+                    self.assertEqual(screen._auth_url, auth_url)
+                    self.assertFalse(copy_button.disabled)
+
+                    copy_button.press()
+                    await pilot.pause()
+
+                    self.assertEqual(copied, [auth_url])
+                    status = screen.query_one("#oauth-status", Label)
+                    self.assertIn("copied", str(status.render()).lower())
+                finally:
+                    # Release the worker and let the resulting cross-thread
+                    # `_finish` callback drain while the loop is still alive.
+                    release.set()
+                    for _ in range(10):
+                        await pilot.pause()

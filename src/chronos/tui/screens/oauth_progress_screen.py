@@ -47,6 +47,7 @@ class OAuthProgressScreen(ModalScreen[None]):
         self._lock = threading.Lock()
         self._callback_url: str | None = None
         self._callback_ready = threading.Event()
+        self._auth_url: str | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="oauth-box", classes="dialog-box"):
@@ -74,6 +75,14 @@ class OAuthProgressScreen(ModalScreen[None]):
                 )
             with Horizontal(classes="dialog-actions"):
                 if self._remote_browser:
+                    # The full URL rarely fits in the dialog; a copy button
+                    # lets the user grab it via the terminal clipboard (OSC 52).
+                    yield Button(
+                        "Copy URL",
+                        id="oauth-copy-url",
+                        variant="default",
+                        disabled=True,
+                    )
                     yield Button("Continue", id="oauth-submit", variant="primary")
                 yield Button("Cancel", id="oauth-cancel", variant="warning")
 
@@ -135,13 +144,16 @@ class OAuthProgressScreen(ModalScreen[None]):
         )
 
     def _set_authorization_url(self, auth_url: str, redirect_uri: str) -> None:
+        self._auth_url = auth_url
         label: Label = self.query_one("#oauth-auth-url", Label)
         label.update(
-            "Authorize in your browser:\n"
+            "Authorize in your browser (use 'Copy URL' if it is cut off):\n"
             f"{auth_url}\n\n"
             "The final page may show a connection error. Copy its full address "
             f"from the browser bar. It should start with {redirect_uri}"
         )
+        copy_button: Button = self.query_one("#oauth-copy-url", Button)
+        copy_button.disabled = False
 
     def _read_callback_url(self) -> str:
         self._callback_ready.wait()
@@ -161,6 +173,17 @@ class OAuthProgressScreen(ModalScreen[None]):
             self.action_cancel_auth()
         elif event.button.id == "oauth-submit":
             self._submit_callback_url()
+        elif event.button.id == "oauth-copy-url":
+            self._copy_authorization_url()
+
+    def _copy_authorization_url(self) -> None:
+        if not self._auth_url:
+            return
+        # Textual copies via OSC 52, so the URL lands in the terminal's
+        # clipboard even over SSH / when it does not fit on screen.
+        self.app.copy_to_clipboard(self._auth_url)
+        status: Label = self.query_one("#oauth-status", Label)
+        status.update("Authorization URL copied to the clipboard.")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "oauth-callback-url":
