@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 from chronos.domain import (
+    DEFAULT_BACKGROUND_SYNC_INTERVAL_SECONDS,
     GOOGLE_CALDAV_URL,
     AccountConfig,
     AppConfig,
@@ -51,6 +52,20 @@ def parse(data: dict[str, object]) -> AppConfig:
     use_utf8 = _optional_bool(data, "use_utf8", "", default=False)
     editor = _optional_str(data, "editor", "", default=None)
     theme = _optional_str(data, "theme", "", default=None)
+    background_sync_enabled = _optional_bool(
+        data, "background_sync_enabled", "", default=True
+    )
+    background_sync_interval_seconds = _optional_int(
+        data,
+        "background_sync_interval_seconds",
+        "",
+        default=DEFAULT_BACKGROUND_SYNC_INTERVAL_SECONDS,
+    )
+    if background_sync_interval_seconds <= 0:
+        raise ConfigError(
+            "'background_sync_interval_seconds' must be positive",
+            "background_sync_interval_seconds",
+        )
     accounts_raw = data.get("accounts", [])
     if not isinstance(accounts_raw, list):
         raise ConfigError("'accounts' must be an array of tables", "accounts")
@@ -64,6 +79,8 @@ def parse(data: dict[str, object]) -> AppConfig:
         editor=editor,
         accounts=accounts,
         theme=theme,
+        background_sync_enabled=background_sync_enabled,
+        background_sync_interval_seconds=background_sync_interval_seconds,
     )
 
 
@@ -332,6 +349,15 @@ def dump(config: AppConfig) -> dict[str, object]:
         data["editor"] = config.editor
     if config.theme is not None:
         data["theme"] = config.theme
+    if not config.background_sync_enabled:
+        data["background_sync_enabled"] = False
+    if (
+        config.background_sync_interval_seconds
+        != DEFAULT_BACKGROUND_SYNC_INTERVAL_SECONDS
+    ):
+        data["background_sync_interval_seconds"] = (
+            config.background_sync_interval_seconds
+        )
     data["accounts"] = [_dump_account(a) for a in config.accounts]
     return data
 

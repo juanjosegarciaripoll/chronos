@@ -11,6 +11,12 @@ use_utf8 = false
 # External editor invoked for long-form event editing.
 # editor = "vim"
 
+# While the TUI is open it syncs every account in the background. The
+# first automatic run fires one interval after startup; `g` syncs
+# immediately and restarts the countdown (`G` opens the sync dialog).
+# background_sync_enabled = true
+# background_sync_interval_seconds = 3600
+
 # [[accounts]]
 # name = "personal"
 # url = "https://caldav.example.com/dav/principals/user@example.com/"

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import contextlib
+import threading
 from collections.abc import Sequence
 from datetime import date, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, cast
 
 from dateutil.relativedelta import relativedelta
+from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Label
 
 from chronos.domain import (
@@ -70,10 +75,11 @@ from chronos.tui.views import (
 from chronos.tui.widgets.calendar_panel import CalendarPanel
 from chronos.tui.widgets.event_list import EventList
 from chronos.tui.widgets.event_view import EventView
+from chronos.tui.widgets.sync_status import SyncStatus
 from chronos.tui.widgets.timeline_grid import TimelineGrid
 
 if TYPE_CHECKING:
-    from chronos.tui.app import ChronosApp, TuiServices
+    from chronos.tui.app import ChronosApp, SyncRunner, TuiServices
 
 
 class MainScreen(Screen[None]):
@@ -100,13 +106,19 @@ class MainScreen(Screen[None]):
         self._grid_days: int = DEFAULT_GRID_DAYS
         self._selection = CalendarSelection(refs=frozenset())
         self._last_rows: tuple[OccurrenceRow, ...] = ()
+        self._background_sync_timer: Timer | None = None
+        # Set on unmount so a background sync still running when the
+        # app quits stops at its next calendar boundary.
+        self._background_sync_cancel = threading.Event()
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-body"):
             yield CalendarPanel(on_selection_change=self._on_calendar_selection)
             with Vertical(id="centre-pane"):
-                yield Label("", id="view-title")
+                with Horizontal(id="title-row"):
+                    yield Label("", id="view-title")
+                    yield SyncStatus(id="sync-status")
                 yield EventList(id="centre-list")
                 yield TimelineGrid(id="centre-timeline")
                 yield EventView(id="detail-pane")
@@ -134,6 +146,11 @@ class MainScreen(Screen[None]):
         if saved != ViewKind.AGENDA:
             self._set_view(saved)
         self._maybe_offer_startup_ics_import()
+        if services.config.background_sync_enabled and services.sync_runner:
+            self._arm_background_sync_timer()
+
+    def on_unmount(self) -> None:
+        self._background_sync_cancel.set()
 
     def action_toggle_calendars(self) -> None:
         panel = self.query_one(CalendarPanel)
@@ -306,6 +323,18 @@ class MainScreen(Screen[None]):
         self.app.push_screen(HelpScreen(main_bindings()))  # pyright: ignore[reportUnknownMemberType]
 
     def action_sync(self) -> None:
+        """Sync every account now, in the background (`g`).
+
+        Also restarts the periodic countdown, so the next automatic
+        sync falls one full interval after this one.
+        """
+        self._start_background_sync(manual=True)
+
+    def action_sync_dialog(self) -> None:
+        """Confirm, then sync in the foreground progress dialog (`G`)."""
+        if self._sync_in_progress():
+            self.app.notify("Sync already running.")  # pyright: ignore[reportUnknownMemberType]
+            return
         services = self._services()
         screen = SyncConfirmScreen(services.config.accounts, self._run_sync)
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
@@ -659,6 +688,100 @@ class MainScreen(Screen[None]):
     ) -> None:
         del results, error  # the dialog already showed the summary
         self.refresh_view()
+        if self._background_sync_timer is not None:
+            self._arm_background_sync_timer()
+
+    # Background sync ----------------------------------------------------------
+
+    def _arm_background_sync_timer(self) -> None:
+        """Start the periodic background-sync timer, or restart its interval."""
+        interval = self._services().config.background_sync_interval_seconds
+        if self._background_sync_timer is None:
+            self._background_sync_timer = self.set_interval(
+                interval, self._background_sync_tick, name="background-sync"
+            )
+        else:
+            self._background_sync_timer.reset()
+        self.query_one(SyncStatus).set_next_sync(monotonic() + interval)
+
+    def _background_sync_tick(self) -> None:
+        interval = self._services().config.background_sync_interval_seconds
+        self.query_one(SyncStatus).set_next_sync(monotonic() + interval)
+        self._start_background_sync(manual=False)
+
+    def _sync_in_progress(self) -> bool:
+        """True while a background sync runs or the sync dialog is open."""
+        if self.query_one(SyncStatus).syncing:
+            return True
+        return any(
+            isinstance(screen, SyncConfirmScreen | SyncProgressScreen)
+            for screen in self.app.screen_stack  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
+        )
+
+    def _start_background_sync(self, *, manual: bool) -> None:
+        """Run one sync without any dialog.
+
+        `manual` marks a user-requested run (`g`): it restarts the
+        periodic countdown and always reports its outcome, whereas a
+        timer-driven run stays quiet unless something changed or failed.
+        """
+        services = self._services()
+        runner = services.sync_runner
+        if runner is None:
+            if manual:
+                self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                    "Sync from inside the TUI is not wired in this build."
+                )
+            return
+        if self._sync_in_progress():
+            if manual:
+                self.app.notify("Sync already running.")  # pyright: ignore[reportUnknownMemberType]
+            return
+        if manual and services.config.background_sync_enabled:
+            self._arm_background_sync_timer()
+        self.query_one(SyncStatus).set_syncing(True)
+        self._run_background_sync(runner, manual)
+
+    @work(thread=True, group="chronos-background-sync", exit_on_error=False)
+    def _run_background_sync(self, runner: SyncRunner, manual: bool) -> None:
+        results: Sequence[SyncResult] = ()
+        error: BaseException | None = None
+        try:
+            results = runner(cancel_event=self._background_sync_cancel)
+        except BaseException as exc:  # noqa: BLE001 — surface every failure
+            error = exc
+        # The app may already be gone if the user quit mid-sync.
+        with contextlib.suppress(RuntimeError):
+            self.app.call_from_thread(  # pyright: ignore[reportUnknownMemberType]
+                self._background_sync_done, results, error, manual
+            )
+
+    def _background_sync_done(
+        self,
+        results: Sequence[SyncResult],
+        error: BaseException | None,
+        manual: bool,
+    ) -> None:
+        self.query_one(SyncStatus).set_syncing(False)
+        self.refresh_view()
+        if error is not None:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Background sync failed: {error}", severity="error"
+            )
+            return
+        errors = [f"{r.account_name}: {e}" for r in results for e in r.errors]
+        if errors:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                "Sync errors: " + "; ".join(errors), severity="error"
+            )
+            return
+        added = sum(r.components_added for r in results)
+        updated = sum(r.components_updated for r in results)
+        removed = sum(r.components_removed for r in results)
+        if manual or added or updated or removed:
+            self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+                f"Sync complete: +{added} ~{updated} -{removed}"
+            )
 
     def _first_selected(self, calendars: tuple[CalendarRef, ...]) -> CalendarRef:
         for ref in calendars:

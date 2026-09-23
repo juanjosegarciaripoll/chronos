@@ -23,6 +23,9 @@ class LocalStatus(StrEnum):
 # detected by their null href instead and never carry this flag.
 LOCAL_FLAG_DIRTY = "dirty"
 
+# Default period of the TUI's automatic background sync.
+DEFAULT_BACKGROUND_SYNC_INTERVAL_SECONDS = 3600
+
 
 class AlarmAction(StrEnum):
     DISPLAY = "DISPLAY"
@@ -139,6 +142,11 @@ class AppConfig:
     # Textual theme name for the TUI colour scheme. None means use the
     # built-in default chosen at launch (see chronos.tui.app.DEFAULT_THEME).
     theme: str | None = None
+    # Periodic sync from inside the TUI. The first automatic run fires
+    # one interval after startup; `g` syncs immediately and restarts
+    # the countdown.
+    background_sync_enabled: bool = True
+    background_sync_interval_seconds: int = DEFAULT_BACKGROUND_SYNC_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True)

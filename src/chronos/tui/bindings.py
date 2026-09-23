@@ -13,8 +13,8 @@ BindingType = Binding | tuple[str, str] | tuple[str, str, str]
 #
 # Bindings are bare letters (no Ctrl prefix) and deliberately echo
 # Pony's mail-client keymap so the two apps share muscle memory: `c`
-# creates (compose / new event), `g` runs a foreground sync ("get
-# mail"), `Q` quits. The agenda view is reached with `a`; the
+# creates (compose / new event), `g` syncs now ("get mail"), `Q`
+# quits. The agenda view is reached with `a`; the
 # single-day / multi-day timeline is chosen with the number keys
 # `1`–`7` (see `KEY_SPANS`).
 KEY_VIEW_AGENDA = "a"
@@ -51,7 +51,11 @@ KEY_NEW = "c"
 KEY_EDIT = "e"
 KEY_DELETE = "D"
 KEY_DELETE_ALT = "shift+d"
+# `g` syncs immediately in the background and restarts the periodic
+# background-sync countdown; `G` runs the confirm + progress dialog.
 KEY_SYNC = "g"
+KEY_SYNC_DIALOG = "G"
+KEY_SYNC_DIALOG_ALT = "shift+g"
 KEY_SEARCH = "/"
 KEY_QUIT = "Q"
 KEY_QUIT_ALT = "shift+q"
@@ -105,6 +109,8 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_TOGGLE_CALENDARS, "toggle_calendars", "Calendars"),
         Binding(KEY_TOGGLE_CALENDARS_ALT, "toggle_calendars", "Calendars", show=False),
         Binding(KEY_SYNC, "sync", "Sync"),
+        Binding(KEY_SYNC_DIALOG, "sync_dialog", "Sync (dialog)", show=False),
+        Binding(KEY_SYNC_DIALOG_ALT, "sync_dialog", "Sync (dialog)", show=False),
         Binding(KEY_SEARCH, "search", "Search"),
         Binding(KEY_HELP, "show_help", "Help"),
         Binding(KEY_QUIT, "quit", "Quit"),
@@ -161,6 +167,8 @@ __all__ = [
     "KEY_SEARCH",
     "KEY_SPANS",
     "KEY_SYNC",
+    "KEY_SYNC_DIALOG",
+    "KEY_SYNC_DIALOG_ALT",
     "KEY_TODAY",
     "KEY_TOGGLE_CALENDARS",
     "KEY_TOGGLE_CALENDARS_ALT",

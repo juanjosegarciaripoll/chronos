@@ -94,6 +94,28 @@ class ParseTopLevelTest(unittest.TestCase):
         self.assertEqual(parse(dump(with_theme)), with_theme)
         self.assertEqual(dump(with_theme)["theme"], "nord")
 
+    def test_background_sync_defaults_to_hourly_and_round_trips(self) -> None:
+        default = parse({"config_version": 1})
+        self.assertTrue(default.background_sync_enabled)
+        self.assertEqual(default.background_sync_interval_seconds, 3600)
+        self.assertNotIn("background_sync_enabled", dump(default))
+        self.assertNotIn("background_sync_interval_seconds", dump(default))
+
+        custom = parse(
+            {
+                "config_version": 1,
+                "background_sync_enabled": False,
+                "background_sync_interval_seconds": 600,
+            }
+        )
+        self.assertFalse(custom.background_sync_enabled)
+        self.assertEqual(custom.background_sync_interval_seconds, 600)
+        self.assertEqual(parse(dump(custom)), custom)
+
+    def test_background_sync_interval_must_be_positive(self) -> None:
+        with self.assertRaises(ConfigError):
+            parse({"config_version": 1, "background_sync_interval_seconds": 0})
+
 
 class ParseAccountTest(unittest.TestCase):
     BASE_ACCOUNT: dict[str, object] = {

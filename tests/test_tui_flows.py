@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import re
 import tempfile
 import unittest
@@ -1657,7 +1658,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("G")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1686,7 +1687,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("G")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1699,7 +1700,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("G")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1729,7 +1730,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("G")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1788,7 +1789,7 @@ class SyncFlowTest(TuiFlowTestCase):
         app = ChronosApp(services)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("G")
             await pilot.pause()
             assert isinstance(pilot.app.screen, SyncConfirmScreen)
             await pilot.press("y")
@@ -1812,6 +1813,134 @@ class SyncFlowTest(TuiFlowTestCase):
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             self.assertEqual(progress._state, "done")
+
+
+class BackgroundSyncTest(TuiFlowTestCase):
+    @staticmethod
+    def _result(added: int = 0, errors: tuple[str, ...] = ()) -> SyncResult:
+        return SyncResult(
+            account_name=ACCOUNT_NAME,
+            calendars_synced=1,
+            components_added=added,
+            components_updated=0,
+            components_removed=0,
+            errors=errors,
+        )
+
+    def _main(self, app: ChronosApp) -> MainScreen:
+        screen = app.screen
+        assert isinstance(screen, MainScreen)
+        return screen
+
+    async def test_timer_armed_at_startup_by_default(self) -> None:
+        from chronos.tui.widgets.sync_status import SCHEDULED_SYNC_MARK, SyncStatus
+
+        services = self.services(sync_runner=lambda **_: ())
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            main = self._main(app)
+            self.assertIsNotNone(main._background_sync_timer)
+            status = main.query_one(SyncStatus)
+            self.assertIn(SCHEDULED_SYNC_MARK, str(status.render()))
+
+    async def test_timer_not_armed_when_disabled(self) -> None:
+        services = self.services(sync_runner=lambda **_: ())
+        services.config = dataclasses.replace(
+            services.config, background_sync_enabled=False
+        )
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertIsNone(self._main(app)._background_sync_timer)
+
+    async def test_g_syncs_immediately_without_dialog(self) -> None:
+        calls: list[object] = []
+
+        def runner(**kwargs: object) -> Sequence[SyncResult]:
+            calls.append(kwargs.get("cancel_event"))
+            return (self._result(added=2),)
+
+        services = self.services(sync_runner=runner)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, MainScreen)
+            self.assertEqual(len(calls), 1)
+            self.assertIsNotNone(calls[0])  # cancel_event is passed
+            messages = [n.message for n in pilot.app._notifications]
+            self.assertIn("Sync complete: +2 ~0 -0", messages)
+            self.assertFalse(self._main(app)._sync_in_progress())
+
+    async def test_timer_tick_runs_sync_quietly_when_nothing_changed(self) -> None:
+        calls: list[int] = []
+
+        def runner(**_kwargs: object) -> Sequence[SyncResult]:
+            calls.append(1)
+            return (self._result(),)
+
+        services = self.services(sync_runner=runner)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self._main(app)._background_sync_tick()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertEqual(calls, [1])
+            self.assertEqual(list(pilot.app._notifications), [])
+
+    async def test_sync_errors_are_notified(self) -> None:
+        def runner(**_kwargs: object) -> Sequence[SyncResult]:
+            return (self._result(errors=("auth refused",)),)
+
+        services = self.services(sync_runner=runner)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self._main(app)._background_sync_tick()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            notes = list(pilot.app._notifications)
+            self.assertEqual(len(notes), 1)
+            self.assertIn("auth refused", notes[0].message)
+            self.assertEqual(notes[0].severity, "error")
+
+    async def test_g_while_sync_running_does_not_start_another(self) -> None:
+        import threading
+
+        gate = threading.Event()
+        calls: list[int] = []
+
+        def runner(**_kwargs: object) -> Sequence[SyncResult]:
+            calls.append(1)
+            gate.wait(timeout=5.0)
+            return ()
+
+        services = self.services(sync_runner=runner)
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+            gate.set()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+        self.assertEqual(calls, [1])
+
+
+class FormatCountdownTest(unittest.TestCase):
+    def test_formats(self) -> None:
+        from chronos.tui.widgets.sync_status import format_countdown
+
+        self.assertEqual(format_countdown(3600), "1:00:00")
+        self.assertEqual(format_countdown(3599), "59:30")
+        self.assertEqual(format_countdown(29), "0:00")
+        self.assertEqual(format_countdown(-5), "0:00")
 
 
 class SearchFlowTest(TuiFlowTestCase):
