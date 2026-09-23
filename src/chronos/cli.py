@@ -592,6 +592,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "skip (default), replace (overwrite), or rename (new UID)."
         ),
     )
+    import_p.add_argument(
+        "--no-sync",
+        action="store_false",
+        dest="sync",
+        help="Do not sync the target account after importing.",
+    )
+    import_p.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Sync after importing without asking for confirmation.",
+    )
 
     sub.add_parser(
         "init",
@@ -786,6 +798,8 @@ def _dispatch(
             on_conflict=args.on_conflict,
             prompt=prompt,
             is_interactive=is_interactive,
+            sync=bool(args.sync),
+            yes=bool(args.yes),
         )
     ctx.stderr.write(f"unknown command: {command}\n")
     return 2
@@ -1284,12 +1298,18 @@ def cmd_import(
     on_conflict: Literal["skip", "replace", "rename"],
     prompt: PromptFn,
     is_interactive: IsInteractiveFn,
+    sync: bool = True,
+    yes: bool = False,
 ) -> int:
-    """Ingest .ics files into a local calendar.
+    """Ingest .ics files into a local calendar, then sync its account.
 
     Resolves the target calendar interactively when ``--account`` /
     ``--calendar`` are omitted.  In non-interactive mode both flags are
     required; missing either returns exit code 2.
+
+    When anything was imported, the target account is synced so the
+    changes reach the server.  Interactive sessions are asked first
+    (unless ``yes``); ``sync=False`` skips the step entirely.
     """
     from chronos.ingest import IngestError, ingest_ics_bytes
 
@@ -1356,8 +1376,6 @@ def cmd_import(
     for detail in all_details:
         ctx.stdout.write(f"  {detail}\n")
 
-    if errors > 0:
-        return 1
     acted = (
         total_imported
         + total_updated
@@ -1365,9 +1383,34 @@ def cmd_import(
         + total_replaced
         + total_renamed
     )
+    sync_code = 0
+    if acted > 0 and sync:
+        sync_code = _sync_after_import(
+            ctx,
+            account_name=target.account_name,
+            prompt=prompt,
+            ask=is_interactive() and not yes,
+        )
+
+    if errors > 0:
+        return 1
     if acted == 0 and total_skipped > 0:
         return 1  # everything skipped — signal to scripts
-    return 0
+    return sync_code
+
+
+def _sync_after_import(
+    ctx: CliContext, *, account_name: str, prompt: PromptFn, ask: bool
+) -> int:
+    """Sync `account_name`, asking for confirmation first when `ask`."""
+    if ask:
+        answer = prompt(f"Sync account {account_name!r} now? [Y/n]: ")
+        if answer.strip().lower() not in ("", "y", "yes"):
+            ctx.stdout.write(
+                "Not synced; run `chronos sync` to push the imported changes.\n"
+            )
+            return 0
+    return cmd_sync(ctx, account=account_name)
 
 
 def _resolve_import_calendar(

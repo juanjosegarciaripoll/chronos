@@ -11,5 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Textual TUI with agenda, day, and grid views, plus create, edit, trash, search, and sync flows.
 - MCP server with stdio mode, TCP bridge mode, query tools, and iTIP-aware `.ics` import.
 - iTIP-aware `.ics` import: `METHOD:CANCEL` trashes the matching event and `METHOD:REQUEST`/newer `SEQUENCE` updates it in place. Changes to already-synced events propagate to the server on the next sync (DELETE for cancellations, If-Match PUT for updates).
+- `chronos import` syncs the target account after importing so changes reach the server right away. Interactive terminals are asked to confirm (`-y` skips the question); `--no-sync` leaves the changes for the next `chronos sync`.
 - OAuth loopback authorization flow for providers that require browser-based consent.
 - Tagged release automation for source builds, Windows installers, and Windows portable PyInstaller bundles.

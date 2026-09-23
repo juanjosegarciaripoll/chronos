@@ -28,6 +28,7 @@ from chronos.index_store import SqliteIndexRepository
 from chronos.ingest import IngestError, IngestReport, ingest_ics_bytes
 from chronos.storage import VdirMirrorRepository
 from tests import corpus
+from tests.fake_caldav import FakeCalDAVSession
 
 _TARGET = CalendarRef(account_name="personal", calendar_name="work")
 
@@ -603,7 +604,11 @@ class IngestCliTest(unittest.TestCase):
             accounts=tuple(accounts) or (self._account(),),
         )
 
-    def _ctx(self, config: AppConfig | None = None) -> object:
+    def _ctx(
+        self,
+        config: AppConfig | None = None,
+        session_factory: object | None = None,
+    ) -> object:
         from chronos import cli
         from chronos.credentials import DefaultCredentialsProvider
 
@@ -615,7 +620,20 @@ class IngestCliTest(unittest.TestCase):
             stdout=self.stdout,
             stderr=self.stderr,
             now=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            session_factory=session_factory,  # type: ignore[arg-type]
         )
+
+    def _sync_ctx(self) -> tuple[object, FakeCalDAVSession, list[str]]:
+        """Context whose sessions hit a fake server with a `work` calendar."""
+        session = FakeCalDAVSession()
+        session.add_calendar(url="https://cal.example.com/work/", name="work")
+        synced: list[str] = []
+
+        def factory(account: AccountConfig, _auth: object) -> FakeCalDAVSession:
+            synced.append(account.name)
+            return session
+
+        return self._ctx(session_factory=factory), session, synced
 
     def _write_ics(self, name: str, payload: bytes) -> Path:
         p = self.tmp / name
@@ -659,6 +677,7 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=lambda _: "",
             is_interactive=lambda: False,
+            sync=False,
         )
         self.assertEqual(code, 0)
         self.assertIn("imported 1", self.stdout.getvalue())
@@ -676,6 +695,7 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=lambda _: "",
             is_interactive=lambda: False,
+            sync=False,
         )
         self.assertEqual(code, 2)
         self.assertIn("non-interactive", self.stderr.getvalue())
@@ -722,6 +742,7 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=capture_prompt,
             is_interactive=lambda: True,
+            sync=False,
         )
         self.assertEqual(code, 0)
         self.assertTrue(prompts, "expected at least one prompt")
@@ -745,6 +766,7 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=lambda _: "",
             is_interactive=lambda: False,
+            sync=False,
         )
         self.assertEqual(code, 0)
         self.assertIn("imported 2", self.stdout.getvalue())
@@ -762,6 +784,7 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=lambda _: "",
             is_interactive=lambda: False,
+            sync=False,
         )
         self.assertEqual(code, 2)
         self.assertIn("no-such-account", self.stderr.getvalue())
@@ -780,6 +803,7 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=lambda _: "",
             is_interactive=lambda: False,
+            sync=False,
         )
         # Second import with skip should return non-zero.
         code = cli.cmd_import(
@@ -790,5 +814,70 @@ class IngestCliTest(unittest.TestCase):
             on_conflict="skip",
             prompt=lambda _: "",
             is_interactive=lambda: False,
+            sync=False,
         )
         self.assertEqual(code, 1)
+
+    # ------------------------------------------------------------------
+    # Sync after import
+    # ------------------------------------------------------------------
+
+    def _import(self, ctx: object, **kwargs: object) -> int:
+        from chronos import cli
+
+        ics_file = self._write_ics("event.ics", corpus.simple_event())
+        args: dict[str, object] = {
+            "paths": [ics_file],
+            "account_name": "personal",
+            "calendar_name": "work",
+            "on_conflict": "skip",
+            "prompt": lambda _: "",
+            "is_interactive": lambda: False,
+        }
+        args.update(kwargs)
+        return cli.cmd_import(ctx, **args)  # type: ignore[arg-type]
+
+    def test_import_non_interactive_syncs_target_account(self) -> None:
+        ctx, session, synced = self._sync_ctx()
+        code = self._import(ctx)
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        self.assertEqual(synced, ["personal"])
+        self.assertEqual(len(session.hrefs_in("https://cal.example.com/work/")), 1)
+
+    def test_import_interactive_asks_before_syncing(self) -> None:
+        ctx, _session, synced = self._sync_ctx()
+        prompts: list[str] = []
+
+        def answer(msg: str) -> str:
+            prompts.append(msg)
+            return "y"
+
+        code = self._import(ctx, prompt=answer, is_interactive=lambda: True)
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Sync account 'personal'", prompts[0])
+        self.assertEqual(synced, ["personal"])
+
+    def test_import_interactive_decline_skips_sync(self) -> None:
+        ctx, _session, synced = self._sync_ctx()
+        code = self._import(ctx, prompt=lambda _: "n", is_interactive=lambda: True)
+        self.assertEqual(code, 0)
+        self.assertEqual(synced, [])
+        self.assertIn("Not synced", self.stdout.getvalue())
+
+    def test_import_yes_syncs_without_prompting(self) -> None:
+        ctx, _session, synced = self._sync_ctx()
+
+        def fail(_msg: str) -> str:
+            raise AssertionError("unexpected prompt")
+
+        code = self._import(ctx, prompt=fail, is_interactive=lambda: True, yes=True)
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        self.assertEqual(synced, ["personal"])
+
+    def test_import_nothing_imported_does_not_sync(self) -> None:
+        ctx, _session, synced = self._sync_ctx()
+        self._import(ctx, sync=False)
+        code = self._import(ctx)
+        self.assertEqual(code, 1)
+        self.assertEqual(synced, [])
