@@ -54,7 +54,12 @@ from chronos.domain import (
 from chronos.ical_parser import extract_attendees, extract_organizer
 from chronos.index_store import SqliteIndexRepository
 from chronos.locking import SyncLockError, acquire_sync_lock
-from chronos.mutations import build_event_ics, generate_uid, trashed_copy
+from chronos.mutations import (
+    build_event_ics,
+    edited_flags,
+    generate_uid,
+    trashed_copy,
+)
 from chronos.oauth import (
     OAuthError,
     StoredTokens,
@@ -1206,7 +1211,7 @@ def cmd_edit(
         dtstart=new_start,
         dtend=new_end,
         status=current.status,
-        local_flags=current.local_flags,
+        local_flags=edited_flags(current),
         server_flags=current.server_flags,
         local_status=current.local_status,
         trashed_at=current.trashed_at,
@@ -1214,10 +1219,6 @@ def cmd_edit(
     )
     ctx.index.upsert_component(updated)
     ctx.stdout.write(f"{current.ref.uid}\n")
-    if current.href is not None:
-        ctx.stderr.write(
-            "warning: local-only edit; server push of edits is a v2 feature.\n"
-        )
     return 0
 
 

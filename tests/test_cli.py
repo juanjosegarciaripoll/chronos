@@ -1025,6 +1025,42 @@ class EditCommandTest(CliTestCase):
         assert component is not None
         self.assertEqual(component.summary, "New")
 
+    def test_edit_of_synced_event_is_pushed_on_next_sync(self) -> None:
+        from chronos.authorization import Authorization
+
+        cal_url = "https://cal.example.com/work/"
+        href = "https://cal.example.com/work/a.ics"
+        self.session.add_calendar(url=cal_url, name="work")
+        self.session.put_resource(
+            calendar_url=cal_url, href=href, ics=corpus.simple_event(), etag="e1"
+        )
+
+        def factory(_account: AccountConfig, _auth: Authorization) -> FakeCalDAVSession:
+            return self.session
+
+        ctx = self._ctx(session_factory=factory)
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+        code = self._run(
+            [
+                "edit",
+                "simple-event-1@example.com",
+                "--start",
+                "2026-06-01T09:00:00+00:00",
+            ],
+            context=ctx,
+        )
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        self.assertEqual(self._run(["sync"], context=ctx), 0)
+
+        self.assertNotEqual(self.session.etag_for(href), "e1")
+        remote = self.session.calendar_multiget(cal_url, [href])[0][2]
+        self.assertIn(b"DTSTART:20260601T090000Z", remote)
+        component = self.index.get_component(
+            ComponentRef("personal", "work", "simple-event-1@example.com")
+        )
+        assert component is not None
+        self.assertEqual(component.local_flags, frozenset())
+
     def test_edit_not_found(self) -> None:
         code = self._run(["edit", "missing@example.com", "--summary", "X"])
         self.assertEqual(code, 1)

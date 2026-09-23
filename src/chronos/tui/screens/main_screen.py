@@ -22,7 +22,12 @@ from chronos.domain import (
     VEvent,
 )
 from chronos.ical_parser import extract_organizer
-from chronos.mutations import build_event_ics, generate_uid, trashed_copy
+from chronos.mutations import (
+    build_event_ics,
+    edited_flags,
+    generate_uid,
+    trashed_copy,
+)
 from chronos.paths import default_tui_state_path
 from chronos.recurrence import rebuild_caches
 from chronos.tui.bindings import main_bindings
@@ -526,7 +531,7 @@ class MainScreen(Screen[None]):
                 dtstart=draft.dtstart,
                 dtend=draft.dtend,
                 status=existing.status,
-                local_flags=existing.local_flags,
+                local_flags=edited_flags(existing),
                 server_flags=existing.server_flags,
                 local_status=existing.local_status,
                 trashed_at=existing.trashed_at,

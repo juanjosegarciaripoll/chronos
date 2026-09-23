@@ -6,7 +6,14 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 
-from chronos.domain import LocalStatus, ParsedAlarm, StoredComponent, VEvent, VTodo
+from chronos.domain import (
+    LOCAL_FLAG_DIRTY,
+    LocalStatus,
+    ParsedAlarm,
+    StoredComponent,
+    VEvent,
+    VTodo,
+)
 
 _ATTENDEE_EMAIL_RE = re.compile(r"^[^@\s,;:\x00-\x1f\x7f]+@[^@\s,;:\x00-\x1f\x7f]+$")
 
@@ -108,6 +115,18 @@ def generate_uid(
     payload = f"{account}|{calendar}|{summary}|{start.isoformat()}|{now.isoformat()}"
     digest = hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
     return f"{digest[:16]}@chronos"
+
+
+def edited_flags(component: StoredComponent) -> frozenset[str]:
+    """Local flags for `component` after a local edit.
+
+    Components already on the server (href set) gain ``LOCAL_FLAG_DIRTY``
+    so the next sync pushes the edit with an If-Match PUT.  Local-only
+    components are uploaded by the pending-create path regardless.
+    """
+    if component.href is None:
+        return component.local_flags
+    return component.local_flags | {LOCAL_FLAG_DIRTY}
 
 
 def trashed_copy(
