@@ -7,6 +7,12 @@ import unittest
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import TypeVar
+
+from rich.style import Style
+from textual.events import MouseEvent
+from textual.widget import Widget
+from textual.widgets import Select
 
 from chronos.credentials import DefaultCredentialsProvider
 from chronos.domain import (
@@ -76,6 +82,7 @@ ACCOUNT_NAME = "personal"
 WORK_CAL = "work"
 PERSONAL_CAL = "private"
 NOW = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
+_MouseEventT = TypeVar("_MouseEventT", bound=MouseEvent)
 
 
 # Pure helpers ----------------------------------------------------------------
@@ -1243,7 +1250,8 @@ class NewEventFlowTest(TuiFlowTestCase):
             assert isinstance(pilot.app.screen, EventEditScreen)
             edit = pilot.app.screen
             edit.query_one("#edit-summary").value = "Brand new event"  # type: ignore[attr-defined]
-            edit.query_one(DatePicker).value = "2026-05-15T10:00"
+            edit.query_one("#edit-start-date", DatePicker).value = "2026-05-15"
+            edit.query_one("#edit-start-time", Select).value = "10:00"
             edit.action_save()
             await pilot.pause()
 
@@ -1272,7 +1280,8 @@ class NewEventFlowTest(TuiFlowTestCase):
             assert isinstance(pilot.app.screen, EventEditScreen)
             edit = pilot.app.screen
             edit.query_one("#edit-summary").value = "Planning"  # type: ignore[attr-defined]
-            edit.query_one(DatePicker).value = "2026-05-15T10:00"
+            edit.query_one("#edit-start-date", DatePicker).value = "2026-05-15"
+            edit.query_one("#edit-start-time", Select).value = "10:00"
             edit.query_one("#edit-attendees").value = (  # type: ignore[attr-defined]
                 "Alice <alice@example.com>, bob@example.com"
             )
@@ -1313,6 +1322,19 @@ class EditExistingEventTest(TuiFlowTestCase):
             await pilot.pause()
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
+            self.assertEqual(
+                edit.query_one("#edit-start-date", DatePicker).value,
+                component.dtstart.astimezone().strftime("%Y-%m-%d"),
+            )
+            self.assertEqual(
+                edit.query_one("#edit-start-time", Select).value,
+                component.dtstart.astimezone().strftime("%H:%M"),
+            )
+            assert component.dtend is not None
+            self.assertEqual(
+                edit.query_one("#edit-end-time", Select).value,
+                component.dtend.astimezone().strftime("%H:%M"),
+            )
             edit.query_one("#edit-summary").value = "Edited summary"  # type: ignore[attr-defined]
             edit.action_save()
             await pilot.pause()
@@ -1973,7 +1995,8 @@ class EditScreenValidationTest(TuiFlowTestCase):
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
             edit.query_one("#edit-summary").value = ""  # type: ignore[attr-defined]
-            edit.query_one(DatePicker).value = "2026-05-15T10:00"
+            edit.query_one("#edit-start-date", DatePicker).value = "2026-05-15"
+            edit.query_one("#edit-start-time", Select).value = "10:00"
             edit.action_save()
             await pilot.pause()
             self.assertIsInstance(pilot.app.screen, EventEditScreen)
@@ -1989,10 +2012,29 @@ class EditScreenValidationTest(TuiFlowTestCase):
             edit = pilot.app.screen
             assert isinstance(edit, EventEditScreen)
             edit.query_one("#edit-summary").value = "Anything"  # type: ignore[attr-defined]
-            edit.query_one(DatePicker).value = "not-a-date"
+            edit.query_one("#edit-start-date", DatePicker).value = "not-a-date"
+            edit.query_one("#edit-start-time", Select).value = "10:00"
             edit.action_save()
             await pilot.pause()
             self.assertIsInstance(pilot.app.screen, EventEditScreen)
+
+    async def test_save_rejects_end_before_start(self) -> None:
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            edit.query_one("#edit-summary").value = "Backwards"  # type: ignore[attr-defined]
+            edit.query_one("#edit-start-date", DatePicker).value = "2026-05-15"
+            edit.query_one("#edit-start-time", Select).value = "10:00"
+            edit.query_one("#edit-end-time", Select).value = "09:30"
+            edit.action_save()
+            await pilot.pause()
+            self.assertIsInstance(pilot.app.screen, EventEditScreen)
+            self.assertEqual(edit._error, "end must be after start")
 
     async def test_cancel_pops_screen(self) -> None:
         services = self.services()
@@ -2128,6 +2170,34 @@ class AlarmHelperTest(unittest.TestCase):
                 None,
                 datetime(2026, 5, 1, 8, tzinfo=UTC),
                 attendees=("not an email",),
+            )
+
+    def test_reschedule_event_ics_preserves_other_properties(self) -> None:
+        from chronos.mutations import reschedule_event_ics
+
+        moved = reschedule_event_ics(
+            corpus.event_with_attendees(),
+            "attendees-1@example.com",
+            datetime(2026, 5, 1, 11, tzinfo=UTC),
+            datetime(2026, 5, 1, 12, tzinfo=UTC),
+            datetime(2026, 5, 1, 8, tzinfo=UTC),
+        )
+        self.assertIn(b"DTSTART:20260501T110000Z", moved)
+        self.assertIn(b"DTEND:20260501T120000Z", moved)
+        self.assertIn(b"ORGANIZER:mailto:host@example.com", moved)
+        self.assertIn(b"ATTENDEE:mailto:alice@example.com", moved)
+        self.assertIn(b"SEQUENCE:1", moved)
+
+    def test_reschedule_event_ics_rejects_recurring_series(self) -> None:
+        from chronos.mutations import reschedule_event_ics
+
+        with self.assertRaisesRegex(ValueError, "recurring events"):
+            reschedule_event_ics(
+                corpus.recurring_weekly(),
+                "weekly-1@example.com",
+                datetime(2026, 5, 1, 10, tzinfo=UTC),
+                datetime(2026, 5, 1, 11, tzinfo=UTC),
+                datetime(2026, 5, 1, 8, tzinfo=UTC),
             )
 
     def test_build_event_ics_end_related_alarm(self) -> None:
@@ -2904,6 +2974,23 @@ class TimelineGridHelpersTest(unittest.TestCase):
 
 
 class TimelineGridFlowTest(TuiFlowTestCase):
+    @staticmethod
+    def _mouse_event(
+        event_type: type[_MouseEventT], timeline: Widget, row: int, column: int
+    ) -> _MouseEventT:
+        return event_type(
+            timeline,
+            0,
+            0,
+            0,
+            0,
+            1,
+            False,
+            False,
+            False,
+            style=Style.from_meta({"row": row, "column": column}),
+        )
+
     async def test_day_view_swaps_in_timeline_and_hides_detail_pane(self) -> None:
         from chronos.tui.widgets.timeline_grid import TimelineGrid
 
@@ -3068,6 +3155,251 @@ class TimelineGridFlowTest(TuiFlowTestCase):
             await pilot.pause()
             # Modal `EventDetailScreen` is now on top of MainScreen.
             self.assertIsInstance(pilot.app.screen, EventDetailScreen)
+
+    async def test_mouse_click_on_timed_event_opens_detail_modal(self) -> None:
+        from textual.coordinate import Coordinate
+
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._viewed_date = date(2026, 5, 1)
+            screen.action_select_span(1)
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            row, col = next(
+                (row, col)
+                for row in range(timeline.row_count)
+                for col in range(1, len(timeline.columns))
+                if timeline.cell_ref(row, col) is not None
+                and timeline.slot_start(row, col) is not None
+            )
+            region = timeline._get_cell_region(Coordinate(row, col))
+            offset = (
+                region.x - timeline.scroll_offset.x + 1,
+                region.y - timeline.scroll_offset.y,
+            )
+            await pilot.mouse_down(timeline, offset=offset)
+            await pilot.mouse_up(timeline, offset=offset)
+            await pilot.pause()
+
+            self.assertIsInstance(pilot.app.screen, EventDetailScreen)
+
+    async def test_drag_empty_slots_opens_create_form_with_selected_times(self) -> None:
+        from textual.coordinate import Coordinate
+
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._viewed_date = date(2026, 6, 15)
+            screen.action_select_span(1)
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            empty = next(
+                (row, col)
+                for row in range(timeline.row_count - 2)
+                for col in range(1, len(timeline.columns))
+                if timeline.slot_start(row, col) is not None
+                and timeline.cell_ref(row, col) is None
+                and timeline.slot_start(row + 2, col) is not None
+            )
+            row, col = empty
+            start = timeline.slot_start(row, col)
+            end_slot = timeline.slot_start(row + 2, col)
+            assert start is not None and end_slot is not None
+
+            def cell_offset(cell_row: int) -> tuple[int, int]:
+                region = timeline._get_cell_region(Coordinate(cell_row, col))
+                return (
+                    region.x - timeline.scroll_offset.x + 1,
+                    region.y - timeline.scroll_offset.y,
+                )
+
+            preview_coordinate = Coordinate(row + 1, col)
+            edge_coordinate = Coordinate(row + 2, col)
+            original_cell = timeline.get_cell_at(preview_coordinate)
+            original_edge = timeline.get_cell_at(edge_coordinate)
+            await pilot.mouse_down(timeline, offset=cell_offset(row))
+            await pilot.hover(timeline, offset=cell_offset(row + 2))
+            preview_cell = timeline.get_cell_at(preview_coordinate)
+            self.assertNotEqual(preview_cell, original_cell)
+            self.assertIn("░", str(preview_cell))
+            self.assertRegex(
+                str(getattr(preview_cell, "style", "")), r"on #[0-9A-Fa-f]{6}"
+            )
+            # Moving back contracts the marked range and restores cells
+            # which are no longer selected.
+            await pilot.hover(timeline, offset=cell_offset(row + 1))
+            self.assertEqual(timeline.get_cell_at(edge_coordinate), original_edge)
+            await pilot.hover(timeline, offset=cell_offset(row + 2))
+            await pilot.mouse_up(timeline, offset=cell_offset(row + 2))
+            await pilot.pause()
+
+            self.assertEqual(timeline.get_cell_at(preview_coordinate), original_cell)
+
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            self.assertEqual(
+                edit.query_one("#edit-start-date", DatePicker).value,
+                start.strftime("%Y-%m-%d"),
+            )
+            self.assertEqual(
+                edit.query_one("#edit-start-time", Select).value,
+                start.strftime("%H:%M"),
+            )
+            self.assertEqual(
+                edit.query_one("#edit-end-date", DatePicker).value,
+                "",
+            )
+            self.assertEqual(
+                edit.query_one("#edit-end-time", Select).value,
+                (end_slot + timedelta(minutes=30)).strftime("%H:%M"),
+            )
+
+    async def test_drag_event_reschedules_it_and_preserves_duration(self) -> None:
+        from textual.events import MouseDown, MouseMove, MouseUp
+
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        start = datetime(2026, 6, 15, 9).astimezone()
+        end = start + timedelta(hours=1)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._save_event(
+                EditDraft(
+                    target=CalendarRef(ACCOUNT_NAME, WORK_CAL),
+                    summary="Drag me",
+                    dtstart=start,
+                    dtend=end,
+                    location="Room 1",
+                    description="Keep this",
+                    attendees=("guest@example.com",),
+                    alarms=(),
+                    existing=None,
+                )
+            )
+            dragged = next(
+                component
+                for component in services.index.list_calendar_components(
+                    CalendarRef(ACCOUNT_NAME, WORK_CAL)
+                )
+                if component.summary == "Drag me"
+            )
+            screen._viewed_date = start.date()
+            screen.action_select_span(1)
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            origin = next(
+                (row, col)
+                for row in range(timeline.row_count - 2)
+                for col in range(1, len(timeline.columns))
+                if timeline.cell_ref(row, col) == dragged.ref
+                and timeline.slot_start(row + 2, col) is not None
+            )
+            row, col = origin
+            timeline.on_mouse_down(self._mouse_event(MouseDown, timeline, row, col))
+            timeline.on_mouse_move(self._mouse_event(MouseMove, timeline, row + 2, col))
+            timeline.on_mouse_up(self._mouse_event(MouseUp, timeline, row + 2, col))
+            await pilot.pause()
+
+        updated = services.index.get_component(dragged.ref)
+        assert isinstance(updated, VEvent)
+        self.assertEqual(updated.dtstart, start + timedelta(hours=1))
+        self.assertEqual(updated.dtend, end + timedelta(hours=1))
+        self.assertEqual(updated.location, "Room 1")
+        self.assertEqual(updated.description, "Keep this")
+        self.assertIn(b"ATTENDEE", updated.raw_ics)
+
+    async def test_drag_from_exact_event_end_creates_new_half_hour_range(self) -> None:
+        """The end of an event is outside its half-open occupied interval."""
+        from textual.coordinate import Coordinate
+
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        event_start = datetime(2026, 6, 15, 14, 30).astimezone()
+        event_end = datetime(2026, 6, 15, 15, 30).astimezone()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._save_event(
+                EditDraft(
+                    target=CalendarRef(ACCOUNT_NAME, WORK_CAL),
+                    summary="Ends at half past",
+                    dtstart=event_start,
+                    dtend=event_end,
+                    location="",
+                    description="",
+                    attendees=(),
+                    alarms=(),
+                    existing=None,
+                )
+            )
+            component = next(
+                item
+                for item in services.index.list_calendar_components(
+                    CalendarRef(ACCOUNT_NAME, WORK_CAL)
+                )
+                if item.summary == "Ends at half past"
+            )
+            screen._viewed_date = event_start.date()
+            screen.action_select_span(1)
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            row, col = next(
+                (row, col)
+                for row in range(timeline.row_count - 1)
+                for col in range(1, len(timeline.columns))
+                if timeline.slot_start(row, col) == event_end
+            )
+            self.assertIsNone(timeline.cell_ref(row, col))
+            self.assertEqual(timeline.get_cell_at(Coordinate(row, 0)), "15:30")
+            region = timeline._get_cell_region(Coordinate(row, col))
+            timeline.scroll_to_region(region, animate=False, immediate=True)
+            await pilot.pause()
+            next_region = timeline._get_cell_region(Coordinate(row + 1, col))
+            offset = (
+                region.x - timeline.scroll_offset.x + 1,
+                region.y - timeline.scroll_offset.y,
+            )
+            next_offset = (
+                next_region.x - timeline.scroll_offset.x + 1,
+                next_region.y - timeline.scroll_offset.y,
+            )
+            await pilot.mouse_down(timeline, offset=offset)
+            await pilot.hover(timeline, offset=next_offset)
+            await pilot.mouse_up(timeline, offset=next_offset)
+            await pilot.pause()
+
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            self.assertEqual(
+                edit.query_one("#edit-start-date", DatePicker).value,
+                event_end.strftime("%Y-%m-%d"),
+            )
+            self.assertEqual(
+                edit.query_one("#edit-start-time", Select).value,
+                event_end.strftime("%H:%M"),
+            )
+            unchanged = services.index.get_component(component.ref)
+            assert isinstance(unchanged, VEvent)
+            self.assertEqual(unchanged.dtstart, event_start)
+            self.assertEqual(unchanged.dtend, event_end)
 
 
 class OAuthCopyUrlTest(TuiFlowTestCase):

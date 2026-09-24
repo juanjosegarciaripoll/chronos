@@ -20,6 +20,9 @@ Current project plan and scope summary. This replaces the milestone backlog prev
   - agenda, day, and grid views
   - calendar selection panel
   - create, edit, trash, search, and sync flows
+  - mouse creation with a live range preview and drag-to-reschedule in
+    day/grid timelines
+  - compact event editor with separate date fields and half-hour time selectors
   - modal event detail and sync progress
 - MCP support with:
   - stdio self-contained mode

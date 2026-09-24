@@ -11,8 +11,9 @@ Provide an offline-authoritative, keyboard-first calendar client that keeps its 
 - Multi-account CalDAV synchronization.
 - Local `.ics` mirror plus SQLite index and recurrence cache.
 - VEVENT and VTODO support.
-- Textual TUI for agenda/day/grid workflows, with periodic background sync
-  while it is open (hourly by default; `g` syncs immediately).
+- Textual TUI for agenda/day/grid workflows, including mouse creation and
+  drag-to-reschedule for non-recurring timed events, with periodic background
+  sync while it is open (hourly by default; `g` syncs immediately).
 - CLI for sync, inspection, mutation, import, bootstrap, and OAuth authorization.
 - MCP tools for search/query/detail plus iTIP-aware `.ics` import.
 - OAuth browser loopback authorization where providers require it.

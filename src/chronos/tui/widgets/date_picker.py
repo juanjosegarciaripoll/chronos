@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from textual.widgets import Input
 
@@ -41,8 +42,13 @@ class DatePicker(Input):
     `parse_date_input`, callable from anywhere.
     """
 
-    def __init__(self, value: str = "", placeholder: str = "YYYY-MM-DD HH:MM") -> None:
-        super().__init__(value=value, placeholder=placeholder)
+    def __init__(
+        self,
+        value: str = "",
+        placeholder: str = "YYYY-MM-DD HH:MM",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(value=value, placeholder=placeholder, **kwargs)
 
     def parsed(self) -> datetime:
         return parse_date_input(self.value)

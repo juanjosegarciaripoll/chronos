@@ -2,9 +2,9 @@
 
 A `DataTable` with one time-of-day row per 30-min slot and one column
 per day. Day view passes a single date; Grid view passes 3 or 4. Each
-event lands in the cell that holds its start time; cells are
-selectable, and pressing Enter posts a `Selected` message the parent
-screen handles by pushing the existing `EventDetailScreen` modal.
+event lands in the cell that holds its start time. Empty timed cells
+can be clicked or dragged to create an event, while timed events can
+be clicked to open or dragged to reschedule.
 
 Full-day items (VTodos and any synthesised midnight-to-midnight
 occurrence) appear in a single "All day" banner row above the time
@@ -14,11 +14,13 @@ grid so they remain visible even in the timeline view.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, NamedTuple
 
 from rich.text import Text
 from textual.color import Color
+from textual.coordinate import Coordinate
+from textual.events import MouseDown, MouseEvent, MouseMove, MouseUp
 from textual.message import Message
 from textual.widgets import DataTable
 
@@ -34,6 +36,7 @@ _DAY_COL_WIDTH = 20
 _ALL_DAY_LABEL = "all day"
 _HOUR_MARKER_CHAR = "\u2594"  # UPPER ONE EIGHTH BLOCK
 _EVENT_END_CHAR = "\u2582"  # LOWER ONE QUARTER BLOCK
+_DRAG_PREVIEW_CHAR = "\u2591"  # LIGHT SHADE
 
 
 class _Palette(NamedTuple):
@@ -65,18 +68,34 @@ def _contrast_fg(background: str) -> str:
     return "#000000" if luma > 140 else "#FFFFFF"
 
 
-class TimelineGrid(DataTable[str]):
+class TimelineGrid(DataTable[str | Text]):
     """Time-axis-on-Y, days-on-X event grid.
 
-    Cell-mode cursor; Enter on a cell that carries an event posts a
-    `Selected` message with the event's `ComponentRef` so the parent
-    screen can open the detail. Empty cells are no-op selections.
+    Cell-mode cursor; Enter or a mouse click on an event posts a
+    `Selected` message. Mouse gestures on timed cells post create/move
+    requests for the parent screen to persist.
     """
 
     class Selected(Message):
         def __init__(self, ref: ComponentRef) -> None:
             super().__init__()
             self.ref = ref
+
+    class CreateRequested(Message):
+        """A mouse selection over empty time slots."""
+
+        def __init__(self, start: datetime, end: datetime) -> None:
+            super().__init__()
+            self.start = start
+            self.end = end
+
+    class MoveRequested(Message):
+        """A timed event dragged by ``delta`` on the grid."""
+
+        def __init__(self, ref: ComponentRef, delta: timedelta) -> None:
+            super().__init__()
+            self.ref = ref
+            self.delta = delta
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -93,6 +112,16 @@ class TimelineGrid(DataTable[str]):
         # on_mount, so the initial call uses the fallback _DAY_COL_WIDTH).
         self._last_days: Sequence[tuple[date, Sequence[OccurrenceRow]]] | None = None
         self._last_today: date | None = None
+        # Timed cells map to their local half-hour start. All-day rows and
+        # the time-label column deliberately have no entry, so their normal
+        # click behaviour remains untouched.
+        self._slot_starts: dict[tuple[int, int], datetime] = {}
+        self._drag_origin: Coordinate | None = None
+        self._drag_current: Coordinate | None = None
+        # Original cell values replaced by the live creation-range preview.
+        # Keeping the exact objects makes restoration lossless (including
+        # hour markers and event styling underneath the marked range).
+        self._drag_preview_originals: dict[tuple[int, int], Any] = {}
 
     def on_mount(self) -> None:
         self.cursor_type = "cell"
@@ -139,8 +168,14 @@ class TimelineGrid(DataTable[str]):
         # a flash of narrow columns before the first layout pass completes.
         if self.size.width == 0:
             return
+        if self._drag_origin is not None:
+            self.release_mouse()
+        self._drag_origin = None
+        self._drag_current = None
+        self._drag_preview_originals.clear()
         self.clear(columns=True)
         self._cells.clear()
+        self._slot_starts.clear()
         self._col_alt.clear()
         if not days:
             self.add_column("(no days)")
@@ -170,12 +205,123 @@ class TimelineGrid(DataTable[str]):
         """Lookup the event ref at `(row, col)` if any. Used by tests."""
         return self._cells.get((row, col))
 
+    def slot_start(self, row: int, col: int) -> datetime | None:
+        """Return the local start time for a timed cell, if it is one."""
+        return self._slot_starts.get((row, col))
+
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         coord = event.coordinate
         ref = self._cells.get((coord.row, coord.column))
         if ref is None:
             return
         self.post_message(self.Selected(ref))
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        """Begin creating or moving an event from a timed grid cell."""
+        if event.button != 1:
+            return
+        coordinate = self._mouse_coordinate(event)
+        if coordinate is None:
+            return
+        self._drag_origin = coordinate
+        self._drag_current = coordinate
+        self.cursor_coordinate = coordinate
+        if self._cells.get((coordinate.row, coordinate.column)) is None:
+            self._update_drag_preview(coordinate)
+        self.capture_mouse()
+        event.stop()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if self._drag_origin is None:
+            return
+        coordinate = self._mouse_coordinate(event)
+        if coordinate is not None:
+            self._drag_current = coordinate
+            self.cursor_coordinate = coordinate
+            if (
+                self._cells.get((self._drag_origin.row, self._drag_origin.column))
+                is None
+            ):
+                self._update_drag_preview(coordinate)
+        event.stop()
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if event.button != 1 or self._drag_origin is None:
+            return
+        origin = self._drag_origin
+        current = self._mouse_coordinate(event) or self._drag_current or origin
+        self._drag_origin = None
+        self._drag_current = None
+        self.release_mouse()
+        # The gesture is complete. Prevent Textual from synthesising a second
+        # Click which would also run DataTable's selection machinery.
+        self.suppress_click()
+        event.stop()
+
+        origin_key = (origin.row, origin.column)
+        current_key = (current.row, current.column)
+        origin_start = self._slot_starts[origin_key]
+        current_start = self._slot_starts[current_key]
+        ref = self._cells.get(origin_key)
+        self._clear_drag_preview()
+        if ref is not None:
+            if current_key == origin_key:
+                self.post_message(self.Selected(ref))
+            else:
+                self.post_message(self.MoveRequested(ref, current_start - origin_start))
+            return
+
+        start = min(origin_start, current_start)
+        end = max(origin_start, current_start) + timedelta(minutes=_SLOT_MINUTES)
+        self.post_message(self.CreateRequested(start, end))
+
+    def _update_drag_preview(self, current: Coordinate) -> None:
+        """Paint every visible slot in the pending creation range."""
+        origin = self._drag_origin
+        if origin is None:
+            return
+        origin_start = self._slot_starts[(origin.row, origin.column)]
+        current_start = self._slot_starts[(current.row, current.column)]
+        start, end = sorted((origin_start, current_start))
+        wanted = {
+            key
+            for key, slot_start in self._slot_starts.items()
+            if start <= slot_start <= end
+        }
+        for key in self._drag_preview_originals.keys() - wanted:
+            original = self._drag_preview_originals.pop(key)
+            self.update_cell_at(Coordinate(*key), original)
+
+        fill = self._theme_var("accent", "primary")
+        foreground = _contrast_fg(fill)
+        preview = Text(
+            _DRAG_PREVIEW_CHAR * self._day_col_width,
+            style=f"{foreground} on {fill}",
+        )
+        for key in wanted - self._drag_preview_originals.keys():
+            coordinate = Coordinate(*key)
+            self._drag_preview_originals[key] = self.get_cell_at(coordinate)
+            self.update_cell_at(coordinate, preview.copy())
+
+    def _clear_drag_preview(self) -> None:
+        """Restore cells covered by the live creation-range preview."""
+        for key, original in self._drag_preview_originals.items():
+            self.update_cell_at(Coordinate(*key), original)
+        self._drag_preview_originals.clear()
+
+    def _mouse_coordinate(self, event: MouseEvent) -> Coordinate | None:
+        """Return a timed-cell coordinate carried in DataTable render metadata."""
+        meta = event.style.meta
+        if meta.get("out_of_bounds", False):
+            return None
+        row = meta.get("row")
+        column = meta.get("column")
+        if not isinstance(row, int) or not isinstance(column, int):
+            return None
+        coordinate = Coordinate(row, column)
+        if (coordinate.row, coordinate.column) not in self._slot_starts:
+            return None
+        return coordinate
 
     # --- internal --------------------------------------------------------
 
@@ -214,12 +360,17 @@ class TimelineGrid(DataTable[str]):
         # characters, not trailing whitespace, so every styled cell is
         # padded to the declared column width.
         row_index = self.row_count
-        # Only label the top of each hour; the :30 row is left blank so
-        # the time column stays readable without clutter.
+        # Label every row. Mouse gestures operate at half-hour resolution,
+        # so hiding the :30 labels makes the boundary after an event look
+        # like part of the preceding full-hour block.
         is_hour = slot_minutes_in_day % 60 == 0
-        time_text = _format_slot_time(slot_minutes_in_day) if is_hour else ""
+        time_text = _format_slot_time(slot_minutes_in_day)
         cells: list[Any] = [time_text]
         for col_idx, (day_date, events) in enumerate(days, start=1):
+            slot_hour, slot_minute = divmod(slot_minutes_in_day, 60)
+            self._slot_starts[(row_index, col_idx)] = datetime.combine(
+                day_date, time(slot_hour, slot_minute)
+            ).astimezone()
             content, ref, is_start, is_end = _cell_for_slot(
                 day_date, slot_minutes_in_day, events
             )

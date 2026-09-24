@@ -87,3 +87,5 @@ src/chronos/
 - CLI and TUI are the main local mutation surfaces.
 - MCP is not read-only: `import_ics` is iTIP-aware and can mutate or remove existing events (`METHOD:CANCEL` trashes, `METHOD:REQUEST`/newer `SEQUENCE` updates). Every other MCP tool is read-only.
 - The active TUI shape is agenda/day/grid, not the older separate week/month/todo-screen model.
+- `TimelineGrid` owns mouse gesture interpretation. It posts create/move
+  requests to `MainScreen`, which owns forms and local persistence.

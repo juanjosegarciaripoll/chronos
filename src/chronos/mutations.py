@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 
+from icalendar import Calendar, Event
+
 from chronos.domain import (
     LOCAL_FLAG_DIRTY,
     LocalStatus,
@@ -74,6 +76,69 @@ def build_event_ics(
         lines.append("END:VALARM")
     lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def reschedule_event_ics(
+    raw_ics: bytes,
+    uid: str,
+    dtstart: datetime,
+    dtend: datetime | None,
+    now: datetime,
+) -> bytes:
+    """Shift a single VEVENT while preserving its other iCalendar data.
+
+    Mouse dragging is intentionally limited to non-recurring events. Moving
+    one occurrence correctly requires a RECURRENCE-ID override, while moving
+    a series can change RRULE semantics; neither should happen implicitly.
+    """
+    try:
+        calendar = Calendar.from_ical(raw_ics)
+    except ValueError as exc:
+        raise ValueError("event data could not be parsed") from exc
+
+    matching: list[Event] = []
+    for component in calendar.walk("VEVENT"):  # pyright: ignore[reportUnknownMemberType]
+        if (
+            isinstance(component, Event) and str(component.get("UID", "")) == uid  # type: ignore[no-untyped-call]
+        ):
+            matching.append(component)
+    if len(matching) != 1:
+        raise ValueError("recurring events cannot be dragged")
+    event = matching[0]
+    get = event.get
+    if any(
+        get(key) is not None  # type: ignore[no-untyped-call]
+        for key in ("RRULE", "RDATE", "EXDATE")
+    ):
+        raise ValueError("recurring events cannot be dragged")
+
+    for key, replacement in (("DTSTART", dtstart), ("DTEND", dtend)):
+        prop = get(key)  # type: ignore[no-untyped-call]
+        if prop is None:
+            continue
+        value = getattr(prop, "dt", None)
+        if not isinstance(value, datetime):
+            raise ValueError("all-day events cannot be dragged on the time grid")
+        if replacement is None:
+            continue
+        if value.tzinfo is None:
+            prop.dt = replacement.astimezone().replace(tzinfo=None)
+        else:
+            prop.dt = replacement.astimezone(value.tzinfo)
+
+    dtstamp = get("DTSTAMP")  # type: ignore[no-untyped-call]
+    if dtstamp is None:
+        event.add("DTSTAMP", now.astimezone(UTC))
+    else:
+        dtstamp.dt = now.astimezone(UTC)
+
+    sequence = get("SEQUENCE")  # type: ignore[no-untyped-call]
+    next_sequence = int(sequence) + 1 if sequence is not None else 1
+    event["SEQUENCE"] = next_sequence
+    serialized = calendar.to_ical()
+    if not isinstance(serialized, bytes):
+        raise ValueError("event data could not be serialized")
+    return serialized
 
 
 def normalize_attendee_emails(values: Sequence[str]) -> tuple[str, ...]:
@@ -208,5 +273,6 @@ __all__ = [
     "generate_uid",
     "normalize_attendee_email",
     "normalize_attendee_emails",
+    "reschedule_event_ics",
     "trashed_copy",
 ]

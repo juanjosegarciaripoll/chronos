@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import cast
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Input, Label, Select
 
@@ -21,6 +21,13 @@ from chronos.ical_parser import extract_alarm_triggers, extract_attendees
 from chronos.mutations import normalize_attendee_emails
 from chronos.tui.bindings import edit_bindings
 from chronos.tui.widgets.date_picker import DatePicker, InvalidDateError
+
+_HALF_HOUR_OPTIONS = tuple(
+    (label, label)
+    for hour in range(24)
+    for minute in (0, 30)
+    if (label := f"{hour:02d}:{minute:02d}")
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -56,6 +63,8 @@ class EventEditScreen(Screen[None]):
         default_calendar: CalendarRef | None,
         on_save: Callable[[EditDraft], None],
         on_delete: Callable[[StoredComponent], None] | None = None,
+        initial_start: datetime | None = None,
+        initial_end: datetime | None = None,
     ) -> None:
         super().__init__()
         if not calendars:
@@ -65,6 +74,8 @@ class EventEditScreen(Screen[None]):
         self._default_calendar = default_calendar or calendars[0]
         self._on_save = on_save
         self._on_delete = on_delete
+        self._initial_start = initial_start
+        self._initial_end = initial_end
         self._error: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -73,16 +84,20 @@ class EventEditScreen(Screen[None]):
         # Pre-fill with the system-local representation so what the user
         # sees here matches the times shown in the calendar views, and
         # so a no-op edit round-trips without shifting by their UTC offset.
-        start = (
-            _format_local(ex.dtstart)
+        initial_start = (
+            ex.dtstart
             if ex is not None and ex.dtstart is not None
-            else ""
+            else self._initial_start
         )
-        end = (
-            _format_local(ex.dtend)
+        initial_end = (
+            ex.dtend
             if isinstance(ex, VEvent) and ex.dtend is not None
-            else ""
+            else self._initial_end
         )
+        start_date, start_time = _local_parts(initial_start)
+        end_date, end_time = _local_parts(initial_end)
+        if start_date == end_date:
+            end_date = ""
         location = ex.location or "" if ex is not None else ""
         description = ex.description or "" if ex is not None else ""
         attendees = ", ".join(
@@ -92,31 +107,96 @@ class EventEditScreen(Screen[None]):
             extract_alarm_triggers(ex.raw_ics, ex.ref.uid) if ex is not None else []
         )
         with Vertical(id="event-edit"):
-            yield Label("Calendar:")
-            yield Select(
-                ((self._calendar_label(c), c) for c in self._calendars),
-                value=self._default_calendar,
-                allow_blank=False,
-                id="edit-calendar",
+            yield Label(
+                "Edit event" if ex is not None else "New event",
+                classes="event-edit-title",
             )
-            yield Label("Summary:")
-            yield Input(value=summary, id="edit-summary")
-            yield Label("Start (YYYY-MM-DDTHH:MM):")
-            yield DatePicker(value=start, placeholder="YYYY-MM-DDTHH:MM")
-            yield Label("End (optional, YYYY-MM-DDTHH:MM):")
-            yield Input(value=end, id="edit-end")
-            yield Label("Location (optional):")
-            yield Input(value=location, id="edit-location")
-            yield Label("Description (optional):")
-            yield Input(value=description, id="edit-description")
-            yield Label("Invitees (optional, emails comma-separated):")
-            yield Input(
-                value=attendees,
-                id="edit-attendees",
-                placeholder="alice@example.com, bob@example.com",
-            )
-            yield Label("Reminders (minutes before start, comma-separated):")
-            yield Input(value=reminders, id="edit-reminders", placeholder="e.g. 15, 60")
+            with Horizontal(classes="event-field-row"):
+                yield Label("Calendar", classes="event-field-label")
+                yield Select(
+                    ((self._calendar_label(c), c) for c in self._calendars),
+                    value=self._default_calendar,
+                    allow_blank=False,
+                    id="edit-calendar",
+                    classes="event-field-control",
+                    compact=True,
+                )
+            with Horizontal(classes="event-field-row"):
+                yield Label("Summary", classes="event-field-label")
+                yield Input(
+                    value=summary,
+                    id="edit-summary",
+                    classes="event-field-control",
+                    compact=True,
+                )
+            with Horizontal(classes="event-datetime-row"):
+                yield Label("Starts", classes="event-field-label")
+                yield DatePicker(
+                    value=start_date,
+                    placeholder="YYYY-MM-DD",
+                    id="edit-start-date",
+                    classes="event-date",
+                    compact=True,
+                )
+                yield Select(
+                    _time_options(start_time),
+                    value=start_time if start_time else Select.NULL,
+                    prompt="Time",
+                    id="edit-start-time",
+                    classes="event-time",
+                    compact=True,
+                )
+            with Horizontal(classes="event-datetime-row"):
+                yield Label("Ends", classes="event-field-label")
+                yield DatePicker(
+                    value=end_date,
+                    placeholder="Same date",
+                    id="edit-end-date",
+                    classes="event-date",
+                    compact=True,
+                )
+                yield Select(
+                    _time_options(end_time),
+                    value=end_time if end_time else Select.NULL,
+                    prompt="Optional",
+                    id="edit-end-time",
+                    classes="event-time",
+                    compact=True,
+                )
+            with Horizontal(classes="event-field-row"):
+                yield Label("Location", classes="event-field-label")
+                yield Input(
+                    value=location,
+                    id="edit-location",
+                    classes="event-field-control",
+                    compact=True,
+                )
+            with Horizontal(classes="event-field-row"):
+                yield Label("Description", classes="event-field-label")
+                yield Input(
+                    value=description,
+                    id="edit-description",
+                    classes="event-field-control",
+                    compact=True,
+                )
+            with Horizontal(classes="event-field-row"):
+                yield Label("Invitees", classes="event-field-label")
+                yield Input(
+                    value=attendees,
+                    id="edit-attendees",
+                    placeholder="alice@example.com, bob@example.com",
+                    classes="event-field-control",
+                    compact=True,
+                )
+            with Horizontal(classes="event-field-row"):
+                yield Label("Reminders", classes="event-field-label")
+                yield Input(
+                    value=reminders,
+                    id="edit-reminders",
+                    placeholder="Minutes before, e.g. 15, 60",
+                    classes="event-field-control",
+                    compact=True,
+                )
             yield Label("", id="edit-error")
         yield Footer()
 
@@ -165,15 +245,28 @@ class EventEditScreen(Screen[None]):
         summary = summary_input.value.strip()
         if not summary:
             raise ValueError("summary is required")
-        date_input: DatePicker = self.query_one(DatePicker)
-        dtstart = date_input.parsed()
-        end_input: Input = self.query_one("#edit-end", Input)
-        end_text = end_input.value.strip()
-        dtend: datetime | None = None
-        if end_text:
-            from chronos.tui.widgets.date_picker import parse_date_input
+        start_date_input = self.query_one("#edit-start-date", DatePicker)
+        start_date = _parse_date(start_date_input.value, "start date")
+        start_time_select = self.query_one("#edit-start-time", Select)
+        start_time = _selected_time(start_time_select, "start time")
+        dtstart = datetime.combine(start_date, start_time).astimezone()
 
-            dtend = parse_date_input(end_text)
+        end_date_input = self.query_one("#edit-end-date", DatePicker)
+        end_date_text = end_date_input.value.strip()
+        end_time_select = self.query_one("#edit-end-time", Select)
+        selected_end_time = cast("object", end_time_select.value)
+        dtend: datetime | None = None
+        if isinstance(selected_end_time, str):
+            end_date = (
+                _parse_date(end_date_text, "end date") if end_date_text else start_date
+            )
+            dtend = datetime.combine(
+                end_date, _parse_time(selected_end_time, "end time")
+            ).astimezone()
+            if dtend <= dtstart:
+                raise ValueError("end must be after start")
+        elif end_date_text:
+            raise ValueError("end time is required when end date is set")
         location_input: Input = self.query_one("#edit-location", Input)
         description_input: Input = self.query_one("#edit-description", Input)
         attendees_input: Input = self.query_one("#edit-attendees", Input)
@@ -261,8 +354,42 @@ def _parse_attendees_input(raw: str) -> tuple[str, ...]:
     return normalize_attendee_emails(values)
 
 
-def _format_local(dt: datetime) -> str:
-    return dt.astimezone().strftime("%Y-%m-%dT%H:%M")
+def _local_parts(dt: datetime | None) -> tuple[str, str]:
+    if dt is None:
+        return "", ""
+    local = dt.astimezone()
+    return local.strftime("%Y-%m-%d"), local.strftime("%H:%M")
+
+
+def _time_options(value: str) -> tuple[tuple[str, str], ...]:
+    if not value or any(option == value for _, option in _HALF_HOUR_OPTIONS):
+        return _HALF_HOUR_OPTIONS
+    return ((value, value), *_HALF_HOUR_OPTIONS)
+
+
+def _parse_date(value: str, label: str) -> date:
+    text = value.strip()
+    if not text:
+        raise InvalidDateError(f"{label} is required")
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise InvalidDateError(f"{label} must be YYYY-MM-DD") from exc
+
+
+def _parse_time(value: str, label: str) -> time:
+    try:
+        parsed = time.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be HH:MM") from exc
+    return parsed.replace(second=0, microsecond=0)
+
+
+def _selected_time(select: Select[object], label: str) -> time:
+    selected = select.value
+    if not isinstance(selected, str):
+        raise ValueError(f"{label} is required")
+    return _parse_time(selected, label)
 
 
 __all__ = ["EditDraft", "EventEditScreen"]

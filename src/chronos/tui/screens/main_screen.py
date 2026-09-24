@@ -3,7 +3,8 @@ from __future__ import annotations
 import contextlib
 import threading
 from collections.abc import Sequence
-from datetime import date, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, cast
@@ -31,6 +32,7 @@ from chronos.mutations import (
     build_event_ics,
     edited_flags,
     generate_uid,
+    reschedule_event_ics,
     trashed_copy,
 )
 from chronos.paths import default_tui_state_path
@@ -276,7 +278,24 @@ class MainScreen(Screen[None]):
     # Mutating actions -------------------------------------------------------
 
     def action_new_event(self) -> None:
+        self._new_event()
+
+    def _new_event(
+        self,
+        *,
+        initial_start: datetime | None = None,
+        initial_end: datetime | None = None,
+    ) -> None:
         services = self._services()
+        if initial_start is None:
+            if self._view in (ViewKind.DAY, ViewKind.GRID):
+                timeline = self.query_one(TimelineGrid)
+                coordinate = timeline.cursor_coordinate
+                initial_start = timeline.slot_start(coordinate.row, coordinate.column)
+            if initial_start is None:
+                initial_start = _round_up_to_half_hour(services.now())
+        if initial_end is None:
+            initial_end = initial_start + timedelta(hours=1)
         calendars = all_calendar_refs(services.config, services.mirror)
         if not calendars:
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
@@ -289,6 +308,8 @@ class MainScreen(Screen[None]):
             existing=None,
             default_calendar=default,
             on_save=self._save_event,
+            initial_start=initial_start,
+            initial_end=initial_end,
         )
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
@@ -454,6 +475,46 @@ class MainScreen(Screen[None]):
         if component is None:
             return
         self._open_specific(component)
+
+    def on_timeline_grid_create_requested(
+        self, event: TimelineGrid.CreateRequested
+    ) -> None:
+        self._new_event(initial_start=event.start, initial_end=event.end)
+
+    def on_timeline_grid_move_requested(
+        self, event: TimelineGrid.MoveRequested
+    ) -> None:
+        component = self._services().index.get_component(event.ref)
+        if not isinstance(component, VEvent) or component.dtstart is None:
+            return
+        services = self._services()
+        dtstart = component.dtstart + event.delta
+        dtend = component.dtend + event.delta if component.dtend is not None else None
+        try:
+            raw_ics = reschedule_event_ics(
+                component.raw_ics,
+                component.ref.uid,
+                dtstart,
+                dtend,
+                services.now(),
+            )
+        except ValueError as exc:
+            self.app.notify(str(exc))  # pyright: ignore[reportUnknownMemberType]
+            return
+        updated = replace(
+            component,
+            raw_ics=raw_ics,
+            dtstart=dtstart,
+            dtend=dtend,
+            local_flags=edited_flags(component),
+        )
+        services.mirror.write(component.ref.resource, raw_ics)
+        services.index.upsert_component(updated)
+        self._refresh_local_caches(updated)
+        self.app.notify(  # pyright: ignore[reportUnknownMemberType]
+            f"Moved {component.summary or component.ref.uid!r}"
+        )
+        self.refresh_view()
 
     def _currently_selected_component(self) -> StoredComponent | None:
         # Different views surface "what's highlighted" through
@@ -788,6 +849,18 @@ class MainScreen(Screen[None]):
             if self._selection.contains(ref):
                 return ref
         return calendars[0]
+
+
+def _round_up_to_half_hour(value: datetime) -> datetime:
+    """Return the nearest local half-hour at or after ``value``."""
+    local = value.astimezone()
+    rounded = local.replace(second=0, microsecond=0)
+    remainder = rounded.minute % 30
+    if remainder:
+        rounded += timedelta(minutes=30 - remainder)
+    elif local.second or local.microsecond:
+        rounded += timedelta(minutes=30)
+    return rounded
 
 
 def _save_last_view(view: ViewKind) -> None:

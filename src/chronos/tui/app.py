@@ -94,6 +94,17 @@ class ChronosApp(App[None]):
     #event-edit, #search-dialog {
         padding: 1;
     }
+    .event-edit-title { text-style: bold; margin-bottom: 1; }
+    .event-field-row, .event-datetime-row {
+        height: 1;
+        margin-bottom: 1;
+        align-vertical: middle;
+    }
+    .event-field-label { width: 14; }
+    .event-field-control { width: 1fr; }
+    .event-date { width: 18; margin-right: 1; }
+    .event-time { width: 14; }
+    #edit-error { color: $error; }
 
     /* Modal dialogs: `align: center middle;` on the screen itself is
        Textual's stock idiom for centring a single child container.
