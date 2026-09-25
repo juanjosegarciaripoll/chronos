@@ -83,13 +83,14 @@ class EventList(DataTable[str]):
         # sorted by start time in `gather_occurrences`, so a simple
         # last-seen tracker is enough.
         prev_day_plain: str | None = None
+        active_style = self._active_style()
         for row in rows:
             key = self._row_key(
                 row.component.ref,
                 row.occurrence.recurrence_id,
                 instance=row.occurrence.start.isoformat(),
             )
-            cells = format_event_row(row, today, now=now)
+            cells = format_event_row(row, today, now=now, active_style=active_style)
             day_cell = cells[0]
             day_plain = day_cell.plain if isinstance(day_cell, Text) else day_cell
             if day_plain == prev_day_plain:
@@ -109,6 +110,13 @@ class EventList(DataTable[str]):
             rendered = cast(tuple[Any, ...], sliced)
             self.add_row(*rendered, key=key)
             self._refs[key] = row.component.ref
+
+    def _active_style(self) -> str:
+        """Style for rows in progress: bold, in the theme's accent colour."""
+        accent = self.app.theme_variables.get("accent")
+        if isinstance(accent, str) and accent and not accent.startswith("auto"):
+            return f"bold {accent}"
+        return "bold"
 
     def show_todos(self, todos: Sequence[VTodo]) -> None:
         self._reset(_TODO_COLUMNS, "todos")

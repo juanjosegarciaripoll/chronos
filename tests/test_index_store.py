@@ -588,6 +588,28 @@ class AlarmRepositoryTest(unittest.TestCase):
         )
         self.assertEqual(len(still_pending), 0)
 
+    def test_set_alarms_keeps_fired_at_across_rebuild(self) -> None:
+        # Rebuilding the alarm cache (e.g. after a sync touched the
+        # event) must not make an already-fired alarm fire again.
+        occ_start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        trigger = datetime(2026, 5, 1, 8, 45, tzinfo=UTC)
+        window = (
+            datetime(2026, 5, 1, 8, 30, tzinfo=UTC),
+            datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        self.repo.set_alarms(self.ref, occ_start, [self._make_alarm(trigger)])
+        alarm_id = self.repo.query_pending_alarms(*window)[0].db_id
+        assert alarm_id is not None
+        self.repo.mark_alarm_fired(alarm_id, datetime(2026, 5, 1, 8, 46, tzinfo=UTC))
+
+        self.repo.set_alarms(self.ref, occ_start, [self._make_alarm(trigger)])
+        self.assertEqual(self.repo.query_pending_alarms(*window), ())
+
+        # A moved trigger is a new alarm and is pending again.
+        moved = datetime(2026, 5, 1, 8, 50, tzinfo=UTC)
+        self.repo.set_alarms(self.ref, occ_start, [self._make_alarm(moved)])
+        self.assertEqual(len(self.repo.query_pending_alarms(*window)), 1)
+
     def test_set_alarms_replaces_existing(self) -> None:
         occ_start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
         trigger_a = datetime(2026, 5, 1, 8, 45, tzinfo=UTC)

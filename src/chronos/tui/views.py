@@ -17,6 +17,7 @@ from rich.text import Text
 from chronos.domain import (
     AppConfig,
     CalendarRef,
+    ComponentRef,
     LocalStatus,
     Occurrence,
     ParsedAlarm,
@@ -28,6 +29,10 @@ from chronos.ical_parser import extract_alarm_triggers, extract_attendees
 from chronos.protocols import IndexRepository, MirrorRepository
 
 DEFAULT_AGENDA_DAYS = 14
+
+# Marks the time of an event in progress, in the agenda and on the
+# timeline's current-slot label.
+IN_PROGRESS_MARK = "▸"
 
 
 class ViewKind(StrEnum):
@@ -261,6 +266,7 @@ def format_event_row(
     today: date,
     *,
     now: datetime | None = None,
+    active_style: str = "bold",
 ) -> tuple[str | Text, str | Text, str | Text, str | Text, str | Text, str | Text]:
     """Six cells for the agenda DataTable: Day, Time, Duration,
     Summary, Calendar, Location.
@@ -273,8 +279,10 @@ def format_event_row(
     When `now` is supplied and the occurrence has fully ended (its
     `end`, or `start` if there's no end, is strictly before `now`),
     every cell is wrapped in a Rich `Text` with a `dim` style so the
-    row renders muted. In-progress and future rows return plain
-    strings — DataTable accepts a mix of `str` and `Text` cells.
+    row renders muted. A row in progress at `now` is wrapped in
+    `active_style` instead, with `IN_PROGRESS_MARK` before its time.
+    Future rows return plain strings — DataTable accepts a mix of
+    `str` and `Text` cells.
 
     VTodo rows (and any synthesised full-day occurrence) get a
     📋 marker on the summary, "all day" in the Time column, and an
@@ -295,6 +303,10 @@ def format_event_row(
     calendar = row.component.ref.calendar_name
     location = row.component.location or ""
     cells = (day, event_time, duration, summary, calendar, location)
+    if now is not None and is_in_progress(row.occurrence, now):
+        cells = (day, f"{IN_PROGRESS_MARK} {event_time}", *cells[2:])
+        styled = tuple(Text(c, style=active_style) for c in cells)
+        return styled[0], styled[1], styled[2], styled[3], styled[4], styled[5]
     if now is None or not _occurrence_is_past(row.occurrence, now):
         return cells
     dimmed = tuple(Text(c, style="dim") for c in cells)
@@ -346,6 +358,32 @@ def _is_full_day(occurrence: Occurrence) -> bool:
 def _occurrence_is_past(occurrence: Occurrence, now: datetime) -> bool:
     boundary = occurrence.end or occurrence.start
     return boundary < now
+
+
+def is_in_progress(occurrence: Occurrence, now: datetime) -> bool:
+    """True when a timed occurrence is running at `now`.
+
+    Full-day spans are excluded: they would be "in progress" all day
+    long, so highlighting them says nothing about the current moment.
+    """
+    if occurrence.end is None or _is_full_day(occurrence):
+        return False
+    return occurrence.start <= now < occurrence.end
+
+
+def in_progress_keys(
+    rows: Sequence[OccurrenceRow], now: datetime
+) -> frozenset[tuple[ComponentRef, datetime]]:
+    """`(ref, start)` of every row in progress at `now`.
+
+    Keyed by start as well as ref so only the running instance of a
+    recurring event counts, not its siblings on other days.
+    """
+    return frozenset(
+        (row.component.ref, row.occurrence.start)
+        for row in rows
+        if is_in_progress(row.occurrence, now)
+    )
 
 
 def format_todo_row(todo: VTodo) -> tuple[str, str, str, str]:
@@ -489,6 +527,7 @@ def _format_alarm(alarm: ParsedAlarm) -> str:
 
 __all__ = [
     "DEFAULT_AGENDA_DAYS",
+    "IN_PROGRESS_MARK",
     "AgendaWindow",
     "CalendarSelection",
     "OccurrenceRow",
@@ -502,6 +541,8 @@ __all__ = [
     "format_todo_row",
     "gather_occurrences",
     "gather_todos",
+    "in_progress_keys",
+    "is_in_progress",
     "month_window",
     "render_event_detail",
     "search_components",

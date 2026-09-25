@@ -25,7 +25,7 @@ from textual.message import Message
 from textual.widgets import DataTable
 
 from chronos.domain import ComponentRef, Occurrence
-from chronos.tui.views import OccurrenceRow
+from chronos.tui.views import IN_PROGRESS_MARK, OccurrenceRow, in_progress_keys
 from chronos.tui.views import _is_full_day as _occurrence_is_full_day
 
 _SLOT_MINUTES = 30
@@ -37,6 +37,7 @@ _ALL_DAY_LABEL = "all day"
 _HOUR_MARKER_CHAR = "\u2594"  # UPPER ONE EIGHTH BLOCK
 _EVENT_END_CHAR = "\u2582"  # LOWER ONE QUARTER BLOCK
 _DRAG_PREVIEW_CHAR = "\u2591"  # LIGHT SHADE
+_NOW_LINE_CHAR = "\u2500"  # BOX DRAWINGS LIGHT HORIZONTAL
 
 
 class _Palette(NamedTuple):
@@ -45,7 +46,9 @@ class _Palette(NamedTuple):
     `fill_a`/`fill_b` are the two event-fill shades (alternated so adjacent
     events read apart); `fg_a`/`fg_b` are their contrast-matched title
     colours; `hour_marker` and `end_fg` are the round-hour marker and the
-    event end-cap foreground.
+    event end-cap foreground. `now` marks the current slot (its time
+    label and an empty today cell) and fills the event in progress,
+    whose title is drawn in `now_fg`.
     """
 
     fill_a: str
@@ -54,6 +57,16 @@ class _Palette(NamedTuple):
     fg_b: str
     hour_marker: str
     end_fg: str
+    now: str
+    now_fg: str
+
+
+class _Now(NamedTuple):
+    """Where the current moment falls in the rendered grid."""
+
+    col: int  # column of today's date
+    slot_minutes: int  # start of the current 30-min slot, minutes from midnight
+    active: frozenset[ComponentRef]  # events in progress in that column
 
 
 def _contrast_fg(background: str) -> str:
@@ -112,6 +125,7 @@ class TimelineGrid(DataTable[str | Text]):
         # on_mount, so the initial call uses the fallback _DAY_COL_WIDTH).
         self._last_days: Sequence[tuple[date, Sequence[OccurrenceRow]]] | None = None
         self._last_today: date | None = None
+        self._last_now: datetime | None = None
         # Timed cells map to their local half-hour start. All-day rows and
         # the time-label column deliberately have no entry, so their normal
         # click behaviour remains untouched.
@@ -137,7 +151,7 @@ class TimelineGrid(DataTable[str | Text]):
 
     def _on_theme_changed(self, _theme: object) -> None:
         if self._last_days is not None and self._last_today is not None:
-            self.show_days(self._last_days, today=self._last_today)
+            self.show_days(self._last_days, today=self._last_today, now=self._last_now)
 
     def on_resize(self) -> None:
         if self._last_days is None or self._last_today is None:
@@ -148,22 +162,28 @@ class TimelineGrid(DataTable[str | Text]):
             new_width = max(_DAY_COL_WIDTH, available // num_days)
             if new_width == self._day_col_width:
                 return
-        self.show_days(self._last_days, today=self._last_today)
+        self.show_days(self._last_days, today=self._last_today, now=self._last_now)
 
     def show_days(
         self,
         days: Sequence[tuple[date, Sequence[OccurrenceRow]]],
         *,
         today: date,
+        now: datetime | None = None,
     ) -> None:
         """Replace the table contents with `days`'s events.
 
         `days` is an ordered sequence of `(date, rows)` pairs. The
         widget renders one column per pair, plus a leftmost time
         column. Pre-existing rows / columns are cleared first.
+
+        When `now` falls on a shown day, its slot is highlighted: the
+        time label gets a marker, an empty cell in that day's column
+        gets a "now" line, and events in progress get the accent fill.
         """
         self._last_days = days
         self._last_today = today
+        self._last_now = now
         # Defer rendering until on_resize delivers the real width; avoids
         # a flash of narrow columns before the first layout pass completes.
         if self.size.width == 0:
@@ -195,11 +215,12 @@ class TimelineGrid(DataTable[str | Text]):
         self._add_all_day_rows(days)
 
         palette = self._palette()
+        current = _locate_now(days, now)
         start_hour, end_hour = _compute_hour_range(days)
         slot_count = ((end_hour - start_hour) * 60) // _SLOT_MINUTES
         for slot in range(slot_count):
             slot_minutes_in_day = (start_hour * 60) + slot * _SLOT_MINUTES
-            self._add_time_row(slot_minutes_in_day, days, palette)
+            self._add_time_row(slot_minutes_in_day, days, palette, current)
 
     def cell_ref(self, row: int, col: int) -> ComponentRef | None:
         """Lookup the event ref at `(row, col)` if any. Used by tests."""
@@ -354,6 +375,7 @@ class TimelineGrid(DataTable[str | Text]):
         slot_minutes_in_day: int,
         days: Sequence[tuple[date, Sequence[OccurrenceRow]]],
         palette: _Palette,
+        current: _Now | None = None,
     ) -> None:
         # Both 30-min slots of the same hour share the same stripe so the
         # grid reads as hourly bands.  Rich Text styles only colour actual
@@ -364,8 +386,13 @@ class TimelineGrid(DataTable[str | Text]):
         # so hiding the :30 labels makes the boundary after an event look
         # like part of the preceding full-hour block.
         is_hour = slot_minutes_in_day % 60 == 0
+        is_now_row = current is not None and current.slot_minutes == slot_minutes_in_day
         time_text = _format_slot_time(slot_minutes_in_day)
-        cells: list[Any] = [time_text]
+        cells: list[Any] = [
+            Text(f"{IN_PROGRESS_MARK}{time_text}", style=f"bold {palette.now}")
+            if is_now_row
+            else time_text
+        ]
         for col_idx, (day_date, events) in enumerate(days, start=1):
             slot_hour, slot_minute = divmod(slot_minutes_in_day, 60)
             self._slot_starts[(row_index, col_idx)] = datetime.combine(
@@ -382,6 +409,12 @@ class TimelineGrid(DataTable[str | Text]):
                 alt = self._col_alt.get(col_idx, False)
                 fill = palette.fill_b if alt else palette.fill_a
                 fg = palette.fg_b if alt else palette.fg_a
+                if (
+                    current is not None
+                    and col_idx == current.col
+                    and ref in current.active
+                ):
+                    fill, fg = palette.now, palette.now_fg
                 w = self._day_col_width
                 if is_start:
                     style = f"{fg} on {fill}"
@@ -394,6 +427,10 @@ class TimelineGrid(DataTable[str | Text]):
                     text = " " * w
                 cells.append(Text(text, style=style))
                 self._cells[(row_index, col_idx)] = ref
+            elif is_now_row and current is not None and col_idx == current.col:
+                cells.append(
+                    Text(_NOW_LINE_CHAR * self._day_col_width, style=palette.now)
+                )
             elif is_hour:
                 cells.append(
                     Text(
@@ -416,6 +453,7 @@ class TimelineGrid(DataTable[str | Text]):
         """
         fill_a = self._theme_var("primary")
         fill_b = self._theme_var("secondary", "primary-darken-2", "primary")
+        now = self._theme_var("accent", "warning")
         return _Palette(
             fill_a=fill_a,
             fill_b=fill_b,
@@ -424,6 +462,8 @@ class TimelineGrid(DataTable[str | Text]):
             # Subtle round-hour marker and low-profile event end-cap.
             hour_marker=self._theme_var("panel", "surface-lighten-2", "surface"),
             end_fg=self._theme_var("surface", "background"),
+            now=now,
+            now_fg=_contrast_fg(now),
         )
 
     def _theme_var(self, name: str, *fallbacks: str) -> str:
@@ -459,6 +499,26 @@ def _day_header(day: date, today: date) -> str:
     if delta == -1:
         return f"Yesterday {weekday}"
     return day.strftime("%a %d %b")
+
+
+def _locate_now(
+    days: Sequence[tuple[date, Sequence[OccurrenceRow]]],
+    now: datetime | None,
+) -> _Now | None:
+    """Column, slot and in-progress events for `now`, if its day is shown."""
+    if now is None:
+        return None
+    local = now.astimezone()
+    for col_idx, (day_date, events) in enumerate(days, start=1):
+        if day_date != local.date():
+            continue
+        minutes = local.hour * 60 + local.minute
+        return _Now(
+            col=col_idx,
+            slot_minutes=minutes - minutes % _SLOT_MINUTES,
+            active=frozenset(ref for ref, _ in in_progress_keys(events, now)),
+        )
+    return None
 
 
 def _format_slot_time(minutes_from_midnight: int) -> str:

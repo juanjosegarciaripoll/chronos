@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from dateutil.relativedelta import relativedelta
 from textual import work
@@ -73,6 +73,7 @@ from chronos.tui.views import (
     OccurrenceRow,
     ViewKind,
     all_calendar_refs,
+    in_progress_keys,
 )
 from chronos.tui.widgets.calendar_panel import CalendarPanel
 from chronos.tui.widgets.event_list import EventList
@@ -82,6 +83,10 @@ from chronos.tui.widgets.timeline_grid import TimelineGrid
 
 if TYPE_CHECKING:
     from chronos.tui.app import ChronosApp, SyncRunner, TuiServices
+
+# How often the "now" highlighting is re-checked. Repaints happen only
+# when the current slot or the set of running events actually changes.
+_CLOCK_TICK_SECONDS = 30
 
 
 class MainScreen(Screen[None]):
@@ -112,6 +117,9 @@ class MainScreen(Screen[None]):
         # Set on unmount so a background sync still running when the
         # app quits stops at its next calendar boundary.
         self._background_sync_cancel = threading.Event()
+        # What `_clock_signature` returned at the last render; the clock
+        # tick repaints only when it changes.
+        self._clock_state: object = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -150,6 +158,7 @@ class MainScreen(Screen[None]):
         self._maybe_offer_startup_ics_import()
         if services.config.background_sync_enabled and services.sync_runner:
             self._arm_background_sync_timer()
+        self.set_interval(_CLOCK_TICK_SECONDS, self._clock_tick, name="clock")
 
     def on_unmount(self) -> None:
         self._background_sync_cancel.set()
@@ -392,6 +401,7 @@ class MainScreen(Screen[None]):
                 mode=self._agenda_window,
             )
             self._last_rows = rows
+            self._clock_state = self._clock_signature()
             # Agenda layout: compact list on top, inline detail pane
             # on the bottom. Timeline is hidden.
             event_list.display = True
@@ -417,7 +427,7 @@ class MainScreen(Screen[None]):
                 selection=self._selection,
                 viewed=self._viewed_date,
             )
-            timeline.show_days([(self._viewed_date, rows)], today=today)
+            timeline.show_days([(self._viewed_date, rows)], today=today, now=now)
         else:  # ViewKind.GRID
             title_label.update(grid_title(self._viewed_date, self._grid_days))
             rows = grid_rows(
@@ -443,8 +453,9 @@ class MainScreen(Screen[None]):
                 ).days
                 if 0 <= day_index < self._grid_days:
                     buckets[day_index][1].append(occ_row)
-            timeline.show_days(buckets, today=today)
+            timeline.show_days(buckets, today=today, now=now)
         self._last_rows = rows
+        self._clock_state = self._clock_signature()
 
     def _refresh_detail(self) -> None:
         component = self._currently_selected_component()
@@ -752,6 +763,47 @@ class MainScreen(Screen[None]):
         if self._background_sync_timer is not None:
             self._arm_background_sync_timer()
 
+    # Current time ----------------------------------------------------------------
+
+    def _clock_signature(self) -> object:
+        """Everything the "now" highlighting depends on.
+
+        The local date (Today labels), the 30-minute slot (the grid's
+        current-slot marker) and the set of events in progress (their
+        highlight, and the dimming of the one that just ended).
+        """
+        now = self._services().now()
+        local = now.astimezone()
+        slot = (local.hour * 60 + local.minute) // 30
+        return (local.date(), slot, in_progress_keys(self._last_rows, now))
+
+    def _clock_tick(self) -> None:
+        # `refresh_view` records the new signature, so each change
+        # repaints once.
+        if self._clock_signature() != self._clock_state:
+            self._refresh_keeping_cursor()
+
+    def _refresh_keeping_cursor(self) -> None:
+        """`refresh_view`, but leave the cursor and scroll where they were.
+
+        Rebuilding the tables resets both, which is fine after a user
+        action but jarring when the refresh comes from a timer.
+        """
+        tables: tuple[DataTable[Any], ...] = (
+            self.query_one(EventList),
+            self.query_one(TimelineGrid),
+        )
+        saved = [(t, t.cursor_coordinate, t.scroll_offset) for t in tables]
+        self.refresh_view()
+        for table, cursor, _ in saved:
+            table.cursor_coordinate = cursor
+
+        def restore_scroll() -> None:
+            for table, _, offset in saved:
+                table.scroll_to(offset.x, offset.y, animate=False)
+
+        self.call_after_refresh(restore_scroll)  # pyright: ignore[reportUnknownMemberType]
+
     # Background sync ----------------------------------------------------------
 
     def _arm_background_sync_timer(self) -> None:
@@ -824,7 +876,7 @@ class MainScreen(Screen[None]):
         manual: bool,
     ) -> None:
         self.query_one(SyncStatus).set_syncing(False)
-        self.refresh_view()
+        self._refresh_keeping_cursor()
         if error is not None:
             self.app.notify(  # pyright: ignore[reportUnknownMemberType]
                 f"Background sync failed: {error}", severity="error"

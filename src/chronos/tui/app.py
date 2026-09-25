@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -9,7 +10,7 @@ from pathlib import Path
 from textual import work
 from textual.app import App
 
-from chronos.domain import AppConfig, SyncResult
+from chronos.domain import AlarmRecord, AppConfig, SyncResult
 from chronos.protocols import (
     CredentialsProvider,
     IndexRepository,
@@ -21,6 +22,8 @@ from chronos.tui.terminal import (
     push_terminal_title,
     set_terminal_title,
 )
+
+logger = logging.getLogger(__name__)
 
 _ALARM_POLL_SECS = 30.0
 _ALARM_LOOKBACK = timedelta(minutes=15)
@@ -215,14 +218,14 @@ class ChronosApp(App[None]):
 
             notifier = DesktopNotifier(app_name="Chronos")
         except Exception as exc:  # noqa: BLE001
-            self.log.warning(f"desktop-notifier unavailable: {exc}")
+            logger.warning("desktop notifications unavailable: %s", exc)
             return
         while True:
             await asyncio.sleep(_ALARM_POLL_SECS)
             try:
                 await self._fire_pending_alarms(notifier)
-            except Exception as exc:  # noqa: BLE001
-                self.log.warning(f"alarm poll error: {exc}")
+            except Exception:  # noqa: BLE001
+                logger.exception("alarm poll failed")
 
     async def _fire_pending_alarms(self, notifier: object) -> None:
         now = self.services.now()
@@ -230,19 +233,41 @@ class ChronosApp(App[None]):
             pending = self.services.index.query_pending_alarms(
                 now - _ALARM_LOOKBACK, now
             )
-        except Exception as exc:  # noqa: BLE001
-            self.log.warning(f"query_pending_alarms failed: {exc}")
+        except Exception:  # noqa: BLE001
+            logger.exception("query_pending_alarms failed")
             return
         for alarm in pending:
             if alarm.db_id is None:
                 continue
             title = alarm.summary or "Chronos reminder"
-            message = alarm.description or "Reminder"
+            message = alarm_message(alarm, now)
             try:
                 await notifier.send(title=title, message=message)  # type: ignore[attr-defined]
                 self.services.index.mark_alarm_fired(alarm.db_id, now)
-            except Exception as exc:  # noqa: BLE001
-                self.log.warning(f"notification failed for alarm {alarm.db_id}: {exc}")
+                logger.info("alarm fired: %s (%s)", title, message)
+            except Exception:  # noqa: BLE001
+                logger.exception("notification failed for alarm %s", alarm.db_id)
+
+
+# Google fills every VALARM with this DESCRIPTION; repeating it in the
+# notification body says nothing the title doesn't.
+_BOILERPLATE_ALARM_TEXT = "This is an event reminder"
+
+
+def alarm_message(alarm: AlarmRecord, now: datetime) -> str:
+    """Notification body: when the event starts, then any alarm text."""
+    start = alarm.occurrence_start.astimezone()
+    local_now = now.astimezone()
+    if start.date() == local_now.date():
+        when = start.strftime("%H:%M")
+    else:
+        when = start.strftime("%a %d %b %H:%M")
+    verb = "Started" if alarm.occurrence_start <= now else "Starts"
+    lines = [f"{verb} {when}"]
+    description = (alarm.description or "").strip()
+    if description and description != _BOILERPLATE_ALARM_TEXT:
+        lines.append(description)
+    return "\n".join(lines)
 
 
 __all__ = ["ChronosApp", "SyncRunner", "TuiServices"]

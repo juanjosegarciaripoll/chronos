@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from rich.style import Style
+from rich.text import Text
 from textual.events import MouseEvent
 from textual.widget import Widget
 from textual.widgets import Select
@@ -17,6 +18,8 @@ from textual.widgets import Select
 from chronos.credentials import DefaultCredentialsProvider
 from chronos.domain import (
     AccountConfig,
+    AlarmAction,
+    AlarmRecord,
     AppConfig,
     CalendarRef,
     ComponentRef,
@@ -51,6 +54,7 @@ from chronos.tui.screens.main_screen import MainScreen
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
 from chronos.tui.views import (
+    IN_PROGRESS_MARK,
     AgendaWindow,
     CalendarSelection,
     OccurrenceRow,
@@ -64,6 +68,8 @@ from chronos.tui.views import (
     format_todo_row,
     gather_occurrences,
     gather_todos,
+    in_progress_keys,
+    is_in_progress,
     month_window,
     render_event_detail,
     search_components,
@@ -572,9 +578,9 @@ class RowFormattingTest(unittest.TestCase):
             assert isinstance(cell, Text)
             self.assertEqual(cell.style, "dim")
 
-    def test_in_progress_event_is_not_dimmed(self) -> None:
+    def test_in_progress_event_is_highlighted(self) -> None:
         # An event that started before `now` but hasn't ended yet is
-        # still happening — keep it bright so it stays visible.
+        # happening right now — highlight it rather than dim it.
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
         event = _empty_event(ref)
         row = OccurrenceRow(
@@ -588,9 +594,29 @@ class RowFormattingTest(unittest.TestCase):
             component=event,
         )
         now = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
-        cells = format_event_row(row, self.TODAY, now=now)
-        # All cells are plain strings — no dim wrapping.
+        cells = format_event_row(row, self.TODAY, now=now, active_style="bold red")
         for cell in cells:
+            self.assertIsInstance(cell, Text)
+            assert isinstance(cell, Text)
+            self.assertEqual(cell.style, "bold red")
+        time_cell = cells[1]
+        assert isinstance(time_cell, Text)
+        self.assertTrue(time_cell.plain.startswith(IN_PROGRESS_MARK))
+
+    def test_future_event_is_plain(self) -> None:
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        row = OccurrenceRow(
+            occurrence=Occurrence(
+                ref=ref,
+                start=datetime(2026, 4, 25, 10, 30, tzinfo=UTC),
+                end=datetime(2026, 4, 25, 11, 0, tzinfo=UTC),
+                recurrence_id=None,
+                is_override=False,
+            ),
+            component=_empty_event(ref),
+        )
+        now = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
+        for cell in format_event_row(row, self.TODAY, now=now):
             self.assertIsInstance(cell, str)
 
     def test_format_todo_row_renders_due_and_status(self) -> None:
@@ -1955,6 +1981,103 @@ class BackgroundSyncTest(TuiFlowTestCase):
         self.assertEqual(calls, [1])
 
 
+class AlarmMessageTest(unittest.TestCase):
+    def _alarm(self, start: datetime, description: str | None) -> AlarmRecord:
+        return AlarmRecord(
+            db_id=1,
+            ref=ComponentRef(ACCOUNT_NAME, WORK_CAL, "x"),
+            summary="Standup",
+            occurrence_start=start,
+            trigger_at=start - timedelta(minutes=10),
+            action=AlarmAction.DISPLAY,
+            description=description,
+            fired_at=None,
+        )
+
+    def test_start_time_and_description(self) -> None:
+        from chronos.tui.app import alarm_message
+
+        start = datetime(2026, 5, 1, 10, 0).astimezone()
+        message = alarm_message(
+            self._alarm(start, "Bring slides"), start - timedelta(minutes=10)
+        )
+        self.assertEqual(message, "Starts 10:00\nBring slides")
+
+    def test_google_boilerplate_is_dropped(self) -> None:
+        from chronos.tui.app import alarm_message
+
+        start = datetime(2026, 5, 1, 10, 0).astimezone()
+        message = alarm_message(
+            self._alarm(start, "This is an event reminder"),
+            start + timedelta(minutes=5),
+        )
+        self.assertEqual(message, "Started 10:00")
+
+    def test_other_day_shows_date(self) -> None:
+        from chronos.tui.app import alarm_message
+
+        start = datetime(2026, 5, 2, 9, 30).astimezone()
+        message = alarm_message(self._alarm(start, None), start - timedelta(days=1))
+        self.assertEqual(message, "Starts Sat 02 May 09:30")
+
+
+class InProgressTest(unittest.TestCase):
+    def _row(self, start: datetime, end: datetime | None) -> OccurrenceRow:
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")
+        return OccurrenceRow(
+            occurrence=Occurrence(
+                ref=ref, start=start, end=end, recurrence_id=None, is_override=False
+            ),
+            component=_empty_event(ref),
+        )
+
+    def test_is_in_progress_bounds(self) -> None:
+        row = self._row(NOW, NOW + timedelta(hours=1))
+        self.assertTrue(is_in_progress(row.occurrence, NOW))
+        self.assertFalse(is_in_progress(row.occurrence, NOW + timedelta(hours=1)))
+        self.assertFalse(is_in_progress(row.occurrence, NOW - timedelta(minutes=1)))
+
+    def test_full_day_and_open_ended_are_never_in_progress(self) -> None:
+        full_day = self._row(
+            datetime(2026, 4, 25, tzinfo=UTC), datetime(2026, 4, 26, tzinfo=UTC)
+        )
+        self.assertFalse(is_in_progress(full_day.occurrence, NOW))
+        self.assertFalse(is_in_progress(self._row(NOW, None).occurrence, NOW))
+
+    def test_in_progress_keys_include_start(self) -> None:
+        row = self._row(NOW, NOW + timedelta(hours=1))
+        self.assertEqual(
+            in_progress_keys([row], NOW), frozenset({(row.component.ref, NOW)})
+        )
+
+
+class ClockTickTest(TuiFlowTestCase):
+    async def test_tick_repaints_only_when_now_state_changes(self) -> None:
+        clock = [NOW]
+        services = self.services()
+        services.now = lambda: clock[0]
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, MainScreen)
+            calls: list[int] = []
+            original = screen.refresh_view
+
+            def counting() -> None:
+                calls.append(1)
+                original()
+
+            screen.refresh_view = counting  # type: ignore[method-assign]
+            screen._clock_tick()
+            self.assertEqual(calls, [])
+            clock[0] = NOW + timedelta(minutes=30)
+            screen._clock_tick()
+            self.assertEqual(calls, [1])
+            screen._clock_tick()
+            self.assertEqual(calls, [1])
+
+
 class FormatCountdownTest(unittest.TestCase):
     def test_formats(self) -> None:
         from chronos.tui.widgets.sync_status import format_countdown
@@ -3047,6 +3170,61 @@ class TimelineGridFlowTest(TuiFlowTestCase):
                 if timeline.cell_ref(r, 1) is not None
             }
             self.assertEqual(refs, {rows[0].component.ref, rows[1].component.ref})
+
+    async def test_current_slot_and_running_event_are_highlighted(self) -> None:
+        from textual.coordinate import Coordinate
+
+        from chronos.tui.widgets.timeline_grid import _NOW_LINE_CHAR, TimelineGrid
+
+        day = date(2026, 5, 1)
+
+        def local(hour: int, minute: int = 0) -> datetime:
+            return datetime(2026, 5, 1, hour, minute).astimezone()
+
+        running = TimelineGridHelpersTest._all_day_row(
+            "run", "Running", local(10), local(11)
+        )
+        later = TimelineGridHelpersTest._all_day_row(
+            "later", "Later", local(12), local(13)
+        )
+        app = ChronosApp(self.services())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            await pilot.press("1")
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            accent = str(app.theme_variables["accent"])
+
+            def row_at(when: datetime) -> int:
+                for r in range(timeline.row_count):
+                    if timeline.slot_start(r, 1) == when:
+                        return r
+                raise AssertionError(f"no row for {when}")
+
+            def cell(r: int, c: int) -> Text:
+                value = timeline.get_cell_at(Coordinate(r, c))
+                assert isinstance(value, Text)
+                return value
+
+            timeline.show_days([(day, [running, later])], today=day, now=local(10, 15))
+            await pilot.pause()
+            now_row = row_at(local(10))
+            self.assertEqual(cell(now_row, 0).plain, f"{IN_PROGRESS_MARK}10:00")
+            self.assertIn(accent.lower(), str(cell(now_row, 1).style).lower())
+            later_row = row_at(local(12))
+            self.assertEqual(timeline.get_cell_at(Coordinate(later_row, 0)), "12:00")
+            self.assertNotIn(accent.lower(), str(cell(later_row, 1).style).lower())
+
+            # In an empty slot, today's cell carries the "now" line.
+            timeline.show_days([(day, [running, later])], today=day, now=local(11, 40))
+            await pilot.pause()
+            empty_row = row_at(local(11, 30))
+            self.assertIn(_NOW_LINE_CHAR, cell(empty_row, 1).plain)
+            self.assertNotIn(
+                accent.lower(), str(cell(row_at(local(10)), 1).style).lower()
+            )
 
     @staticmethod
     def _event_cell_style(timeline: object) -> str:

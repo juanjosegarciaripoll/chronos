@@ -516,17 +516,35 @@ class SqliteIndexRepository:
         occurrence_start: datetime,
         alarms: Sequence[AlarmRecord],
     ) -> None:
-        """Replace all alarm rows for one (component, occurrence_start) pair."""
+        """Replace all alarm rows for one (component, occurrence_start) pair.
+
+        An alarm that already fired keeps its ``fired_at`` when it comes
+        back with the same trigger time and action, so rebuilding the
+        caches (every sync that touches the event) doesn't re-notify.
+        """
         with self.connection() as conn:
             component_id = _find_component_id(conn, ref)
             if component_id is None:
                 return
             occ_sql = _datetime_to_sql(occurrence_start)
+            fired: dict[tuple[str, str], str] = {
+                (cast(str, trigger), cast(str, action)): cast(str, fired_at)
+                for trigger, action, fired_at in conn.execute(
+                    "SELECT trigger_at, action, fired_at FROM alarms "
+                    "WHERE component_id = ? AND occurrence_start = ? "
+                    "AND fired_at IS NOT NULL",
+                    (component_id, occ_sql),
+                )
+            }
             conn.execute(
                 "DELETE FROM alarms WHERE component_id = ? AND occurrence_start = ?",
                 (component_id, occ_sql),
             )
             for alarm in alarms:
+                trigger_sql = cast(str, _datetime_to_sql(alarm.trigger_at))
+                fired_sql = _datetime_to_sql(alarm.fired_at) or fired.get(
+                    (trigger_sql, alarm.action.value)
+                )
                 conn.execute(
                     "INSERT INTO alarms "
                     "(component_id, occurrence_start, trigger_at, action, "
@@ -535,10 +553,10 @@ class SqliteIndexRepository:
                     (
                         component_id,
                         occ_sql,
-                        _datetime_to_sql(alarm.trigger_at),
+                        trigger_sql,
                         alarm.action.value,
                         alarm.description,
-                        _datetime_to_sql(alarm.fired_at),
+                        fired_sql,
                     ),
                 )
 
