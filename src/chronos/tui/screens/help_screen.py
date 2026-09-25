@@ -21,6 +21,7 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset(
             {
                 "view_agenda",
+                "view_month",
                 # `select_span(1)` … `select_span(7)` — the `1`–`7`
                 # timeline-width keys all share this action base name.
                 "select_span",

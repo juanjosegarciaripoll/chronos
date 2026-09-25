@@ -13,7 +13,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.events import MouseEvent
 from textual.widget import Widget
-from textual.widgets import Select
+from textual.widgets import Label, Select
 
 from chronos.credentials import DefaultCredentialsProvider
 from chronos.domain import (
@@ -1991,6 +1991,108 @@ class AlarmMessageTest(unittest.TestCase):
         start = datetime(2026, 5, 2, 9, 30).astimezone()
         message = alarm_message(self._alarm(start, None), start - timedelta(days=1))
         self.assertEqual(message, "Starts Sat 02 May 09:30")
+
+
+class MonthGridHelpersTest(unittest.TestCase):
+    def test_grid_dates_span_whole_weeks(self) -> None:
+        from chronos.tui.screens.month_view_screen import grid_dates
+
+        # Sep 2026 starts on a Tuesday: Mon 31 Aug .. Sun 4 Oct.
+        self.assertEqual(grid_dates(date(2026, 9, 17)), (date(2026, 8, 31), 5))
+        # Feb 2027 starts on a Monday and has 28 days: exactly 4 weeks.
+        self.assertEqual(grid_dates(date(2027, 2, 10)), (date(2027, 2, 1), 4))
+        # Aug 2026 starts on a Saturday: 6 weeks.
+        self.assertEqual(grid_dates(date(2026, 8, 1)), (date(2026, 7, 27), 6))
+
+    def test_bucket_covers_every_day_of_a_span(self) -> None:
+        from chronos.tui.widgets.month_grid import _bucket_by_day
+
+        all_day = TimelineGridHelpersTest._all_day_row(
+            "h",
+            "Holiday",
+            datetime(2026, 9, 8, tzinfo=UTC),
+            datetime(2026, 9, 10, tzinfo=UTC),
+        )
+        evening = TimelineGridHelpersTest._all_day_row(
+            "e",
+            "Until midnight",
+            datetime(2026, 9, 3, 22, 0).astimezone(),
+            datetime(2026, 9, 4, 0, 0).astimezone(),
+        )
+        buckets = _bucket_by_day([all_day, evening], date(2026, 8, 31), 5)
+        self.assertEqual(
+            sorted(d for d, rows in buckets.items() if all_day in rows),
+            [date(2026, 9, 8), date(2026, 9, 9)],
+        )
+        # Ending exactly at midnight does not spill into the next day.
+        self.assertEqual(
+            [d for d, rows in buckets.items() if evening in rows],
+            [date(2026, 9, 3)],
+        )
+
+
+class MonthViewFlowTest(TuiFlowTestCase):
+    async def test_month_view_navigation_and_drill_down(self) -> None:
+        from chronos.tui.widgets.month_grid import MonthGrid
+
+        app = ChronosApp(self.services())
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.pause()
+            main = app.screen
+            assert isinstance(main, MainScreen)
+            await pilot.press("M")
+            await pilot.pause()
+            self.assertEqual(main._view, ViewKind.MONTH)
+            grid = main.query_one(MonthGrid)
+            self.assertTrue(grid.display)
+            start = main._viewed_date
+            coord = grid.cursor_coordinate
+            self.assertEqual(grid.day_at(coord.row, coord.column), start)
+            label = str(main.query_one("#view-title", Label).render())
+            self.assertIn(f"{start:%B %Y}", label)
+
+            # Cursor moves track the viewed date.
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(main._viewed_date, start + timedelta(days=1))
+
+            # n / p step a month.
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertEqual(main._viewed_date.month, start.month % 12 + 1)
+            await pilot.press("p")
+            await pilot.pause()
+            self.assertEqual(main._viewed_date, start + timedelta(days=1))
+
+            # Enter opens the day in the Day view.
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(main._view, ViewKind.DAY)
+            self.assertEqual(main._viewed_date, start + timedelta(days=1))
+
+    async def test_moving_into_a_neighbouring_month_flips_the_view(self) -> None:
+        from textual.coordinate import Coordinate
+
+        from chronos.tui.widgets.month_grid import MonthGrid
+
+        app = ChronosApp(self.services())
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.pause()
+            main = app.screen
+            assert isinstance(main, MainScreen)
+            await pilot.press("M")
+            await pilot.pause()
+            grid = main.query_one(MonthGrid)
+            shown = main._viewed_date
+            first_cell = grid.day_at(0, 0)
+            assert first_cell is not None
+            grid.cursor_coordinate = Coordinate(0, 0)
+            await pilot.pause()
+            if first_cell.month == shown.month:
+                self.skipTest("month starts on a Monday; no leading days")
+            self.assertEqual(main._viewed_date, first_cell)
+            label = str(main.query_one("#view-title", Label).render())
+            self.assertIn(f"{first_cell:%B %Y}", label)
 
 
 class GotoDialogTest(TuiFlowTestCase):

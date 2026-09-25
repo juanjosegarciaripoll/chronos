@@ -46,6 +46,7 @@ class ViewKind(StrEnum):
     - `DAY`    — single-day timeline grid (the `1` key)
     - `GRID`   — multi-day timeline grid, 2–7 days wide (the `2`–`7`
                  keys)
+    - `MONTH`  — calendar-style month grid (the `M` key)
 
     VTodos are rendered inline as full-day items in every view; there
     is no longer a dedicated Todos screen.
@@ -54,6 +55,7 @@ class ViewKind(StrEnum):
     AGENDA = "agenda"
     DAY = "day"
     GRID = "grid"
+    MONTH = "month"
 
 
 class AgendaWindow(StrEnum):

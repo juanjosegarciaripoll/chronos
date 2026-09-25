@@ -4,7 +4,7 @@ import contextlib
 import threading
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
@@ -65,6 +65,12 @@ from chronos.tui.screens.grid_view_screen import (
 )
 from chronos.tui.screens.help_screen import HelpScreen
 from chronos.tui.screens.import_ics_screen import ImportIcsScreen
+from chronos.tui.screens.month_view_screen import (
+    rows_for as month_rows,
+)
+from chronos.tui.screens.month_view_screen import (
+    title_for as month_title,
+)
 from chronos.tui.screens.search_dialog_screen import SearchDialogScreen
 from chronos.tui.screens.sync_confirm_screen import SyncConfirmScreen
 from chronos.tui.screens.sync_progress_screen import SyncProgressScreen
@@ -79,6 +85,7 @@ from chronos.tui.views import (
 from chronos.tui.widgets.calendar_panel import CalendarPanel
 from chronos.tui.widgets.event_list import EventList
 from chronos.tui.widgets.event_view import EventView
+from chronos.tui.widgets.month_grid import MonthGrid
 from chronos.tui.widgets.sync_status import SyncStatus
 from chronos.tui.widgets.timeline_grid import TimelineGrid
 
@@ -132,6 +139,7 @@ class MainScreen(Screen[None]):
                     yield SyncStatus(id="sync-status")
                 yield EventList(id="centre-list")
                 yield TimelineGrid(id="centre-timeline")
+                yield MonthGrid(id="centre-month")
                 yield EventView(id="detail-pane")
         yield Footer()
 
@@ -190,6 +198,10 @@ class MainScreen(Screen[None]):
             self.call_after_refresh(  # pyright: ignore[reportUnknownMemberType]
                 self.query_one(EventList).focus
             )
+        elif kind == ViewKind.MONTH:
+            self.call_after_refresh(  # pyright: ignore[reportUnknownMemberType]
+                self.query_one(MonthGrid).focus
+            )
         else:
             self.call_after_refresh(  # pyright: ignore[reportUnknownMemberType]
                 self.query_one(TimelineGrid).focus
@@ -197,6 +209,9 @@ class MainScreen(Screen[None]):
 
     def action_view_agenda(self) -> None:
         self._set_view(ViewKind.AGENDA)
+
+    def action_view_month(self) -> None:
+        self._set_view(ViewKind.MONTH)
 
     def action_select_span(self, days: int) -> None:
         """Show a `days`-wide timeline (bound to the `1`–`7` keys).
@@ -270,6 +285,7 @@ class MainScreen(Screen[None]):
         the current view.
 
         - Day / Grid: 1 day.
+        - Month: 1 calendar month.
         - Agenda Day window: 1 day.
         - Agenda Week window: 7 days.
         - Agenda Month window: 1 calendar month (`relativedelta`
@@ -284,6 +300,8 @@ class MainScreen(Screen[None]):
                 self._viewed_date = self._viewed_date + relativedelta(months=direction)
         elif self._view in (ViewKind.DAY, ViewKind.GRID):
             self._viewed_date = self._viewed_date + timedelta(days=direction)
+        elif self._view == ViewKind.MONTH:
+            self._viewed_date = self._viewed_date + relativedelta(months=direction)
         else:
             return
         self.refresh_view()
@@ -312,6 +330,11 @@ class MainScreen(Screen[None]):
                 timeline = self.query_one(TimelineGrid)
                 coordinate = timeline.cursor_coordinate
                 initial_start = timeline.slot_start(coordinate.row, coordinate.column)
+            elif self._view == ViewKind.MONTH:
+                # The cursor day, at the usual start of a working day.
+                initial_start = datetime.combine(
+                    self._viewed_date, time(9, 0)
+                ).astimezone()
             if initial_start is None:
                 initial_start = _round_up_to_half_hour(services.now())
         if initial_end is None:
@@ -396,6 +419,7 @@ class MainScreen(Screen[None]):
         title_label: Label = self.query_one("#view-title", Label)
         event_list: EventList = self.query_one(EventList)
         timeline: TimelineGrid = self.query_one(TimelineGrid)
+        month: MonthGrid = self.query_one(MonthGrid)
         detail: EventView = self.query_one(EventView)
         # Friendly date labels (Today / Tomorrow / weekday) are anchored
         # on the user's actual today, not on the viewed date — looking
@@ -417,6 +441,7 @@ class MainScreen(Screen[None]):
             # on the bottom. Timeline is hidden.
             event_list.display = True
             timeline.display = False
+            month.display = False
             detail.display = True
             event_list.show_events(rows, today=today, now=now, compact=True)
             self._refresh_detail()
@@ -428,6 +453,22 @@ class MainScreen(Screen[None]):
         # a cell), via the modal `EventDetailScreen`.
         event_list.display = False
         detail.display = False
+        if self._view == ViewKind.MONTH:
+            # Month grid: one cell per day, no timeline.
+            timeline.display = False
+            month.display = True
+            title_label.update(month_title(self._viewed_date))
+            rows = month_rows(
+                index=services.index,
+                calendars=calendars,
+                selection=self._selection,
+                viewed=self._viewed_date,
+            )
+            month.show_month(self._viewed_date, rows, today, now)
+            self._last_rows = rows
+            self._clock_state = self._clock_signature()
+            return
+        month.display = False
         timeline.display = True
 
         if self._view == ViewKind.DAY:
@@ -492,6 +533,18 @@ class MainScreen(Screen[None]):
             return
         self._refresh_detail()
 
+    def on_month_grid_day_highlighted(self, event: MonthGrid.DayHighlighted) -> None:
+        """Track the cursor day; flip months when it leaves the shown one."""
+        shown_month = (self._viewed_date.year, self._viewed_date.month)
+        self._viewed_date = event.day
+        if (event.day.year, event.day.month) != shown_month:
+            self.refresh_view()
+
+    def on_month_grid_day_chosen(self, event: MonthGrid.DayChosen) -> None:
+        """Enter / click on a day opens it in the Day view."""
+        self._viewed_date = event.day
+        self._set_view(ViewKind.DAY)
+
     def on_timeline_grid_selected(self, event: TimelineGrid.Selected) -> None:
         component = self._services().index.get_component(event.ref)
         if component is None:
@@ -546,6 +599,9 @@ class MainScreen(Screen[None]):
         if self._view == ViewKind.AGENDA:
             event_list: EventList = self.query_one(EventList)
             ref = event_list.selected_ref()
+        elif self._view == ViewKind.MONTH:
+            # The month cursor sits on a day, not on one event.
+            return None
         else:
             timeline: TimelineGrid = self.query_one(TimelineGrid)
             coord = timeline.cursor_coordinate

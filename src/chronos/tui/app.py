@@ -90,6 +90,7 @@ class ChronosApp(App[None]):
        views — `MainScreen.refresh_view` toggles its `display` along
        with EventList / EventView based on the active view. */
     TimelineGrid { height: 1fr; background: $background; }
+    MonthGrid { height: 1fr; background: $background; }
     #detail-pane {
         height: 1fr;
         border-top: solid $accent;

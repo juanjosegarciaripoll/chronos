@@ -18,6 +18,9 @@ BindingType = Binding | tuple[str, str] | tuple[str, str, str]
 # single-day / multi-day timeline is chosen with the number keys
 # `1`–`7` (see `KEY_SPANS`).
 KEY_VIEW_AGENDA = "a"
+# Calendar-style month grid.
+KEY_VIEW_MONTH = "M"
+KEY_VIEW_MONTH_ALT = "shift+m"
 
 # Timeline span selectors. `1` is the single-day view; `2`–`7` are the
 # multi-day grid showing that many days. These replace the old
@@ -91,6 +94,8 @@ def main_bindings() -> list[BindingType]:
     """Bindings owned by `MainScreen`. Each view registers itself here."""
     return [
         Binding(KEY_VIEW_AGENDA, "view_agenda", "Agenda"),
+        Binding(KEY_VIEW_MONTH, "view_month", "Month"),
+        Binding(KEY_VIEW_MONTH_ALT, "view_month", "Month", show=False),
         *(_span_binding(days) for days in KEY_SPANS),
         Binding(KEY_AGENDA_DAY, "agenda_window_day", "Day", show=False),
         Binding(KEY_AGENDA_WEEK, "agenda_window_week", "Week", show=False),
@@ -176,6 +181,8 @@ __all__ = [
     "KEY_TOGGLE_CALENDARS",
     "KEY_TOGGLE_CALENDARS_ALT",
     "KEY_VIEW_AGENDA",
+    "KEY_VIEW_MONTH",
+    "KEY_VIEW_MONTH_ALT",
     "BindingType",
     "detail_bindings",
     "edit_bindings",
