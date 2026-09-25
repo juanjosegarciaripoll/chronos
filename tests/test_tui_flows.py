@@ -2021,6 +2021,63 @@ class AlarmMessageTest(unittest.TestCase):
         self.assertEqual(message, "Starts Sat 02 May 09:30")
 
 
+class Osc777Test(unittest.TestCase):
+    def test_sequence(self) -> None:
+        from chronos.tui.app import osc777_notification
+
+        self.assertEqual(
+            osc777_notification("Standup", "Starts 10:00"),
+            "\x1b]777;notify;Standup;Starts 10:00\x07",
+        )
+
+    def test_control_chars_and_title_semicolons_are_neutralised(self) -> None:
+        from chronos.tui.app import osc777_notification
+
+        seq = osc777_notification("A;B\x1b", "Starts 10:00\nBring\x07 slides")
+        self.assertEqual(seq, "\x1b]777;notify;A,B;Starts 10:00 · Bring slides\x07")
+
+
+class AlarmFiringTest(TuiFlowTestCase):
+    async def test_due_alarm_is_toasted_and_marked_fired(self) -> None:
+        services = self.services()
+        ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "alarm@example.com")
+        services.index.upsert_component(
+            dataclasses.replace(_empty_event(ref), summary="Standup")
+        )
+        start = NOW + timedelta(minutes=10)
+        services.index.set_alarms(
+            ref,
+            start,
+            [
+                AlarmRecord(
+                    db_id=None,
+                    ref=ref,
+                    summary="Standup",
+                    occurrence_start=start,
+                    trigger_at=NOW - timedelta(minutes=1),
+                    action=AlarmAction.DISPLAY,
+                    description=None,
+                    fired_at=None,
+                )
+            ],
+        )
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fire_pending_alarms()
+            await pilot.pause()
+            notes = [n for n in app._notifications if n.title]
+            self.assertEqual(len(notes), 1)
+            self.assertEqual(notes[0].title, "Standup")
+            self.assertTrue(notes[0].message.startswith("Starts "))
+            window = (NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+            self.assertEqual(services.index.query_pending_alarms(*window), ())
+            # Already fired: the next poll stays quiet.
+            app._fire_pending_alarms()
+            await pilot.pause()
+            self.assertEqual(len([n for n in app._notifications if n.title]), 1)
+
+
 class InProgressTest(unittest.TestCase):
     def _row(self, start: datetime, end: datetime | None) -> OccurrenceRow:
         ref = ComponentRef(ACCOUNT_NAME, WORK_CAL, "x")

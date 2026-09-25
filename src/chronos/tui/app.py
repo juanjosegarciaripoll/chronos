@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -26,6 +25,8 @@ from chronos.tui.terminal import (
 logger = logging.getLogger(__name__)
 
 _ALARM_POLL_SECS = 30.0
+# Reminders stay on screen long enough to be seen after looking away.
+_ALARM_TOAST_SECS = 120.0
 _ALARM_LOOKBACK = timedelta(minutes=15)
 
 # Built-in Textual theme chosen when the user has not set one (config /
@@ -182,7 +183,7 @@ class ChronosApp(App[None]):
         self.push_screen(MainScreen())  # pyright: ignore[reportUnknownMemberType]
         if not self.is_headless:
             self._start_mcp_server()
-            self._start_alarm_worker()
+        self.set_interval(_ALARM_POLL_SECS, self._fire_pending_alarms, name="alarms")
 
     def on_unmount(self) -> None:
         pop_terminal_title()
@@ -205,29 +206,16 @@ class ChronosApp(App[None]):
         except Exception as exc:  # noqa: BLE001
             self.log.warning(f"MCP TCP server stopped: {exc}")
 
-    @work(exclusive=False, name="alarm-worker", exit_on_error=False)
-    async def _start_alarm_worker(self) -> None:
-        """Poll for due alarms every 30 seconds and fire OS desktop notifications.
+    def _fire_pending_alarms(self) -> None:
+        """Announce every alarm that fell due since the last poll.
 
-        Imports ``desktop_notifier`` lazily so the TUI starts normally even
-        when the library is unavailable.  All notification errors are swallowed
-        — a broken notifier never brings down the TUI.
+        Runs every `_ALARM_POLL_SECS`. Alarms are delivered through the
+        terminal, so they reach the user wherever the TUI is displayed —
+        including over SSH, where a desktop notification would land on
+        the remote machine: an in-app toast, the terminal bell, and an
+        OSC 777 notification for terminals that turn it into a desktop
+        one (terminals without support ignore it).
         """
-        try:
-            from desktop_notifier import DesktopNotifier  # type: ignore[import-untyped]
-
-            notifier = DesktopNotifier(app_name="Chronos")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("desktop notifications unavailable: %s", exc)
-            return
-        while True:
-            await asyncio.sleep(_ALARM_POLL_SECS)
-            try:
-                await self._fire_pending_alarms(notifier)
-            except Exception:  # noqa: BLE001
-                logger.exception("alarm poll failed")
-
-    async def _fire_pending_alarms(self, notifier: object) -> None:
         now = self.services.now()
         try:
             pending = self.services.index.query_pending_alarms(
@@ -236,22 +224,47 @@ class ChronosApp(App[None]):
         except Exception:  # noqa: BLE001
             logger.exception("query_pending_alarms failed")
             return
+        fired = False
         for alarm in pending:
             if alarm.db_id is None:
                 continue
             title = alarm.summary or "Chronos reminder"
             message = alarm_message(alarm, now)
+            self.notify(message, title=title, timeout=_ALARM_TOAST_SECS)
+            self._write_to_terminal(osc777_notification(title, message))
             try:
-                await notifier.send(title=title, message=message)  # type: ignore[attr-defined]
                 self.services.index.mark_alarm_fired(alarm.db_id, now)
-                logger.info("alarm fired: %s (%s)", title, message)
             except Exception:  # noqa: BLE001
-                logger.exception("notification failed for alarm %s", alarm.db_id)
+                logger.exception("mark_alarm_fired failed for alarm %s", alarm.db_id)
+            logger.info("alarm fired: %s (%s)", title, message)
+            fired = True
+        if fired:
+            self.bell()
+
+    def _write_to_terminal(self, data: str) -> None:
+        """Send raw control sequences to the terminal, as `App.bell` does."""
+        if not self.is_headless and self._driver is not None:
+            self._driver.write(data)
 
 
 # Google fills every VALARM with this DESCRIPTION; repeating it in the
 # notification body says nothing the title doesn't.
 _BOILERPLATE_ALARM_TEXT = "This is an event reminder"
+
+
+def osc777_notification(title: str, body: str) -> str:
+    """OSC 777 `notify` sequence asking the terminal for a desktop notification.
+
+    Control characters would end the sequence early (and `;` in the
+    title would shift the body), so both are flattened: newlines become
+    " · " and the rest are dropped.
+    """
+
+    def clean(text: str) -> str:
+        text = text.replace("\n", " · ")
+        return "".join(ch for ch in text if ch >= " " and ch != "\x7f")
+
+    return f"\x1b]777;notify;{clean(title).replace(';', ',')};{clean(body)}\x07"
 
 
 def alarm_message(alarm: AlarmRecord, now: datetime) -> str:
