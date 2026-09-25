@@ -404,25 +404,32 @@ class TimelineGrid(DataTable[str | Text]):
     def _add_all_day_rows(
         self, days: Sequence[tuple[date, Sequence[OccurrenceRow]]]
     ) -> None:
-        # One stacked banner line per full-day event, so each event keeps
-        # its own selectable cell. The section is as tall as the busiest
-        # day plus one line, so every day has an empty cell to click (or
-        # drag across) to create an all-day event. The "all day" label
-        # sits on the first line only so the rows read as one group.
-        per_column = [_full_day_rows(day_date, events) for day_date, events in days]
-        line_count = max((len(col) for col in per_column), default=0) + 1
-        for line in range(line_count):
+        # Each full-day event is a bar on one banner line, spanning every
+        # shown day it covers: filled like a timed event, titled on its
+        # first visible day. The section is as tall as the lines needed
+        # plus one, so every day has an empty cell to click (or drag
+        # across) to create an all-day event. The "all day" label sits on
+        # the first line only so the rows read as one group.
+        lanes = _all_day_lanes(days)
+        palette = self._palette()
+        w = self._day_col_width
+        for line in range(len(lanes) + 1):
             row_index = self.row_count
             label: Any = Text(_ALL_DAY_LABEL, style="italic dim") if line == 0 else ""
             cells: list[Any] = [label]
-            for col_idx, col_rows in enumerate(per_column, start=1):
+            lane = lanes[line] if line < len(lanes) else {}
+            for col_idx in range(1, len(days) + 1):
                 self._all_day_dates[(row_index, col_idx)] = days[col_idx - 1][0]
-                if line < len(col_rows):
-                    row = col_rows[line]
-                    cells.append(row.component.summary or "(no summary)")
-                    self._cells[(row_index, col_idx)] = row.component.ref
-                else:
+                placed = lane.get(col_idx)
+                if placed is None:
                     cells.append("")
+                    continue
+                row, is_first, alt = placed
+                fill = palette.fill_b if alt else palette.fill_a
+                fg = palette.fg_b if alt else palette.fg_a
+                title = (row.component.summary or "(no summary)") if is_first else ""
+                cells.append(Text(title[:w].ljust(w), style=f"{fg} on {fill}"))
+                self._cells[(row_index, col_idx)] = row.component.ref
             self.add_row(*cells)
 
     def _add_time_row(
@@ -668,6 +675,78 @@ def _cell_for_slot(
     return summary, first.component.ref, is_start, is_end
 
 
+def _all_day_lanes(
+    days: Sequence[tuple[date, Sequence[OccurrenceRow]]],
+) -> list[dict[int, tuple[OccurrenceRow, bool, bool]]]:
+    """Assign each full-day event to a banner line across the shown days.
+
+    Returns one dict per line mapping a column index (1-based, matching
+    the day columns) to `(row, is_first_visible_day, alt_shade)`. An
+    event keeps the same line over all the days it covers, so a
+    multi-day event reads as one bar; events are placed longest-first
+    within their start date on the lowest line that is free on all
+    their days. The shade alternates per event so neighbours differ.
+    """
+    columns: dict[tuple[ComponentRef, datetime], list[int]] = {}
+    rows_by_key: dict[tuple[ComponentRef, datetime], OccurrenceRow] = {}
+    for col_idx, (day_date, events) in enumerate(days, start=1):
+        for row in _full_day_rows(day_date, events):
+            key = (row.component.ref, row.occurrence.start)
+            if col_idx not in columns.setdefault(key, []):
+                columns[key].append(col_idx)
+            rows_by_key[key] = row
+    order = sorted(
+        columns,
+        key=lambda k: (
+            min(columns[k]),
+            -len(columns[k]),
+            rows_by_key[k].occurrence.start,
+        ),
+    )
+    lanes: list[dict[int, tuple[OccurrenceRow, bool, bool]]] = []
+    for index, key in enumerate(order):
+        cols = sorted(columns[key])
+        lane = next((lane for lane in lanes if not any(c in lane for c in cols)), None)
+        if lane is None:
+            lane = {}
+            lanes.append(lane)
+        for c in cols:
+            lane[c] = (rows_by_key[key], c == cols[0], index % 2 == 1)
+    return lanes
+
+
+def bucket_by_day(
+    rows: Sequence[OccurrenceRow], first_day: date, count: int
+) -> list[tuple[date, list[OccurrenceRow]]]:
+    """Group rows into the per-day `(date, rows)` pairs `show_days` takes.
+
+    Timed events go under their local start date (the timeline's cell
+    logic uses local dates too). Full-day events go under every shown
+    day they cover, so a multi-day span — including one that began
+    before `first_day` — appears in each of its columns.
+    """
+    buckets: list[tuple[date, list[OccurrenceRow]]] = [
+        (first_day + timedelta(days=offset), []) for offset in range(count)
+    ]
+    for row in rows:
+        if _occurrence_is_full_day(row.occurrence):
+            start_d, end_d = _full_day_dates(row.occurrence)
+            indices = range(
+                max(0, (start_d - first_day).days),
+                min(
+                    count, max((end_d - first_day).days, (start_d - first_day).days + 1)
+                ),
+            )
+        else:
+            day_index = (row.occurrence.start.astimezone().date() - first_day).days
+            indices = (
+                range(day_index, day_index + 1) if 0 <= day_index < count else range(0)
+            )
+        for i in indices:
+            buckets[i][1].append(row)
+    return buckets
+
+
 def _full_day_rows(
     day: date,
     events: Sequence[OccurrenceRow],
@@ -705,4 +784,4 @@ def _full_day_dates(occ: Occurrence) -> tuple[date, date]:
     return occ.start.astimezone().date(), end.astimezone().date()
 
 
-__all__ = ["TimelineGrid"]
+__all__ = ["TimelineGrid", "bucket_by_day"]

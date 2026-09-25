@@ -3687,6 +3687,62 @@ class TimelineGridFlowTest(TuiFlowTestCase):
                 (end_slot + timedelta(minutes=30)).strftime("%H:%M"),
             )
 
+    async def test_multi_day_all_day_event_is_one_bar_across_its_days(self) -> None:
+        from textual.coordinate import Coordinate
+
+        from chronos.tui.widgets.timeline_grid import TimelineGrid, bucket_by_day
+
+        # Started the day before the first shown column; ends (exclusive)
+        # on the fourth column's date.
+        trip = TimelineGridHelpersTest._all_day_row(
+            "trip",
+            "Trip",
+            datetime(2026, 6, 14, tzinfo=UTC),
+            datetime(2026, 6, 18, tzinfo=UTC),
+        )
+        single = TimelineGridHelpersTest._all_day_row(
+            "one",
+            "One day",
+            datetime(2026, 6, 16, tzinfo=UTC),
+            datetime(2026, 6, 17, tzinfo=UTC),
+        )
+        buckets = bucket_by_day([trip, single], date(2026, 6, 15), 4)
+        self.assertEqual(
+            [[r.component.summary for r in rows] for _, rows in buckets],
+            [["Trip"], ["Trip", "One day"], ["Trip"], []],
+        )
+
+        app = ChronosApp(self.services())
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen.action_select_span(4)
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            timeline.show_days(buckets, today=date(2026, 6, 15))
+            await pilot.pause()
+
+            trip_ref = trip.component.ref
+            # Same banner line (0) on all three covered days, not on the 4th.
+            self.assertEqual(
+                [timeline.cell_ref(0, c) for c in (1, 2, 3, 4)],
+                [trip_ref, trip_ref, trip_ref, None],
+            )
+            first = timeline.get_cell_at(Coordinate(0, 1))
+            middle = timeline.get_cell_at(Coordinate(0, 2))
+            assert isinstance(first, Text) and isinstance(middle, Text)
+            self.assertTrue(first.plain.startswith("Trip"))
+            self.assertEqual(middle.plain.strip(), "")
+            # Coloured, not plain text.
+            self.assertIn(" on ", str(middle.style))
+            self.assertEqual(str(first.style), str(middle.style))
+            # The single-day event takes the next line, with a spare
+            # empty line below for creating new all-day events.
+            self.assertEqual(timeline.cell_ref(1, 2), single.component.ref)
+            self.assertEqual(timeline.all_day_date(2, 4), date(2026, 6, 18))
+            self.assertIsNone(timeline.cell_ref(2, 4))
+
     async def test_drag_across_all_day_banner_creates_all_day_event(self) -> None:
         from textual.coordinate import Coordinate
         from textual.widgets import Checkbox

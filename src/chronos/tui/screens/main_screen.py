@@ -88,7 +88,7 @@ from chronos.tui.widgets.event_list import EventList
 from chronos.tui.widgets.event_view import EventView
 from chronos.tui.widgets.month_grid import MonthGrid
 from chronos.tui.widgets.sync_status import SyncStatus
-from chronos.tui.widgets.timeline_grid import TimelineGrid
+from chronos.tui.widgets.timeline_grid import TimelineGrid, bucket_by_day
 
 if TYPE_CHECKING:
     from chronos.tui.app import ChronosApp, SyncRunner, TuiServices
@@ -497,22 +497,7 @@ class MainScreen(Screen[None]):
                 viewed=self._viewed_date,
                 days=self._grid_days,
             )
-            # Group the flat row list back into per-day buckets the
-            # widget expects.
-            buckets: list[tuple[date, list[OccurrenceRow]]] = [
-                (self._viewed_date + timedelta(days=offset), [])
-                for offset in range(self._grid_days)
-            ]
-            for occ_row in rows:
-                # Bucket by local date so an event at 23:00 local Apr 26
-                # lands in the Apr 26 column even when its UTC date is
-                # Apr 27. The timeline-grid cell logic also uses local
-                # dates, so the two must agree.
-                day_index = (
-                    occ_row.occurrence.start.astimezone().date() - self._viewed_date
-                ).days
-                if 0 <= day_index < self._grid_days:
-                    buckets[day_index][1].append(occ_row)
+            buckets = bucket_by_day(rows, self._viewed_date, self._grid_days)
             timeline.show_days(buckets, today=today, now=now)
         self._last_rows = rows
         self._clock_state = self._clock_signature()
