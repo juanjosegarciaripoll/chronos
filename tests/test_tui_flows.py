@@ -1993,6 +1993,49 @@ class AlarmMessageTest(unittest.TestCase):
         self.assertEqual(message, "Starts Sat 02 May 09:30")
 
 
+class GotoDialogTest(TuiFlowTestCase):
+    async def test_colon_opens_dialog_and_jumps(self) -> None:
+        from textual.widgets import Input, Label
+
+        from chronos.tui.screens.goto_screen import GotoScreen
+
+        app = ChronosApp(self.services())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            main = app.screen
+            assert isinstance(main, MainScreen)
+            await pilot.press("colon")
+            await pilot.pause()
+            dialog = app.screen
+            assert isinstance(dialog, GotoScreen)
+
+            # Invalid input keeps the dialog open with an error.
+            await pilot.press(*"bogus", "enter")
+            await pilot.pause()
+            self.assertIs(app.screen, dialog)
+            self.assertIn("bogus", str(dialog.query_one("#goto-error", Label).render()))
+
+            dialog.query_one("#goto-input", Input).value = "2026-12-01"
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIs(app.screen, main)
+            self.assertEqual(main._viewed_date, date(2026, 12, 1))
+
+    async def test_escape_cancels(self) -> None:
+        app = ChronosApp(self.services())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            main = app.screen
+            assert isinstance(main, MainScreen)
+            before = main._viewed_date
+            await pilot.press("colon")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertIs(app.screen, main)
+            self.assertEqual(main._viewed_date, before)
+
+
 class Osc777Test(unittest.TestCase):
     def test_sequence(self) -> None:
         from chronos.tui.app import osc777_notification

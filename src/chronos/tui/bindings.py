@@ -30,6 +30,8 @@ KEY_AGENDA_WEEK = "w"
 KEY_AGENDA_MONTH = "m"
 
 KEY_TODAY = "t"
+# Opens the "go to date" dialog (vim's command-line key).
+KEY_GOTO = "colon"
 
 # Date-axis navigation. `n`/`p` step the viewed date by the view's
 # natural unit (a day in Day / Grid; the window size in Agenda);
@@ -94,6 +96,7 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_AGENDA_WEEK, "agenda_window_week", "Week", show=False),
         Binding(KEY_AGENDA_MONTH, "agenda_window_month", "Month", show=False),
         Binding(KEY_TODAY, "today", "Today"),
+        Binding(KEY_GOTO, "goto_date", "Go to"),
         Binding(KEY_NEXT_DAY, "next_day", "Next day", show=False),
         Binding(KEY_PREV_DAY, "prev_day", "Prev day", show=False),
         Binding(KEY_NEXT_WEEK, "next_week", "Next week", show=False),
@@ -152,6 +155,7 @@ __all__ = [
     "KEY_DELETE",
     "KEY_DELETE_ALT",
     "KEY_EDIT",
+    "KEY_GOTO",
     "KEY_HELP",
     "KEY_NEW",
     "KEY_NEXT_WEEK",

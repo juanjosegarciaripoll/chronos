@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Textual TUI with agenda, day, and grid views, plus create, edit, trash, search, and sync flows.
 - MCP server with stdio mode, TCP bridge mode, query tools, and iTIP-aware `.ics` import.
 - iTIP-aware `.ics` import: `METHOD:CANCEL` trashes the matching event and `METHOD:REQUEST`/newer `SEQUENCE` updates it in place. Changes to already-synced events propagate to the server on the next sync (DELETE for cancellations, If-Match PUT for updates).
+- `:` opens a "go to date" dialog in the TUI: `2026-10-15`, a day of the viewed month (`15`), the next weekday (`fri`), a relative jump (`+2w`, `-3d`, `+1m`, `+1y`), or `today`.
 - `N`/`P` move the viewed date by a week in every view (previously by the grid width, and only in multi-day grids).
 - The TUI highlights the current moment: in Day / Grid views the current half-hour slot gets a `▸` time label (and a "now" line when empty) and the event in progress is filled with the theme accent; in the Agenda view events in progress are bold, accent-coloured, and marked `▸`. The highlight follows the clock without moving the cursor.
 - Alarms are delivered through the terminal instead of desktop notifications (the `desktop-notifier` dependency is gone), so they reach the user over SSH too: an in-app toast, the terminal bell, and an OSC 777 notification, which terminals that support it (e.g. Windows Terminal with `compatibility.allowOSC777`) show as a desktop notification.

@@ -116,7 +116,7 @@ class ChronosApp(App[None]):
        has something to act on (auto-width inside a flex parent
        expands to fill, defeating the centre rule). */
     SyncConfirmScreen, ConfirmScreen, SyncProgressScreen,
-    EventDetailScreen, OAuthProgressScreen, ImportIcsScreen {
+    EventDetailScreen, OAuthProgressScreen, ImportIcsScreen, GotoScreen {
         align: center middle;
     }
     .dialog-box {
@@ -153,6 +153,8 @@ class ChronosApp(App[None]):
     #event-detail    { width: 80; max-height: 80%; }
     #sync-confirm-box { width: 80; }
     #confirm-box     { width: 60; }
+    #goto-box        { width: 60; }
+    #goto-error      { color: $error; }
     #import-ics-box  { width: 80; }
     #sync-progress-box { width: 100; max-height: 80%; }
     #oauth-box       { width: 70; }

@@ -42,6 +42,7 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset(
             {
                 "today",
+                "goto_date",
                 "next_day",
                 "prev_day",
                 "next_week",

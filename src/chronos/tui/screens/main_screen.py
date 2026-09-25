@@ -53,6 +53,7 @@ from chronos.tui.screens.day_view_screen import (
 )
 from chronos.tui.screens.event_detail_screen import EventDetailScreen
 from chronos.tui.screens.event_edit_screen import EditDraft, EventEditScreen
+from chronos.tui.screens.goto_screen import GotoScreen
 from chronos.tui.screens.grid_view_screen import (
     DEFAULT_GRID_DAYS,
 )
@@ -233,6 +234,19 @@ class MainScreen(Screen[None]):
 
     def action_today(self) -> None:
         self._viewed_date = self._services().now().date()
+        self.refresh_view()
+
+    def action_goto_date(self) -> None:
+        """Ask for a date and jump the current view to it (`:`)."""
+        screen = GotoScreen(
+            viewed=self._viewed_date,
+            today=self._services().now().astimezone().date(),
+            on_goto=self._goto,
+        )
+        self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
+
+    def _goto(self, target: date) -> None:
+        self._viewed_date = target
         self.refresh_view()
 
     def action_next_day(self) -> None:
