@@ -5,7 +5,7 @@ import io
 import re
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -1060,6 +1060,41 @@ class EditCommandTest(CliTestCase):
         )
         assert component is not None
         self.assertEqual(component.local_flags, frozenset())
+
+    def test_edit_keeps_all_day_events_as_dates(self) -> None:
+        from chronos.mutations import all_day_bounds, build_event_ics
+
+        start, end = all_day_bounds(date(2026, 5, 1), date(2026, 5, 1))
+        ics = build_event_ics(
+            "day@example.com", "Holiday", start, end, NOW, all_day=True
+        )
+        self.mirror.write(ResourceRef("personal", "work", "day@example.com"), ics)
+        self.index.upsert_component(
+            VEvent(
+                ref=ComponentRef("personal", "work", "day@example.com"),
+                href=None,
+                etag=None,
+                raw_ics=ics,
+                summary="Holiday",
+                description=None,
+                location=None,
+                dtstart=start,
+                dtend=end,
+                status=None,
+                local_flags=frozenset(),
+                server_flags=frozenset(),
+                local_status=LocalStatus.ACTIVE,
+                trashed_at=None,
+                synced_at=None,
+            )
+        )
+        code = self._run(["edit", "day@example.com", "--summary", "Day off"])
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        component = self.index.get_component(
+            ComponentRef("personal", "work", "day@example.com")
+        )
+        assert component is not None
+        self.assertIn(b"DTSTART;VALUE=DATE:20260501", component.raw_ics)
 
     def test_edit_not_found(self) -> None:
         code = self._run(["edit", "missing@example.com", "--summary", "X"])

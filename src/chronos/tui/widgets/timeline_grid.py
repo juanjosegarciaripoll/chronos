@@ -25,6 +25,7 @@ from textual.message import Message
 from textual.widgets import DataTable
 
 from chronos.domain import ComponentRef, Occurrence
+from chronos.mutations import all_day_bounds
 from chronos.tui.views import IN_PROGRESS_MARK, OccurrenceRow, in_progress_keys
 from chronos.tui.views import _is_full_day as _occurrence_is_full_day
 
@@ -95,12 +96,19 @@ class TimelineGrid(DataTable[str | Text]):
             self.ref = ref
 
     class CreateRequested(Message):
-        """A mouse selection over empty time slots."""
+        """A mouse selection over empty time slots or all-day cells.
 
-        def __init__(self, start: datetime, end: datetime) -> None:
+        For `all_day`, `start`/`end` are the `all_day_bounds` of the
+        selected days (UTC midnight, end exclusive).
+        """
+
+        def __init__(
+            self, start: datetime, end: datetime, *, all_day: bool = False
+        ) -> None:
             super().__init__()
             self.start = start
             self.end = end
+            self.all_day = all_day
 
     class MoveRequested(Message):
         """A timed event dragged by ``delta`` on the grid."""
@@ -130,6 +138,9 @@ class TimelineGrid(DataTable[str | Text]):
         # the time-label column deliberately have no entry, so their normal
         # click behaviour remains untouched.
         self._slot_starts: dict[tuple[int, int], datetime] = {}
+        # Every cell of the "all day" banner maps to its column's date, so
+        # empty ones can start an all-day event (click or sideways drag).
+        self._all_day_dates: dict[tuple[int, int], date] = {}
         self._drag_origin: Coordinate | None = None
         self._drag_current: Coordinate | None = None
         # Original cell values replaced by the live creation-range preview.
@@ -196,6 +207,7 @@ class TimelineGrid(DataTable[str | Text]):
         self.clear(columns=True)
         self._cells.clear()
         self._slot_starts.clear()
+        self._all_day_dates.clear()
         self._col_alt.clear()
         if not days:
             self.add_column("(no days)")
@@ -210,8 +222,8 @@ class TimelineGrid(DataTable[str | Text]):
             self.add_column(_day_header(day_date, today), width=self._day_col_width)
 
         # Banner rows: full-day events (VTodos / midnight-to-midnight)
-        # for each day, one stacked line per event. Skipped silently when
-        # no day has any.
+        # for each day, one stacked line per event, plus an empty line to
+        # create new all-day events on.
         self._add_all_day_rows(days)
 
         palette = self._palette()
@@ -229,6 +241,10 @@ class TimelineGrid(DataTable[str | Text]):
     def slot_start(self, row: int, col: int) -> datetime | None:
         """Return the local start time for a timed cell, if it is one."""
         return self._slot_starts.get((row, col))
+
+    def all_day_date(self, row: int, col: int) -> date | None:
+        """Return the date of an "all day" banner cell, if it is one."""
+        return self._all_day_dates.get((row, col))
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         coord = event.coordinate
@@ -256,7 +272,8 @@ class TimelineGrid(DataTable[str | Text]):
         if self._drag_origin is None:
             return
         coordinate = self._mouse_coordinate(event)
-        if coordinate is not None:
+        # A gesture stays within its kind: timed slots or the banner.
+        if coordinate is not None and self._same_kind(coordinate, self._drag_origin):
             self._drag_current = coordinate
             self.cursor_coordinate = coordinate
             if (
@@ -271,6 +288,8 @@ class TimelineGrid(DataTable[str | Text]):
             return
         origin = self._drag_origin
         current = self._mouse_coordinate(event) or self._drag_current or origin
+        if not self._same_kind(current, origin):
+            current = self._drag_current or origin
         self._drag_origin = None
         self._drag_current = None
         self.release_mouse()
@@ -281,6 +300,9 @@ class TimelineGrid(DataTable[str | Text]):
 
         origin_key = (origin.row, origin.column)
         current_key = (current.row, current.column)
+        if origin_key in self._all_day_dates:
+            self._finish_all_day_gesture(origin_key, current_key)
+            return
         origin_start = self._slot_starts[origin_key]
         current_start = self._slot_starts[current_key]
         ref = self._cells.get(origin_key)
@@ -296,19 +318,51 @@ class TimelineGrid(DataTable[str | Text]):
         end = max(origin_start, current_start) + timedelta(minutes=_SLOT_MINUTES)
         self.post_message(self.CreateRequested(start, end))
 
+    def _finish_all_day_gesture(
+        self, origin_key: tuple[int, int], current_key: tuple[int, int]
+    ) -> None:
+        """Click on a banner event opens it; a gesture over empty banner
+        cells creates an all-day event spanning the covered days."""
+        self._clear_drag_preview()
+        ref = self._cells.get(origin_key)
+        if ref is not None:
+            if current_key == origin_key:
+                self.post_message(self.Selected(ref))
+            return
+        first, last = sorted(
+            (self._all_day_dates[origin_key], self._all_day_dates[current_key])
+        )
+        start, end = all_day_bounds(first, last)
+        self.post_message(self.CreateRequested(start, end, all_day=True))
+
+    def _same_kind(self, a: Coordinate, b: Coordinate) -> bool:
+        """Both timed slots, or both "all day" banner cells."""
+        return ((a.row, a.column) in self._all_day_dates) == (
+            (b.row, b.column) in self._all_day_dates
+        )
+
     def _update_drag_preview(self, current: Coordinate) -> None:
         """Paint every visible slot in the pending creation range."""
         origin = self._drag_origin
         if origin is None:
             return
-        origin_start = self._slot_starts[(origin.row, origin.column)]
-        current_start = self._slot_starts[(current.row, current.column)]
-        start, end = sorted((origin_start, current_start))
-        wanted = {
-            key
-            for key, slot_start in self._slot_starts.items()
-            if start <= slot_start <= end
-        }
+        if (origin.row, origin.column) in self._all_day_dates:
+            # All-day gesture: the origin's banner line, across the days.
+            low, high = sorted((origin.column, current.column))
+            wanted = {
+                key
+                for key in self._all_day_dates
+                if key[0] == origin.row and low <= key[1] <= high
+            }
+        else:
+            origin_start = self._slot_starts[(origin.row, origin.column)]
+            current_start = self._slot_starts[(current.row, current.column)]
+            start, end = sorted((origin_start, current_start))
+            wanted = {
+                key
+                for key, slot_start in self._slot_starts.items()
+                if start <= slot_start <= end
+            }
         for key in self._drag_preview_originals.keys() - wanted:
             original = self._drag_preview_originals.pop(key)
             self.update_cell_at(Coordinate(*key), original)
@@ -331,7 +385,7 @@ class TimelineGrid(DataTable[str | Text]):
         self._drag_preview_originals.clear()
 
     def _mouse_coordinate(self, event: MouseEvent) -> Coordinate | None:
-        """Return a timed-cell coordinate carried in DataTable render metadata."""
+        """Return a timed or banner cell coordinate from render metadata."""
         meta = event.style.meta
         if meta.get("out_of_bounds", False):
             return None
@@ -340,7 +394,8 @@ class TimelineGrid(DataTable[str | Text]):
         if not isinstance(row, int) or not isinstance(column, int):
             return None
         coordinate = Coordinate(row, column)
-        if (coordinate.row, coordinate.column) not in self._slot_starts:
+        key = (coordinate.row, coordinate.column)
+        if key not in self._slot_starts and key not in self._all_day_dates:
             return None
         return coordinate
 
@@ -351,17 +406,17 @@ class TimelineGrid(DataTable[str | Text]):
     ) -> None:
         # One stacked banner line per full-day event, so each event keeps
         # its own selectable cell. The section is as tall as the busiest
-        # day; lighter days leave their lower cells blank. The "all day"
-        # label sits on the first line only so the rows read as one group.
+        # day plus one line, so every day has an empty cell to click (or
+        # drag across) to create an all-day event. The "all day" label
+        # sits on the first line only so the rows read as one group.
         per_column = [_full_day_rows(day_date, events) for day_date, events in days]
-        line_count = max((len(col) for col in per_column), default=0)
-        if line_count == 0:
-            return
+        line_count = max((len(col) for col in per_column), default=0) + 1
         for line in range(line_count):
             row_index = self.row_count
             label: Any = Text(_ALL_DAY_LABEL, style="italic dim") if line == 0 else ""
             cells: list[Any] = [label]
             for col_idx, col_rows in enumerate(per_column, start=1):
+                self._all_day_dates[(row_index, col_idx)] = days[col_idx - 1][0]
                 if line < len(col_rows):
                     row = col_rows[line]
                     cells.append(row.component.summary or "(no summary)")

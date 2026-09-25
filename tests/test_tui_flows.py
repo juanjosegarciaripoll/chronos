@@ -1266,6 +1266,76 @@ class NewEventFlowTest(TuiFlowTestCase):
         uids = {r.uid for r in on_disk}
         self.assertIn(new[0].ref.uid, uids)
 
+    async def test_all_day_checkbox_saves_date_event(self) -> None:
+        from textual.widgets import Checkbox
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            checkbox = edit.query_one("#edit-all-day", Checkbox)
+            self.assertFalse(checkbox.value)
+            checkbox.value = True
+            await pilot.pause()
+            self.assertTrue(edit.query_one("#edit-end-time", Select).disabled)
+            edit.query_one("#edit-summary").value = "Holiday"  # type: ignore[attr-defined]
+            edit.query_one("#edit-start-date", DatePicker).value = "2026-05-15"
+            edit.query_one("#edit-end-date", DatePicker).value = ""
+            edit.action_save()
+            await pilot.pause()
+            self.assertNotIsInstance(pilot.app.screen, EventEditScreen)
+
+            created = [
+                c
+                for ref in all_calendar_refs(services.config, services.mirror)
+                for c in services.index.list_calendar_components(ref)
+                if c.summary == "Holiday"
+            ]
+            self.assertEqual(len(created), 1)
+            event = created[0]
+            assert isinstance(event, VEvent)
+            self.assertIn(b"DTSTART;VALUE=DATE:20260515", event.raw_ics)
+            self.assertIn(b"DTEND;VALUE=DATE:20260516", event.raw_ics)
+
+            # Re-opening it pre-fills the form as an all-day event.
+            main = pilot.app.screen
+            assert isinstance(main, MainScreen)
+            main._edit_specific(event)
+            await pilot.pause()
+            reopened = pilot.app.screen
+            assert isinstance(reopened, EventEditScreen)
+            self.assertTrue(reopened.query_one("#edit-all-day", Checkbox).value)
+            self.assertEqual(
+                reopened.query_one("#edit-start-date", DatePicker).value,
+                "2026-05-15",
+            )
+            self.assertEqual(reopened.query_one("#edit-end-date", DatePicker).value, "")
+
+    async def test_all_day_end_before_start_is_rejected(self) -> None:
+        from textual.widgets import Checkbox
+
+        app = ChronosApp(self.services())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            edit.query_one("#edit-all-day", Checkbox).value = True
+            edit.query_one("#edit-summary").value = "Oops"  # type: ignore[attr-defined]
+            edit.query_one("#edit-start-date", DatePicker).value = "2026-05-15"
+            edit.query_one("#edit-end-date", DatePicker).value = "2026-05-14"
+            edit.action_save()
+            await pilot.pause()
+            self.assertIs(pilot.app.screen, edit)
+            self.assertIn(
+                "before start", str(edit.query_one("#edit-error", Label).render())
+            )
+
     async def test_new_event_can_invite_attendees(self) -> None:
         from chronos.ical_parser import extract_attendees, extract_organizer
 
@@ -3616,6 +3686,70 @@ class TimelineGridFlowTest(TuiFlowTestCase):
                 edit.query_one("#edit-end-time", Select).value,
                 (end_slot + timedelta(minutes=30)).strftime("%H:%M"),
             )
+
+    async def test_drag_across_all_day_banner_creates_all_day_event(self) -> None:
+        from textual.coordinate import Coordinate
+        from textual.widgets import Checkbox
+
+        from chronos.tui.widgets.timeline_grid import TimelineGrid
+
+        services = self.services()
+        app = ChronosApp(services)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, MainScreen)
+            screen._viewed_date = date(2026, 6, 15)
+            screen.action_select_span(3)
+            await pilot.pause()
+            timeline = screen.query_one(TimelineGrid)
+            # The banner is there even though no shown day has an
+            # all-day event: its first row maps every column to a date.
+            self.assertEqual(timeline.all_day_date(0, 1), date(2026, 6, 15))
+            self.assertEqual(timeline.all_day_date(0, 3), date(2026, 6, 17))
+            self.assertIsNone(timeline.slot_start(0, 1))
+
+            def cell_offset(col: int) -> tuple[int, int]:
+                region = timeline._get_cell_region(Coordinate(0, col))
+                return (
+                    region.x - timeline.scroll_offset.x + 1,
+                    region.y - timeline.scroll_offset.y,
+                )
+
+            await pilot.mouse_down(timeline, offset=cell_offset(1))
+            await pilot.hover(timeline, offset=cell_offset(2))
+            self.assertIn("░", str(timeline.get_cell_at(Coordinate(0, 2))))
+            await pilot.mouse_up(timeline, offset=cell_offset(2))
+            await pilot.pause()
+
+            edit = pilot.app.screen
+            assert isinstance(edit, EventEditScreen)
+            self.assertTrue(edit.query_one("#edit-all-day", Checkbox).value)
+            self.assertTrue(edit.query_one("#edit-start-time", Select).disabled)
+            self.assertEqual(
+                edit.query_one("#edit-start-date", DatePicker).value, "2026-06-15"
+            )
+            # The Ends field holds the last day, inclusive.
+            self.assertEqual(
+                edit.query_one("#edit-end-date", DatePicker).value, "2026-06-16"
+            )
+            edit.query_one("#edit-summary").value = "Conference"  # type: ignore[attr-defined]
+            edit.action_save()
+            await pilot.pause()
+
+        created = [
+            c
+            for ref in all_calendar_refs(services.config, services.mirror)
+            for c in services.index.list_calendar_components(ref)
+            if c.summary == "Conference"
+        ]
+        self.assertEqual(len(created), 1)
+        event = created[0]
+        assert isinstance(event, VEvent)
+        self.assertIn(b"DTSTART;VALUE=DATE:20260615", event.raw_ics)
+        self.assertIn(b"DTEND;VALUE=DATE:20260617", event.raw_ics)
+        self.assertEqual(event.dtstart, datetime(2026, 6, 15, tzinfo=UTC))
+        self.assertEqual(event.dtend, datetime(2026, 6, 17, tzinfo=UTC))
 
     async def test_drag_event_reschedules_it_and_preserves_duration(self) -> None:
         from textual.events import MouseDown, MouseMove, MouseUp

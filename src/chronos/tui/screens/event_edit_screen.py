@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Input, Label, Select
+from textual.widgets import Checkbox, Footer, Input, Label, Select
 
 from chronos.domain import (
     AlarmAction,
@@ -18,7 +18,11 @@ from chronos.domain import (
     VEvent,
 )
 from chronos.ical_parser import extract_alarm_triggers, extract_attendees
-from chronos.mutations import normalize_attendee_emails
+from chronos.mutations import (
+    all_day_bounds,
+    is_all_day_span,
+    normalize_attendee_emails,
+)
 from chronos.tui.bindings import edit_bindings
 from chronos.tui.widgets.date_picker import DatePicker, InvalidDateError
 
@@ -43,6 +47,10 @@ class EditDraft:
     attendees: tuple[str, ...]
     alarms: tuple[ParsedAlarm, ...]
     existing: StoredComponent | None
+    # When set, `dtstart`/`dtend` are the UTC-midnight bounds from
+    # `all_day_bounds` (end exclusive) and the event is saved as
+    # `VALUE=DATE`.
+    all_day: bool = False
 
 
 class EventEditScreen(Screen[None]):
@@ -65,6 +73,7 @@ class EventEditScreen(Screen[None]):
         on_delete: Callable[[StoredComponent], None] | None = None,
         initial_start: datetime | None = None,
         initial_end: datetime | None = None,
+        initial_all_day: bool = False,
     ) -> None:
         super().__init__()
         if not calendars:
@@ -76,6 +85,7 @@ class EventEditScreen(Screen[None]):
         self._on_delete = on_delete
         self._initial_start = initial_start
         self._initial_end = initial_end
+        self._initial_all_day = initial_all_day
         self._error: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -94,8 +104,18 @@ class EventEditScreen(Screen[None]):
             if isinstance(ex, VEvent) and ex.dtend is not None
             else self._initial_end
         )
-        start_date, start_time = _local_parts(initial_start)
-        end_date, end_time = _local_parts(initial_end)
+        all_day = (
+            is_all_day_span(initial_start, initial_end)
+            if ex is not None
+            else self._initial_all_day
+        )
+        if all_day:
+            # Dates only; the Ends field holds the last day (inclusive).
+            start_date, end_date = _all_day_parts(initial_start, initial_end)
+            start_time = end_time = ""
+        else:
+            start_date, start_time = _local_parts(initial_start)
+            end_date, end_time = _local_parts(initial_end)
         if start_date == end_date:
             end_date = ""
         location = ex.location or "" if ex is not None else ""
@@ -129,6 +149,9 @@ class EventEditScreen(Screen[None]):
                     classes="event-field-control",
                     compact=True,
                 )
+            with Horizontal(classes="event-field-row"):
+                yield Label("All day", classes="event-field-label")
+                yield Checkbox(value=all_day, id="edit-all-day", compact=True)
             with Horizontal(classes="event-datetime-row"):
                 yield Label("Starts", classes="event-field-label")
                 yield DatePicker(
@@ -200,6 +223,20 @@ class EventEditScreen(Screen[None]):
             yield Label("", id="edit-error")
         yield Footer()
 
+    def on_mount(self) -> None:
+        self._sync_time_fields(self.query_one("#edit-all-day", Checkbox).value)
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "edit-all-day":
+            self._sync_time_fields(event.value)
+
+    def _sync_time_fields(self, all_day: bool) -> None:
+        """All-day events have no times: grey the time selectors out."""
+        for selector in ("#edit-start-time", "#edit-end-time"):
+            self.query_one(selector, Select).disabled = all_day
+        end_date = self.query_one("#edit-end-date", DatePicker)
+        end_date.placeholder = "Last day" if all_day else "Same date"
+
     def action_save(self) -> None:
         try:
             draft = self._collect()
@@ -247,12 +284,21 @@ class EventEditScreen(Screen[None]):
             raise ValueError("summary is required")
         start_date_input = self.query_one("#edit-start-date", DatePicker)
         start_date = _parse_date(start_date_input.value, "start date")
+        end_date_input = self.query_one("#edit-end-date", DatePicker)
+        end_date_text = end_date_input.value.strip()
+        all_day = self.query_one("#edit-all-day", Checkbox).value
+        if all_day:
+            last_day = (
+                _parse_date(end_date_text, "end date") if end_date_text else start_date
+            )
+            if last_day < start_date:
+                raise ValueError("end must not be before start")
+            first, end = all_day_bounds(start_date, last_day)
+            return self._draft(target, summary, first, end, all_day=True)
         start_time_select = self.query_one("#edit-start-time", Select)
         start_time = _selected_time(start_time_select, "start time")
         dtstart = datetime.combine(start_date, start_time).astimezone()
 
-        end_date_input = self.query_one("#edit-end-date", DatePicker)
-        end_date_text = end_date_input.value.strip()
         end_time_select = self.query_one("#edit-end-time", Select)
         selected_end_time = cast("object", end_time_select.value)
         dtend: datetime | None = None
@@ -267,6 +313,17 @@ class EventEditScreen(Screen[None]):
                 raise ValueError("end must be after start")
         elif end_date_text:
             raise ValueError("end time is required when end date is set")
+        return self._draft(target, summary, dtstart, dtend, all_day=False)
+
+    def _draft(
+        self,
+        target: CalendarRef,
+        summary: str,
+        dtstart: datetime,
+        dtend: datetime | None,
+        *,
+        all_day: bool,
+    ) -> EditDraft:
         location_input: Input = self.query_one("#edit-location", Input)
         description_input: Input = self.query_one("#edit-description", Input)
         attendees_input: Input = self.query_one("#edit-attendees", Input)
@@ -283,6 +340,7 @@ class EventEditScreen(Screen[None]):
             attendees=attendees,
             alarms=alarms,
             existing=self._existing,
+            all_day=all_day,
         )
 
     def _show_error(self, message: str) -> None:
@@ -359,6 +417,17 @@ def _local_parts(dt: datetime | None) -> tuple[str, str]:
         return "", ""
     local = dt.astimezone()
     return local.strftime("%Y-%m-%d"), local.strftime("%H:%M")
+
+
+def _all_day_parts(start: datetime | None, end: datetime | None) -> tuple[str, str]:
+    """Start date and inclusive last date of a stored all-day span."""
+    if start is None:
+        return "", ""
+    first = start.astimezone(UTC).date()
+    if end is None:
+        return first.isoformat(), ""
+    last = end.astimezone(UTC).date() - timedelta(days=1)
+    return first.isoformat(), max(first, last).isoformat()
 
 
 def _time_options(value: str) -> tuple[tuple[str, str], ...]:

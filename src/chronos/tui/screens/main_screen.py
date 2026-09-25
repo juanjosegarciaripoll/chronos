@@ -29,6 +29,7 @@ from chronos.domain import (
 )
 from chronos.ical_parser import extract_organizer
 from chronos.mutations import (
+    all_day_bounds,
     build_event_ics,
     edited_flags,
     generate_uid,
@@ -323,6 +324,7 @@ class MainScreen(Screen[None]):
         *,
         initial_start: datetime | None = None,
         initial_end: datetime | None = None,
+        all_day: bool = False,
     ) -> None:
         services = self._services()
         if initial_start is None:
@@ -330,6 +332,11 @@ class MainScreen(Screen[None]):
                 timeline = self.query_one(TimelineGrid)
                 coordinate = timeline.cursor_coordinate
                 initial_start = timeline.slot_start(coordinate.row, coordinate.column)
+                banner_day = timeline.all_day_date(coordinate.row, coordinate.column)
+                if initial_start is None and banner_day is not None:
+                    # Cursor on the "all day" banner: an all-day event.
+                    initial_start, initial_end = all_day_bounds(banner_day, banner_day)
+                    all_day = True
             elif self._view == ViewKind.MONTH:
                 # The cursor day, at the usual start of a working day.
                 initial_start = datetime.combine(
@@ -353,6 +360,7 @@ class MainScreen(Screen[None]):
             on_save=self._save_event,
             initial_start=initial_start,
             initial_end=initial_end,
+            initial_all_day=all_day,
         )
         self.app.push_screen(screen)  # pyright: ignore[reportUnknownMemberType]
 
@@ -554,7 +562,9 @@ class MainScreen(Screen[None]):
     def on_timeline_grid_create_requested(
         self, event: TimelineGrid.CreateRequested
     ) -> None:
-        self._new_event(initial_start=event.start, initial_end=event.end)
+        self._new_event(
+            initial_start=event.start, initial_end=event.end, all_day=event.all_day
+        )
 
     def on_timeline_grid_move_requested(
         self, event: TimelineGrid.MoveRequested
@@ -643,6 +653,7 @@ class MainScreen(Screen[None]):
                 attendees=draft.attendees,
                 organizer=_organizer_for(draft.target, services.config),
                 alarms=draft.alarms,
+                all_day=draft.all_day,
             )
             services.mirror.write(
                 ResourceRef(draft.target.account_name, draft.target.calendar_name, uid),
@@ -686,6 +697,7 @@ class MainScreen(Screen[None]):
                 attendees=draft.attendees,
                 organizer=organizer,
                 alarms=draft.alarms,
+                all_day=draft.all_day,
             )
             services.mirror.write(existing.ref.resource, ics)
             updated = VEvent(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from email.utils import parseaddr
 
 from icalendar import Calendar, Event
@@ -32,7 +32,15 @@ def build_event_ics(
     alarms: Sequence[ParsedAlarm] = (),
     attendees: Sequence[str] = (),
     organizer: str | None = None,
+    all_day: bool = False,
 ) -> bytes:
+    """Serialise one VEVENT.
+
+    With `all_day`, DTSTART/DTEND are written as `VALUE=DATE` using the
+    UTC calendar dates of `dtstart`/`dtend` — the form the parser reads
+    back as UTC midnight (see `all_day_bounds`). `dtend` is exclusive
+    and defaults to the day after `dtstart`.
+    """
     normalized_attendees = normalize_attendee_emails(attendees)
     normalized_organizer = (
         normalize_attendee_email(organizer) if organizer and organizer.strip() else None
@@ -44,10 +52,15 @@ def build_event_ics(
         "BEGIN:VEVENT",
         f"UID:{uid}",
         f"DTSTAMP:{_fmt_dt(now)}",
-        f"DTSTART:{_fmt_dt(dtstart)}",
     ]
-    if dtend is not None:
-        lines.append(f"DTEND:{_fmt_dt(dtend)}")
+    if all_day:
+        end = dtend if dtend is not None else dtstart + timedelta(days=1)
+        lines.append(f"DTSTART;VALUE=DATE:{_fmt_date(dtstart)}")
+        lines.append(f"DTEND;VALUE=DATE:{_fmt_date(end)}")
+    else:
+        lines.append(f"DTSTART:{_fmt_dt(dtstart)}")
+        if dtend is not None:
+            lines.append(f"DTEND:{_fmt_dt(dtend)}")
     lines.append(f"SUMMARY:{_escape_text(summary)}")
     if location:
         lines.append(f"LOCATION:{_escape_text(location)}")
@@ -76,6 +89,33 @@ def build_event_ics(
         lines.append("END:VALARM")
     lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def all_day_bounds(first: date, last: date) -> tuple[datetime, datetime]:
+    """Stored `(dtstart, dtend)` for an all-day event on `first`..`last`.
+
+    Inclusive `last`; the returned end is exclusive. Both are UTC
+    midnight, which is how `VALUE=DATE` values are parsed.
+    """
+    start = datetime(first.year, first.month, first.day, tzinfo=UTC)
+    end = datetime(last.year, last.month, last.day, tzinfo=UTC) + timedelta(days=1)
+    return start, end
+
+
+def is_all_day_span(dtstart: datetime | None, dtend: datetime | None) -> bool:
+    """True for a stored span that `build_event_ics(all_day=True)` would write.
+
+    That is: both ends at UTC midnight, at least a day apart.
+    """
+    if dtstart is None or dtend is None:
+        return False
+    start = dtstart.astimezone(UTC)
+    end = dtend.astimezone(UTC)
+    return (
+        start.time() == time.min
+        and end.time() == time.min
+        and end - start >= timedelta(days=1)
+    )
 
 
 def reschedule_event_ics(
@@ -254,6 +294,11 @@ def _fmt_duration(td: timedelta) -> str:
     return f"{sign}P{body}" if body else "PT0S"
 
 
+def _fmt_date(dt: datetime) -> str:
+    as_utc = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return as_utc.astimezone(UTC).strftime("%Y%m%d")
+
+
 def _fmt_dt(dt: datetime) -> str:
     as_utc = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     return as_utc.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -269,8 +314,11 @@ def _escape_text(value: str) -> str:
 
 
 __all__ = [
+    "all_day_bounds",
     "build_event_ics",
+    "edited_flags",
     "generate_uid",
+    "is_all_day_span",
     "normalize_attendee_email",
     "normalize_attendee_emails",
     "reschedule_event_ics",

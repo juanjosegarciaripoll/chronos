@@ -58,6 +58,7 @@ from chronos.mutations import (
     build_event_ics,
     edited_flags,
     generate_uid,
+    is_all_day_span,
     trashed_copy,
 )
 from chronos.oauth import (
@@ -1195,6 +1196,8 @@ def cmd_edit(
             ctx.now,
             attendees=existing_attendees if attendees is None else attendees,
             organizer=organizer,
+            # Keep all-day events as VALUE=DATE when the span still is one.
+            all_day=is_all_day_span(new_start, new_end),
         )
     except ValueError as exc:
         ctx.stderr.write(f"edit: {exc}\n")
