@@ -31,18 +31,17 @@ KEY_AGENDA_MONTH = "m"
 
 KEY_TODAY = "t"
 
-# Date-axis navigation. `n`/`p` shift the viewed date by one day in
-# Day / Grid views; `N`/`P` shift by the grid's chunk size (1–7).
-# Ineffective in Agenda (which uses calendar windows, not a viewed
-# date).
+# Date-axis navigation. `n`/`p` step the viewed date by the view's
+# natural unit (a day in Day / Grid; the window size in Agenda);
+# `N`/`P` shift it by a week in every view.
 KEY_NEXT_DAY = "n"
 KEY_PREV_DAY = "p"
 # Same shift-letter caveat as the rest: terminals split on whether
 # they emit the uppercase character or the modifier form.
-KEY_NEXT_CHUNK = "N"
-KEY_NEXT_CHUNK_ALT = "shift+n"
-KEY_PREV_CHUNK = "P"
-KEY_PREV_CHUNK_ALT = "shift+p"
+KEY_NEXT_WEEK = "N"
+KEY_NEXT_WEEK_ALT = "shift+n"
+KEY_PREV_WEEK = "P"
+KEY_PREV_WEEK_ALT = "shift+p"
 
 # `c` (create) and `g` (get/sync) mirror Pony's compose / get-mail
 # keys; `Q` mirrors Pony's quit. The shift-letter aliases cope with
@@ -97,10 +96,10 @@ def main_bindings() -> list[BindingType]:
         Binding(KEY_TODAY, "today", "Today"),
         Binding(KEY_NEXT_DAY, "next_day", "Next day", show=False),
         Binding(KEY_PREV_DAY, "prev_day", "Prev day", show=False),
-        Binding(KEY_NEXT_CHUNK, "next_chunk", "Next chunk", show=False),
-        Binding(KEY_NEXT_CHUNK_ALT, "next_chunk", "Next chunk", show=False),
-        Binding(KEY_PREV_CHUNK, "prev_chunk", "Prev chunk", show=False),
-        Binding(KEY_PREV_CHUNK_ALT, "prev_chunk", "Prev chunk", show=False),
+        Binding(KEY_NEXT_WEEK, "next_week", "Next week", show=False),
+        Binding(KEY_NEXT_WEEK_ALT, "next_week", "Next week", show=False),
+        Binding(KEY_PREV_WEEK, "prev_week", "Prev week", show=False),
+        Binding(KEY_PREV_WEEK_ALT, "prev_week", "Prev week", show=False),
         Binding(KEY_NEW, "new_event", "New"),
         Binding(KEY_EDIT, "edit_event", "Edit"),
         Binding(KEY_OPEN, "open_event", "Open", show=False),
@@ -155,12 +154,12 @@ __all__ = [
     "KEY_EDIT",
     "KEY_HELP",
     "KEY_NEW",
-    "KEY_NEXT_CHUNK",
-    "KEY_NEXT_CHUNK_ALT",
+    "KEY_NEXT_WEEK",
+    "KEY_NEXT_WEEK_ALT",
     "KEY_NEXT_DAY",
     "KEY_OPEN",
-    "KEY_PREV_CHUNK",
-    "KEY_PREV_CHUNK_ALT",
+    "KEY_PREV_WEEK",
+    "KEY_PREV_WEEK_ALT",
     "KEY_PREV_DAY",
     "KEY_QUIT",
     "KEY_QUIT_ALT",

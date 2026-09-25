@@ -1056,9 +1056,8 @@ class TodayKeyTest(TuiFlowTestCase):
 
 
 class DateNavigationTest(TuiFlowTestCase):
-    """`n` / `p` shift the viewed date by one day in Day / Grid views.
-    `N` / `P` shift by the grid's chunk size — Grid view only. All
-    four are no-ops in Agenda."""
+    """`n` / `p` step the viewed date by the view's natural unit;
+    `N` / `P` shift it by a week in every view."""
 
     async def test_n_advances_one_day_in_day_view(self) -> None:
         services = self.services()
@@ -1088,53 +1087,26 @@ class DateNavigationTest(TuiFlowTestCase):
             await pilot.pause()
             self.assertEqual(screen._viewed_date, start - timedelta(days=1))
 
-    async def test_capital_n_advances_one_chunk_in_grid_view(self) -> None:
-        services = self.services()
-        app = ChronosApp(services)
+    async def _week_step(self, span_key: str, key: str) -> timedelta:
+        app = ChronosApp(self.services())
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
             assert isinstance(screen, MainScreen)
-            await pilot.press("4")
+            await pilot.press(span_key)
             await pilot.pause()
             start = screen._viewed_date
-            await pilot.press("N")
+            await pilot.press(key)
             await pilot.pause()
-            self.assertEqual(
-                screen._viewed_date, start + timedelta(days=screen._grid_days)
-            )
+            return screen._viewed_date - start
 
-    async def test_capital_p_retreats_one_chunk_in_grid_view(self) -> None:
-        services = self.services()
-        app = ChronosApp(services)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            await pilot.press("4")
-            await pilot.pause()
-            start = screen._viewed_date
-            await pilot.press("P")
-            await pilot.pause()
-            self.assertEqual(
-                screen._viewed_date, start - timedelta(days=screen._grid_days)
-            )
-
-    async def test_capital_n_in_day_view_is_a_noop(self) -> None:
-        # Day view has no chunk concept — capital N/P only act in
-        # Grid. `n`/`p` (lowercase) still work in Day.
-        services = self.services()
-        app = ChronosApp(services)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            screen = pilot.app.screen
-            assert isinstance(screen, MainScreen)
-            await pilot.press("1")
-            await pilot.pause()
-            start = screen._viewed_date
-            await pilot.press("N")
-            await pilot.pause()
-            self.assertEqual(screen._viewed_date, start)
+    async def test_capital_n_and_p_move_a_week_in_every_view(self) -> None:
+        # Agenda (`a`), Day (`1`), and grids of any width all step by 7
+        # days — not by the grid's width.
+        for span_key in ("a", "1", "3", "7"):
+            with self.subTest(view=span_key):
+                self.assertEqual(await self._week_step(span_key, "N"), timedelta(7))
+                self.assertEqual(await self._week_step(span_key, "P"), timedelta(-7))
 
     async def test_n_in_agenda_day_window_advances_one_day(self) -> None:
         services = self.services()

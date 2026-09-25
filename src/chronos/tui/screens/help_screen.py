@@ -44,8 +44,8 @@ _SECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
                 "today",
                 "next_day",
                 "prev_day",
-                "next_chunk",
-                "prev_chunk",
+                "next_week",
+                "prev_week",
             }
         ),
     ),

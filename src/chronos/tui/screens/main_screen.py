@@ -201,8 +201,7 @@ class MainScreen(Screen[None]):
         """Show a `days`-wide timeline (bound to the `1`–`7` keys).
 
         `1` is the dedicated single-day view; `2`–`7` size the
-        multi-day grid. The chosen width sticks, so the date-axis
-        `N`/`P` chunk navigation advances by it.
+        multi-day grid. The chosen width sticks across view switches.
         """
         if days <= 1:
             self._set_view(ViewKind.DAY)
@@ -242,16 +241,14 @@ class MainScreen(Screen[None]):
     def action_prev_day(self) -> None:
         self._step_natural(direction=-1)
 
-    def action_next_chunk(self) -> None:
-        if self._view != ViewKind.GRID:
-            return
-        self._viewed_date = self._viewed_date + timedelta(days=self._grid_days)
+    def action_next_week(self) -> None:
+        """Shift the viewed date a week forward (`N`), in every view."""
+        self._viewed_date = self._viewed_date + timedelta(days=7)
         self.refresh_view()
 
-    def action_prev_chunk(self) -> None:
-        if self._view != ViewKind.GRID:
-            return
-        self._viewed_date = self._viewed_date - timedelta(days=self._grid_days)
+    def action_prev_week(self) -> None:
+        """Shift the viewed date a week back (`P`), in every view."""
+        self._viewed_date = self._viewed_date - timedelta(days=7)
         self.refresh_view()
 
     def _step_natural(self, *, direction: int) -> None:
